@@ -81,7 +81,7 @@ from outmem.index import (
     index_page_text,
 )
 from outmem.search import DEFAULT_RESULT_BYTES, SearchResult, rg_available, search
-from outmem.slug import validate_slug
+from outmem.slug import PAGES_DIR, slug_to_relpath, validate_slug
 from outmem.sources import (
     SOURCES_DIR,
     IngestionRecord,
@@ -234,6 +234,7 @@ class WikiStore:
         self.config = config
         self.root = Path(config.root)
         self.wiki_path = self.root / config.wiki_dir
+        self.pages_path = self.wiki_path / PAGES_DIR
         self.raw_path = self.root / config.raw_dir
         self.log_path = self.root / config.log_dir
         self.sources_path = self.wiki_path / SOURCES_DIR
@@ -243,6 +244,7 @@ class WikiStore:
         self.backlinks_cache = BacklinkCache(
             state=self.state,
             wiki_dir=self.wiki_path,
+            pages_dir=self.pages_path,
             read_only=config.read_only,
         )
         self._contributors: Contributors | None = None
@@ -362,14 +364,18 @@ class WikiStore:
     # ------------------------------------------------------------------
 
     def read(self, slug: str) -> WikiPage:
-        """Load ``wiki/<slug>.md`` into a :class:`WikiPage`.
+        """Load the wiki page for ``slug`` into a :class:`WikiPage`.
+
+        The on-disk path is ``wiki/pages/<slug-as-relpath>.md`` (see
+        :func:`outmem.slug.slug_to_relpath`). The auto-generated index
+        lives at ``wiki/index.md`` and is fetched via the special
+        ``index`` slug.
 
         Raises :class:`OutmemError` if the page does not exist;
         :class:`outmem.exceptions.FrontmatterError` if frontmatter is
         missing or malformed.
         """
-        validate_slug(slug)
-        path = self.wiki_path / f"{slug}.md"
+        path = self._page_path(slug)
         if not path.exists():
             raise OutmemError(f"No such wiki page: {slug}")
         text = path.read_text(encoding="utf-8")
@@ -378,21 +384,24 @@ class WikiStore:
 
     def exists(self, slug: str) -> bool:
         try:
-            validate_slug(slug)
+            return self._page_path(slug).exists()
         except SlugError:
             return False
-        return (self.wiki_path / f"{slug}.md").exists()
 
     def list_slugs(self) -> list[str]:
-        """Every editorial slug in ``wiki/``, alphabetically.
+        """Every editorial slug under ``wiki/pages/``, alphabetically.
 
         The auto-generated ``index`` slug is hidden — it's structural,
         not content. Consumers who need to read it can still call
         ``read("index")`` directly.
         """
-        if not self.wiki_path.is_dir():
+        if not self.pages_path.is_dir():
             return []
-        return [p.stem for p in editorial_pages(self.wiki_path)]
+        from outmem.slug import relpath_to_slug
+        return sorted(
+            relpath_to_slug(p.relative_to(self.pages_path))
+            for p in editorial_pages(self.pages_path)
+        )
 
     def search(
         self,
@@ -427,6 +436,7 @@ class WikiStore:
 
     def history(self, slug: str) -> list[CommitInfo]:
         """Per-page commit history (newest first), tracking renames."""
+        validate_slug(slug)
         return page_history(self.root, slug, wiki_dir=self.config.wiki_dir)
 
     def evolution(
@@ -492,20 +502,22 @@ class WikiStore:
         extra: dict[str, Any] | None = None,
         commit_subject: str | None = None,
     ) -> str:
-        """Create a new ``wiki/<slug>.md`` and commit it.
+        """Create a new wiki page (under ``wiki/pages/``) and commit it.
 
-        Frontmatter is built per spec v0.5 §4 (no ``authority`` field).
+        The on-disk path is derived from the slug by
+        :func:`outmem.slug.slug_to_relpath` (``:`` → ``/``,
+        appending ``.md``). Frontmatter is built per spec v0.5 §4.
         The commit message defaults to ``compact: <slug>`` (TARS Retained
         depends on the prefix grammar — see spec §9).
         ``wiki/index.md`` is regenerated and staged in the same commit.
         """
-        validate_slug(slug)
         if slug == INDEX_SLUG:
             raise OutmemError(
                 "Cannot write to the reserved 'index' slug — `wiki/index.md` "
                 "is auto-maintained by outmem on every page write."
             )
-        if self.exists(slug):
+        page_path = self._page_path(slug)
+        if page_path.exists():
             raise OutmemError(f"Page already exists: {slug}. Use extend_page() to edit it.")
         now = utc_now()
         frontmatter = WikiFrontmatter(
@@ -518,13 +530,12 @@ class WikiStore:
             extra=dict(extra or {}),
         )
         page_text = serialize_wiki_page(frontmatter, body)
-        page_path = self.wiki_path / f"{slug}.md"
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(page_text, encoding="utf-8")
         self._regenerate_index()
         return self._commit_paths(
             [
-                f"{self.config.wiki_dir}/{slug}.md",
+                self._page_relpath(slug),
                 f"{self.config.wiki_dir}/{INDEX_FILENAME}",
             ],
             subject=commit_subject or f"compact: {slug}",
@@ -556,7 +567,7 @@ class WikiStore:
         self._regenerate_index()
         return self._commit_paths(
             [
-                f"{self.config.wiki_dir}/{slug}.md",
+                self._page_relpath(slug),
                 f"{self.config.wiki_dir}/{INDEX_FILENAME}",
             ],
             subject=commit_subject or f"extend: {slug}",
@@ -796,9 +807,14 @@ class WikiStore:
     # ------------------------------------------------------------------
 
     def _resolve_scope(self, scope: str) -> Path:
-        """Map ``scope`` ∈ {wiki, raw, log, all} to a search root."""
+        """Map ``scope`` ∈ {wiki, raw, log, all} to a search root.
+
+        ``wiki`` scope resolves to ``wiki/pages/`` — the editorial-page
+        subtree — so ripgrep doesn't slosh through ``sources/`` or pick
+        up ``index.md`` / ``AGENTS.md``.
+        """
         if scope == "wiki":
-            return self.wiki_path
+            return self.pages_path
         if scope == "raw":
             return self.raw_path
         if scope == "log":
@@ -809,8 +825,31 @@ class WikiStore:
             f"Unknown search scope {scope!r}; expected 'wiki', 'raw', 'log', or 'all'."
         )
 
+    def _page_path(self, slug: str) -> Path:
+        """Absolute filesystem path for ``slug``.
+
+        Validates the slug as a side effect. ``index`` is special-cased
+        to ``wiki/index.md`` (the auto-generated catalog).
+        """
+        if slug == INDEX_SLUG:
+            return self.wiki_path / INDEX_FILENAME
+        validate_slug(slug)
+        return self.pages_path / slug_to_relpath(slug)
+
+    def _page_relpath(self, slug: str) -> str:
+        """Repo-relative path string for ``slug`` (for ``git add`` etc)."""
+        if slug == INDEX_SLUG:
+            return f"{self.config.wiki_dir}/{INDEX_FILENAME}"
+        return f"{self.config.wiki_dir}/{PAGES_DIR}/{slug_to_relpath(slug).as_posix()}"
+
     def _ensure_layout(self) -> None:
-        for sub in (self.wiki_path, self.raw_path, self.log_path, self.sources_path):
+        for sub in (
+            self.wiki_path,
+            self.pages_path,
+            self.raw_path,
+            self.log_path,
+            self.sources_path,
+        ):
             sub.mkdir(parents=True, exist_ok=True)
         self.state.ensure()
 
@@ -846,7 +885,7 @@ class WikiStore:
         stages ``wiki/index.md`` alongside the primary write so both
         land in the same commit.
         """
-        text = index_page_text(self.wiki_path)
+        text = index_page_text(self.pages_path)
         index_path = self.wiki_path / INDEX_FILENAME
         index_path.write_text(text, encoding="utf-8")
 

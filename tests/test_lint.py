@@ -37,8 +37,8 @@ def test_orphan_page_is_warning(tmp_path: Path) -> None:
     report = lint_wiki(store.wiki_path, log_dir=store.log_path)
     orphans = {f.path for f in report.findings if f.kind == "orphan-page"}
     # Both pages are orphans since neither references the other.
-    assert "wiki/orphan.md" in orphans
-    assert "wiki/hub.md" in orphans
+    assert "wiki/pages/orphan.md" in orphans
+    assert "wiki/pages/hub.md" in orphans
     for f in report.findings:
         if f.kind == "orphan-page":
             assert f.severity == Severity.WARNING
@@ -50,7 +50,7 @@ def test_orphan_with_log_mention_is_not_flagged(tmp_path: Path) -> None:
     store.append_log(topic="discovery", content="- found [[documented]] today")
     report = lint_wiki(store.wiki_path, log_dir=store.log_path)
     orphans = {f.path for f in report.findings if f.kind == "orphan-page"}
-    assert "wiki/documented.md" not in orphans
+    assert "wiki/pages/documented.md" not in orphans
 
 
 def test_index_is_never_flagged_as_orphan(tmp_path: Path) -> None:
@@ -119,7 +119,7 @@ def test_index_drift_detected(tmp_path: Path) -> None:
     store = WikiStore.init(tmp_path / "w")
     store.write_page("alpha", title="Alpha", body="body")
     # Now drop a file directly without using the WikiStore.
-    (store.wiki_path / "rogue.md").write_text(
+    (store.pages_path / "rogue.md").write_text(
         "---\ntitle: Rogue\nslug: rogue\n---\n\nbody\n",
         encoding="utf-8",
     )
@@ -131,7 +131,7 @@ def test_slug_filename_mismatch_is_error(tmp_path: Path) -> None:
     store = WikiStore.init(tmp_path / "w")
     store.write_page("alpha", title="Alpha", body="body")
     # Hand-edit the file to lie about its slug.
-    bad = store.wiki_path / "alpha.md"
+    bad = store.pages_path / "alpha.md"
     text = bad.read_text().replace("slug: alpha", "slug: not-alpha")
     bad.write_text(text)
     report = lint_wiki(store.wiki_path, log_dir=store.log_path)
@@ -141,7 +141,7 @@ def test_slug_filename_mismatch_is_error(tmp_path: Path) -> None:
 
 def test_invalid_frontmatter_is_error(tmp_path: Path) -> None:
     store = WikiStore.init(tmp_path / "w")
-    (store.wiki_path / "bad.md").write_text("no frontmatter at all", encoding="utf-8")
+    (store.pages_path / "bad.md").write_text("no frontmatter at all", encoding="utf-8")
     report = lint_wiki(store.wiki_path, log_dir=store.log_path)
     assert any(f.kind == "frontmatter-invalid" for f in report.findings)
 

@@ -1,6 +1,8 @@
 # The wiki page model
 
-Every `wiki/<slug>.md` file begins with YAML frontmatter:
+Every page under `wiki/pages/<slug-as-relpath>.md` begins with YAML
+frontmatter (the slug's `:` separators map to `/` on disk; e.g.
+`abx:penicillin` → `wiki/pages/abx/penicillin.md`):
 
 ```yaml
 ---

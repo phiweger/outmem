@@ -8,7 +8,7 @@ Schema (versioned in the ``meta`` table):
     -- rows: schema_version, embedding_model, embedding_dims
 
     CREATE TABLE files (
-        rel_path TEXT PRIMARY KEY,        -- "wiki/pricing-formula.md"
+        rel_path TEXT PRIMARY KEY,        -- "wiki/pages/pricing-formula.md"
         content_hash TEXT NOT NULL,        -- sha256 of the chunked body
         indexed_at TEXT NOT NULL,
         chunks_count INTEGER NOT NULL,

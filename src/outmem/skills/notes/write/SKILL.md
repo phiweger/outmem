@@ -39,9 +39,16 @@ tool call. Omitting `body=` is the most common write_page failure
 mode — the call fails validation and the model gets a single retry
 before the run errors out.
 
-Slugs are lowercase, hyphen-separated, and unique. The body should be
-a complete page — not a stub. Provenance can be repeated for multiple
-sources. The commit message becomes `compact: <slug>`.
+Slugs are one or more `:`-separated segments; each segment is
+lowercase, hyphen-separated. Flat (`pricing-formula`) or namespaced
+(`abx:penicillin`, `abx:side-effects:misc`) — the namespace becomes
+a directory on disk under `wiki/pages/`. Nest eagerly: if a parent
+topic exists (per `wiki/AGENTS.md` or the slugs already in the
+wiki), use it from the first page you write on that topic.
+
+The body should be a complete page — not a stub. Provenance can be
+repeated for multiple sources. The commit message becomes
+`compact: <slug>`.
 
 Equivalent CLI (body via stdin):
 

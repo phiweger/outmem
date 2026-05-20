@@ -9,28 +9,28 @@ from outmem.index import INDEX_FILENAME, INDEX_SLUG, index_page_text, render_ind
 from outmem.store import WikiStore
 
 
-def _make_page(wiki_dir: Path, slug: str, title: str, *, tags: list[str] | None = None) -> None:
+def _make_page(pages_dir: Path, slug: str, title: str, *, tags: list[str] | None = None) -> None:
     tags_yaml = "[]" if not tags else "[" + ", ".join(tags) + "]"
-    wiki_dir.mkdir(parents=True, exist_ok=True)
-    (wiki_dir / f"{slug}.md").write_text(
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    (pages_dir / f"{slug}.md").write_text(
         f"---\ntitle: {title}\nslug: {slug}\ntags: {tags_yaml}\n---\n\nbody\n",
         encoding="utf-8",
     )
 
 
 def test_render_index_empty(tmp_path: Path) -> None:
-    wiki = tmp_path / "wiki"
-    wiki.mkdir()
-    out = render_index(wiki)
+    pages = tmp_path / "wiki" / "pages"
+    pages.mkdir(parents=True)
+    out = render_index(pages)
     assert "no pages yet" in out
     assert "0 pages" in out
 
 
 def test_render_index_alphabetised(tmp_path: Path) -> None:
-    wiki = tmp_path / "wiki"
-    _make_page(wiki, "pricing-formula", "Pricing formula", tags=["pricing"])
-    _make_page(wiki, "acme-msa", "Acme MSA", tags=["contracts"])
-    out = render_index(wiki)
+    pages = tmp_path / "wiki" / "pages"
+    _make_page(pages, "pricing-formula", "Pricing formula", tags=["pricing"])
+    _make_page(pages, "acme-msa", "Acme MSA", tags=["contracts"])
+    out = render_index(pages)
     # acme-msa comes before pricing-formula
     acme_pos = out.index("acme-msa")
     pricing_pos = out.index("pricing-formula")
@@ -41,27 +41,28 @@ def test_render_index_alphabetised(tmp_path: Path) -> None:
 
 
 def test_render_index_excludes_itself(tmp_path: Path) -> None:
-    wiki = tmp_path / "wiki"
-    _make_page(wiki, "alpha", "Alpha")
-    # Pre-existing index.md should not appear in its own listing.
-    (wiki / INDEX_FILENAME).write_text("stale", encoding="utf-8")
-    out = render_index(wiki)
+    pages = tmp_path / "wiki" / "pages"
+    _make_page(pages, "alpha", "Alpha")
+    # Pre-existing index.md sits at the wiki root, not under pages/, so it
+    # can't accidentally appear in its own listing.
+    (pages.parent / INDEX_FILENAME).write_text("stale", encoding="utf-8")
+    out = render_index(pages)
     assert "[[index]]" not in out
 
 
 def test_render_index_skips_malformed_pages(tmp_path: Path) -> None:
-    wiki = tmp_path / "wiki"
-    _make_page(wiki, "alpha", "Alpha")
-    (wiki / "broken.md").write_text("no frontmatter here", encoding="utf-8")
-    out = render_index(wiki)
+    pages = tmp_path / "wiki" / "pages"
+    _make_page(pages, "alpha", "Alpha")
+    (pages / "broken.md").write_text("no frontmatter here", encoding="utf-8")
+    out = render_index(pages)
     assert "[[alpha]]" in out
     assert "[[broken]]" not in out
 
 
 def test_index_page_text_round_trips(tmp_path: Path) -> None:
-    wiki = tmp_path / "wiki"
-    _make_page(wiki, "alpha", "Alpha")
-    text = index_page_text(wiki)
+    pages = tmp_path / "wiki" / "pages"
+    _make_page(pages, "alpha", "Alpha")
+    text = index_page_text(pages)
     fm, body = parse_wiki_page(text)
     assert fm.slug == INDEX_SLUG
     assert fm.extra.get("generated") is True
@@ -111,7 +112,7 @@ def test_extend_page_refreshes_index(tmp_path: Path) -> None:
         check=True,
     ).stdout
     files = {line.strip() for line in out.splitlines() if line.strip()}
-    assert "wiki/alpha.md" in files
+    assert "wiki/pages/alpha.md" in files
     assert "wiki/index.md" in files
 
 
@@ -166,9 +167,9 @@ def test_rebuild_index_after_manual_edit_picks_up_new_page(tmp_path: Path) -> No
         extra={},
     )
     page = serialize_wiki_page(fm, "Body added by hand.\n")
-    (store.wiki_path / "manual.md").write_text(page, encoding="utf-8")
+    (store.pages_path / "manual.md").write_text(page, encoding="utf-8")
     # Commit the manual edit so the workspace is clean before rebuild.
-    add(store.root, ["wiki/manual.md"])
+    add(store.root, ["wiki/pages/manual.md"])
     commit_as(
         store.root,
         message="manual edit",
@@ -215,10 +216,10 @@ def test_rebuild_index_no_commit_leaves_dirty_tree(tmp_path: Path) -> None:
         tags=[],
         extra={},
     )
-    (store.wiki_path / "manual.md").write_text(
+    (store.pages_path / "manual.md").write_text(
         serialize_wiki_page(fm, "body\n"), encoding="utf-8"
     )
-    add(store.root, ["wiki/manual.md"])
+    add(store.root, ["wiki/pages/manual.md"])
     commit_as(
         store.root,
         message="manual edit",

@@ -68,5 +68,5 @@ outmem ask "what is our pricing formula and where does it come from?"
 - Commit subjects in `git log` follow the `compact:` / `extend:` /
   `log:` grammar — `git log --grep='^compact:' | wc -l` is the TARS
   *Retained* signal in raw form.
-- `wiki/pricing-formula.md` has a YAML frontmatter block; the
+- `wiki/pages/pricing-formula.md` has a YAML frontmatter block; the
   `provenance` field carries a path back into `raw/`.

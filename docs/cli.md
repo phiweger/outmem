@@ -111,9 +111,9 @@ outmem import /path/to/vault --force   # overwrite an existing non-empty wiki
 
 Recursively imports every `*.md` under the source directory; hidden
 dirs (`.obsidian/`, `.git/`, `.trash/`, …) are skipped automatically.
-Each note becomes `wiki/<slug>.md` with frontmatter generated from
-the file (H1 → `title`, mtime → `created`/`updated`, vault path →
-`provenance`). Wikilinks `[[Note Name]]` are rewritten to
+Each note becomes `wiki/pages/<slug-as-relpath>.md` with frontmatter
+generated from the file (H1 → `title`, mtime → `created`/`updated`,
+vault path → `provenance`). Wikilinks `[[Note Name]]` are rewritten to
 `[[note-slug|Note Name]]` — display preserved, slug machine-resolvable.
 
 Slug collisions across the flat namespace are resolved deterministically
@@ -163,7 +163,7 @@ outmem similar --slug pricing-formula             # use a page body, exclude its
 outmem similar --stdin                            # query on stdin
 outmem reindex                                    # walk wiki + sources, skip-if-unchanged
 outmem reindex --force                            # rebuild from scratch
-outmem reindex --path wiki/foo.md                 # specific files
+outmem reindex --path wiki/pages/foo.md           # specific files
 ```
 
 Set `semantic.enabled: true` in `config.yaml` first. Detailed

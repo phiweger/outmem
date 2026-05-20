@@ -98,23 +98,32 @@ outmem maintains four directories under one wiki root:
 | Directory   | Tracked in git | Who writes | What lives there |
 |-------------|----------------|------------|------------------|
 | `raw/`      | no             | upstream ingestion pipeline | plain-text/markdown source material |
-| `wiki/`     | **yes**        | agent + humans (via Obsidian) | compiled knowledge, one concept per file, YAML frontmatter + `[[wikilinks]]` |
+| `wiki/pages/` | **yes**      | agent + humans (via Obsidian) | compiled knowledge, one concept per file, nested as deeply as the slug demands, YAML frontmatter + `[[wikilinks]]` |
+| `wiki/sources/` | **yes**    | `outmem ingest` | ingested source documents, content-addressed under `[<into>/]<sha256[:12]>/<filename>` |
 | `log/`      | **yes**        | agent + humans | dated decision / observation trail |
 | `.outmem/`  | no (auto-gitignored) | outmem | non-git state (backlinks cache, last-run marker) |
 
-Plus two special wiki-root files:
+Plus three special wiki-root files:
 
 - **`wiki/AGENTS.md`** — user-editable conventions doc loaded into the
   agent's system prompt every turn. Your customization layer for
-  domain, page structure, source-handling preferences.
+  domain, page structure, source-handling preferences. The agent
+  reads this to know which namespaces exist and what belongs where.
 - **`wiki/index.md`** — auto-maintained slug list, regenerated on
   every write.
+- **`wiki/CONTRIBUTORS.md`** — known team identities, used by phase-1
+  steering.
+
+Slugs are `:`-delimited: `pricing-formula` is flat, `abx:penicillin`
+maps to `wiki/pages/abx/penicillin.md`, `abx:side-effects:misc` to
+`wiki/pages/abx/side-effects/misc.md`. Wikilinks carry the same slug:
+`[[abx:penicillin]]`.
 
 The agent's loop per turn:
 
 1. **Orient** — read recent human commits (steering signal); choose
    *convergence* (look up a fact) or *expansion* (walk history).
-2. **Retrieve** — cheapest tool first: `rg wiki/`, then `rg raw/`,
+2. **Retrieve** — cheapest tool first: `rg wiki/pages/`, then `rg raw/`,
    then `git log -p --follow` for the expansion path.
 3. **Compact** — produce at least one commit before responding
    (`compact:` for new pages, `extend:` for edits, `log:` for
@@ -187,7 +196,7 @@ collision handling and `--force` semantics.
 
 ### Edit wiki files manually (Obsidian, vim, VS Code)
 
-Edit `wiki/*.md` however you like — outmem keeps the agent happy
+Edit `wiki/pages/**/*.md` however you like — outmem keeps the agent happy
 as long as you commit through git. Install the pre-commit hook once
 so the auto-maintained `wiki/index.md` and the semantic vector DB
 stay in lockstep with your edits:
@@ -215,7 +224,10 @@ plain `git`) interoperates.
 
 ## Wiki page format
 
-Every `wiki/<slug>.md` opens with YAML frontmatter:
+Every page under `wiki/pages/<slug-as-relpath>.md` opens with YAML
+frontmatter. Slugs are flat (`pricing-formula`) or namespaced
+(`abx:penicillin`, `abx:side-effects:misc`); each `:` becomes a
+directory under `wiki/pages/`. Example frontmatter:
 
 ```yaml
 ---
@@ -239,7 +251,8 @@ See also [[acme-msa]] for the Acme exception.
 ingestion metadata. There's no `authority` field — anyone (human or
 agent) may edit any page; "who wrote what" is reconstructed from
 `git log` / `git blame`. Wikilinks (`[[slug]]`) resolve to
-`wiki/<slug>.md`.
+the corresponding page under `wiki/pages/`. Both flat and namespaced
+slugs are valid wikilink targets.
 
 Full schema: [docs/python-api.md](docs/python-api.md#writing--three-paths).
 

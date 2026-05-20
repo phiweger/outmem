@@ -10,8 +10,9 @@ makes against ``git log``. Two functions land in v0.1:
   planning prompt phase 2. Returns the raw ``git log -p --follow``
   stream so the agent can read the diff sequence as-is.
 
-Both treat ``wiki/<slug>.md`` paths uniformly and let the caller
-supplement with additional paths (typically ``log/`` for evolution).
+Both translate slugs to ``wiki/pages/<slug-as-relpath>`` and let the
+caller supplement with additional paths (typically ``log/`` for
+evolution).
 """
 
 from __future__ import annotations
@@ -20,17 +21,22 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from outmem.git_ops import CommitInfo, log_for_paths, log_since
-from outmem.slug import validate_slug
+from outmem.slug import PAGES_DIR, slug_to_relpath, validate_slug
+
+
+def _slug_relpath(wiki_dir: str, slug: str) -> str:
+    """Repo-relative path string for ``slug`` under ``wiki_dir/pages/``."""
+    return f"{wiki_dir}/{PAGES_DIR}/{slug_to_relpath(slug).as_posix()}"
 
 
 def page_history(repo_path: Path, slug: str, *, wiki_dir: str = "wiki") -> list[CommitInfo]:
-    """List every commit that touched ``wiki/<slug>.md``, newest first.
+    """List every commit that touched the page for ``slug``, newest first.
 
     Uses ``--follow`` so renames are tracked. The slug is validated for
     safety before becoming a path component.
     """
     validate_slug(slug)
-    return log_since(repo_path, paths=[f"{wiki_dir}/{slug}.md"])
+    return log_since(repo_path, paths=[_slug_relpath(wiki_dir, slug)])
 
 
 def topic_evolution(
@@ -57,7 +63,7 @@ def topic_evolution(
     paths: list[str] = []
     for slug in slugs:
         validate_slug(slug)
-        paths.append(f"{wiki_dir}/{slug}.md")
+        paths.append(_slug_relpath(wiki_dir, slug))
     if include_log:
         paths.append(f"{log_dir}/")
 

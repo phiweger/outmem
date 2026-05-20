@@ -145,7 +145,7 @@ class TestAskApprovalGate:
 
         assert result.response == "Wrote pricing-formula."
         assert any("compact: pricing-formula" in c.subject for c in result.commits)
-        assert "wiki/pricing-formula.md" in _committed_paths_for_head(wiki_approval_on.root)
+        assert "wiki/pages/pricing-formula.md" in _committed_paths_for_head(wiki_approval_on.root)
         # The reviewer saw the proposed call.
         assert reviewer.calls and reviewer.calls[0][0] == "write_page"
 
@@ -189,7 +189,7 @@ class TestAskApprovalGate:
             include_steering=False,
         )
 
-        body = (wiki_approval_on.wiki_path / "pricing-formula.md").read_text(
+        body = (wiki_approval_on.pages_path / "pricing-formula.md").read_text(
             encoding="utf-8"
         )
         assert "cost-plus 35% (corrected by reviewer)." in body

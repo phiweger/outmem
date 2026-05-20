@@ -327,8 +327,8 @@ def test_cli_ingest_with_agent(
     )
     assert rc == 0
 
-    # Agent's write produced wiki/cat-doses.md.
-    assert (store.wiki_path / "cat-doses.md").exists()
+    # Agent's write produced wiki/pages/cat-doses.md.
+    assert (store.pages_path / "cat-doses.md").exists()
 
     # Ingestion was recorded against the source.
     reg = SourceRegistry.load(store.sources_path)

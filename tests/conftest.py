@@ -65,13 +65,13 @@ def populated_repo(git_repo: Path) -> Path:
 
     Layout::
 
-        wiki/pricing-formula.md      (1 commit by alice, 1 by agent)
-        wiki/acme-msa.md             (1 commit by bob)
-        log/2026-05-04.md            (1 commit by agent)
+        wiki/pages/pricing-formula.md  (1 commit by alice, 1 by agent)
+        wiki/pages/acme-msa.md         (1 commit by bob)
+        log/2026-05-04.md              (1 commit by agent)
     """
     _commit(
         git_repo,
-        file="wiki/pricing-formula.md",
+        file="wiki/pages/pricing-formula.md",
         content="---\ntitle: Pricing formula\nslug: pricing-formula\n---\n\nv1.\n",
         message="compact: pricing-formula",
         author_name="Alice",
@@ -80,7 +80,7 @@ def populated_repo(git_repo: Path) -> Path:
     v2 = "---\ntitle: Pricing formula\nslug: pricing-formula\n---\n\nv2 with clarification.\n"
     _commit(
         git_repo,
-        file="wiki/pricing-formula.md",
+        file="wiki/pages/pricing-formula.md",
         content=v2,
         message="extend: pricing-formula",
         author_name="outmem agent",
@@ -88,7 +88,7 @@ def populated_repo(git_repo: Path) -> Path:
     )
     _commit(
         git_repo,
-        file="wiki/acme-msa.md",
+        file="wiki/pages/acme-msa.md",
         content="---\ntitle: Acme MSA\nslug: acme-msa\n---\n\nContract notes.\n",
         message="compact: acme-msa",
         author_name="Bob",

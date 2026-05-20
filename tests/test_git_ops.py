@@ -129,7 +129,7 @@ class TestLogSince:
         assert subjects[-1] == "compact: pricing-formula"
 
     def test_paths_filter(self, populated_repo: Path) -> None:
-        log = log_since(populated_repo, paths=["wiki/pricing-formula.md"])
+        log = log_since(populated_repo, paths=["wiki/pages/pricing-formula.md"])
         assert len(log) == 2
         assert all("pricing-formula" in c.subject for c in log)
 
@@ -154,7 +154,7 @@ class TestLogForPaths:
     def test_with_patch_includes_diff(self, populated_repo: Path) -> None:
         out = log_for_paths(
             populated_repo,
-            ["wiki/pricing-formula.md"],
+            ["wiki/pages/pricing-formula.md"],
             follow=True,
             with_patch=True,
         )
@@ -164,7 +164,7 @@ class TestLogForPaths:
     def test_without_patch_omits_diff(self, populated_repo: Path) -> None:
         out = log_for_paths(
             populated_repo,
-            ["wiki/pricing-formula.md"],
+            ["wiki/pages/pricing-formula.md"],
             follow=True,
             with_patch=False,
         )
@@ -219,10 +219,10 @@ class TestPushPull:
         )
 
         # Repo A adds another commit and pushes.
-        (populated_repo / "wiki/new-page.md").write_text(
+        (populated_repo / "wiki/pages/new-page.md").write_text(
             "---\ntitle: New page\nslug: new-page\n---\n\nbody\n"
         )
-        add(populated_repo, ["wiki/new-page.md"])
+        add(populated_repo, ["wiki/pages/new-page.md"])
         commit_as(
             populated_repo,
             message="compact: new-page",
@@ -233,7 +233,7 @@ class TestPushPull:
 
         # Repo B does a pull --rebase and should now see the new commit.
         pull_rebase(clone, remote="origin", branch="main")
-        assert (clone / "wiki/new-page.md").exists()
+        assert (clone / "wiki/pages/new-page.md").exists()
 
 
 class TestLogRange:

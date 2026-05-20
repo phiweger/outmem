@@ -1,9 +1,9 @@
-"""``outmem import`` — bring an existing markdown vault into ``wiki/``.
+"""``outmem import`` — bring an existing markdown vault into ``wiki/pages/``.
 
 The vault — typically an Obsidian directory tree — is recursively scanned
-for ``*.md`` files. Each note becomes ``wiki/<slug>.md`` with generated
-frontmatter; wikilinks are rewritten so they target the new flat slug
-namespace; the whole import lands in one ``import: <vault-name>`` commit.
+for ``*.md`` files. Each note becomes ``wiki/pages/<slug-as-relpath>.md``
+with generated frontmatter; wikilinks are rewritten so they target outmem
+slugs; the whole import lands in one ``import: <vault-name>`` commit.
 
 Public entry point: :func:`import_vault`. The CLI subcommand
 ``outmem import <dir>`` is a thin wrapper.
@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 from outmem.exceptions import OutmemError
 from outmem.frontmatter import WikiFrontmatter, serialize_wiki_page
 from outmem.index import editorial_pages
-from outmem.slug import validate_slug
+from outmem.slug import PAGES_DIR, slug_to_relpath, validate_slug
 
 if TYPE_CHECKING:
     from outmem.store import WikiStore
@@ -89,7 +89,7 @@ def import_vault(
     if not source.is_dir():
         raise OutmemError(f"import source is not a directory: {source}")
 
-    existing = editorial_pages(store.wiki_path)
+    existing = editorial_pages(store.pages_path)
     if existing and not force:
         raise OutmemError(
             f"target wiki already has {len(existing)} page(s); "
@@ -126,10 +126,12 @@ def import_vault(
             provenance=[{"path": str(c.rel_source), "source": "obsidian-import"}],
         )
         rendered = serialize_wiki_page(frontmatter, rewritten_body)
-        dest = store.wiki_path / f"{c.slug}.md"
+        dest = store.pages_path / slug_to_relpath(c.slug)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(rendered, encoding="utf-8")
-        written.append(f"{store.config.wiki_dir}/{c.slug}.md")
+        written.append(
+            f"{store.config.wiki_dir}/{PAGES_DIR}/{slug_to_relpath(c.slug).as_posix()}"
+        )
 
         if c.slug != _slugify(c.rel_source.stem):
             collisions.append((str(c.rel_source), c.slug))

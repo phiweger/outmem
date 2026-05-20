@@ -30,7 +30,7 @@ from typing import Any
 
 from outmem.frontmatter import ProvenanceEntry, parse_wiki_page
 from outmem.index import INDEX_FILENAME, INDEX_SLUG, editorial_pages, render_index
-from outmem.slug import extract_wikilinks
+from outmem.slug import PAGES_DIR, extract_wikilinks, relpath_to_slug
 
 
 class Severity(StrEnum):
@@ -103,12 +103,13 @@ def lint_wiki(
         )
         return report
 
-    pages = _load_pages(wiki_dir, report)
+    pages_dir = wiki_dir / PAGES_DIR
+    pages = _load_pages(wiki_dir, pages_dir, report)
 
-    _check_wikilinks(pages, wiki_dir, report)
+    _check_wikilinks(pages, report)
     _check_provenance(pages, raw_dir=raw_dir, sources_dir=sources_dir, report=report)
     _check_orphans(pages, log_dir=log_dir, report=report)
-    _check_index_drift(wiki_dir, report)
+    _check_index_drift(wiki_dir, pages_dir, report)
 
     return report
 
@@ -129,11 +130,14 @@ class _LoadedPage:
     generated: bool
 
 
-def _load_pages(wiki_dir: Path, report: LintReport) -> dict[str, _LoadedPage]:
-    """Parse every ``wiki/*.md`` (excluding the auto-managed reserved files)."""
+def _load_pages(
+    wiki_dir: Path, pages_dir: Path, report: LintReport
+) -> dict[str, _LoadedPage]:
+    """Parse every ``wiki/pages/**/*.md``."""
     pages: dict[str, _LoadedPage] = {}
-    for path in editorial_pages(wiki_dir):
-        rel = f"{wiki_dir.name}/{path.name}"
+    for path in editorial_pages(pages_dir):
+        expected_slug = relpath_to_slug(path.relative_to(pages_dir))
+        rel = f"{wiki_dir.name}/{PAGES_DIR}/{path.relative_to(pages_dir).as_posix()}"
         try:
             frontmatter, body = parse_wiki_page(path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -146,7 +150,7 @@ def _load_pages(wiki_dir: Path, report: LintReport) -> dict[str, _LoadedPage]:
                 )
             )
             continue
-        if frontmatter.slug != path.stem:
+        if frontmatter.slug != expected_slug:
             report.findings.append(
                 LintFinding(
                     kind="slug-filename-mismatch",
@@ -154,7 +158,7 @@ def _load_pages(wiki_dir: Path, report: LintReport) -> dict[str, _LoadedPage]:
                     path=rel,
                     message=(
                         f"frontmatter slug {frontmatter.slug!r} does not "
-                        f"match filename stem {path.stem!r}"
+                        f"match path-derived slug {expected_slug!r}"
                     ),
                 )
             )
@@ -174,7 +178,6 @@ def _load_pages(wiki_dir: Path, report: LintReport) -> dict[str, _LoadedPage]:
 
 def _check_wikilinks(
     pages: dict[str, _LoadedPage],
-    wiki_dir: Path,
     report: LintReport,
 ) -> None:
     known = set(pages.keys())
@@ -309,7 +312,7 @@ def _scan_log_for_mentions(log_dir: Path | None, slugs: Iterable[str]) -> set[st
     return mentioned
 
 
-def _check_index_drift(wiki_dir: Path, report: LintReport) -> None:
+def _check_index_drift(wiki_dir: Path, pages_dir: Path, report: LintReport) -> None:
     """Flag if ``wiki/index.md`` is out of sync with the page set.
 
     Compares the body (post-frontmatter) of the on-disk index against
@@ -319,7 +322,7 @@ def _check_index_drift(wiki_dir: Path, report: LintReport) -> None:
     """
     on_disk = wiki_dir / INDEX_FILENAME
     if not on_disk.exists():
-        if any(wiki_dir.glob("*.md")):
+        if pages_dir.is_dir() and any(pages_dir.rglob("*.md")):
             # Pages exist but no index — drift.
             report.findings.append(
                 LintFinding(
@@ -355,7 +358,7 @@ def _check_index_drift(wiki_dir: Path, report: LintReport) -> None:
         )
         return
 
-    expected = render_index(wiki_dir)
+    expected = render_index(pages_dir)
     if _normalize(on_disk_body) != _normalize(expected):
         report.findings.append(
             LintFinding(

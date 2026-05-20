@@ -99,13 +99,13 @@ def test_import_produces_correct_slugs_and_titles(
     assert summary.pages_imported == 4
 
     pricing = parse_wiki_page(
-        (store.wiki_path / "pricing-formula.md").read_text(encoding="utf-8")
+        (store.pages_path / "pricing-formula.md").read_text(encoding="utf-8")
     )
     assert pricing[0].slug == "pricing-formula"
     assert pricing[0].title == "Pricing formula"  # from the H1
 
     acme = parse_wiki_page(
-        (store.wiki_path / "acme-msa.md").read_text(encoding="utf-8")
+        (store.pages_path / "acme-msa.md").read_text(encoding="utf-8")
     )
     assert acme[0].slug == "acme-msa"
     assert acme[0].title == "Acme MSA"
@@ -117,7 +117,7 @@ def test_import_resolves_slug_collisions_with_parent_prefix(
     """Two ``alpha.md`` files under different parents — the second one
     gets prefixed so the flat slug namespace stays unique."""
     summary = import_vault(store, vault)
-    slugs = {p.stem for p in store.wiki_path.glob("*.md") if p.name != "index.md"}
+    slugs = {p.stem for p in store.pages_path.glob("*.md") if p.name != "index.md"}
     assert "alpha" in slugs  # one of them wins the bare slug
     assert "clients-alpha" in slugs or "projects-alpha" in slugs
     assert len(summary.slug_collisions) == 1
@@ -129,7 +129,7 @@ def test_import_rewrites_wikilinks_to_slugs(
     """`[[Acme MSA]]` in the body becomes `[[acme-msa|Acme MSA]]` —
     display preserved, slug machine-resolvable."""
     import_vault(store, vault)
-    body = (store.wiki_path / "pricing-formula.md").read_text(encoding="utf-8")
+    body = (store.pages_path / "pricing-formula.md").read_text(encoding="utf-8")
     assert "[[acme-msa|Acme MSA]]" in body
     assert "[[Acme MSA]]" not in body
 
@@ -139,7 +139,7 @@ def test_import_writes_provenance(store: WikiStore, vault: Path) -> None:
     original vault-relative path."""
     import_vault(store, vault)
     pricing, _ = parse_wiki_page(
-        (store.wiki_path / "pricing-formula.md").read_text(encoding="utf-8")
+        (store.pages_path / "pricing-formula.md").read_text(encoding="utf-8")
     )
     assert pricing.provenance == [
         {"path": "Pricing Formula.md", "source": "obsidian-import"}
@@ -168,7 +168,7 @@ def test_import_creates_single_commit(store: WikiStore, vault: Path) -> None:
 def test_import_skips_hidden_dirs(store: WikiStore, vault: Path) -> None:
     """`.obsidian/`, `.git/`, etc. are not imported."""
     import_vault(store, vault)
-    slugs = {p.stem for p in store.wiki_path.glob("*.md") if p.name != "index.md"}
+    slugs = {p.stem for p in store.pages_path.glob("*.md") if p.name != "index.md"}
     assert "workspace" not in slugs
 
 
@@ -189,7 +189,7 @@ def test_import_force_clobbers_existing(store: WikiStore, vault: Path) -> None:
         encoding="utf-8",
     )
     import_vault(store, vault, force=True)
-    body = (store.wiki_path / "pricing-formula.md").read_text(encoding="utf-8")
+    body = (store.pages_path / "pricing-formula.md").read_text(encoding="utf-8")
     assert "Revised: cost-plus 40%" in body
 
 
@@ -218,7 +218,7 @@ def test_import_unresolved_wikilink_left_alone(
         "See [[Missing Note]] for context.\n", encoding="utf-8"
     )
     summary = import_vault(store, v)
-    body = (store.wiki_path / "note.md").read_text(encoding="utf-8")
+    body = (store.pages_path / "note.md").read_text(encoding="utf-8")
     assert "[[Missing Note]]" in body
     assert summary.wikilinks_unresolved == 1
     assert summary.wikilinks_rewritten == 0

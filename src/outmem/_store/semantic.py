@@ -15,6 +15,7 @@ from outmem.config import SEMANTIC_DISABLED_HELP
 from outmem.exceptions import OutmemError
 from outmem.frontmatter import parse_wiki_page
 from outmem.index import RESERVED_WIKI_FILES, editorial_pages
+from outmem.slug import PAGES_DIR, slug_to_relpath
 from outmem.sources import REGISTRY_FILENAME, SOURCES_DIR
 
 if TYPE_CHECKING:
@@ -69,7 +70,9 @@ def find_similar(
         threshold = settings.similarity_threshold
     vs = vector_store_or_open(store)
     exclude_rel = (
-        f"{store.config.wiki_dir}/{exclude_slug}.md" if exclude_slug else None
+        f"{store.config.wiki_dir}/{PAGES_DIR}/{slug_to_relpath(exclude_slug).as_posix()}"
+        if exclude_slug
+        else None
     )
     return vs.find_similar(
         text,
@@ -149,11 +152,11 @@ def load_for_index(store: WikiStore, rel_path: str) -> tuple[str, WikiContentKin
     - ``wiki/index.md`` (auto-generated, indexing it is just noise)
     - ``wiki/AGENTS.md`` (agent-conventions doc, not content)
     - ``wiki/sources/.sources.db`` (registry, not content)
-    - nested ``wiki/<sub>/page.md`` (the wiki is flat by spec)
     - binary or undecodable source files (logged at INFO)
-    - anything outside ``wiki/`` (raw/ and log/ are not indexed)
+    - anything outside ``wiki/pages/`` or ``wiki/sources/``
     """
     wiki_prefix = f"{store.config.wiki_dir}/"
+    pages_prefix = f"{wiki_prefix}{PAGES_DIR}/"
     sources_prefix = f"{wiki_prefix}{SOURCES_DIR}/"
 
     if any(rel_path == f"{wiki_prefix}{name}" for name in RESERVED_WIKI_FILES):
@@ -175,14 +178,7 @@ def load_for_index(store: WikiStore, rel_path: str) -> tuple[str, WikiContentKin
             return None
         return text, "source"
 
-    if rel_path.startswith(wiki_prefix) and rel_path.endswith(".md"):
-        # Wiki pages live flat at wiki/<slug>.md; the slug validator
-        # rejects slashes so nested pages can't be produced by the
-        # public API. Guard against a hand-placed nested file drifting
-        # between commit_paths and indexable_files_on_disk.
-        remainder = rel_path[len(wiki_prefix):]
-        if "/" in remainder:
-            return None
+    if rel_path.startswith(pages_prefix) and rel_path.endswith(".md"):
         try:
             raw = abs_path.read_text(encoding="utf-8")
         except OSError:
@@ -206,10 +202,10 @@ def indexable_files_on_disk(store: WikiStore) -> list[str]:
     allocation per ``reindex_all``.
     """
     rels: list[str] = []
-    if not store.wiki_path.is_dir():
-        return rels
-    for path in editorial_pages(store.wiki_path):
-        rels.append(f"{store.config.wiki_dir}/{path.name}")
+    if store.pages_path.is_dir():
+        for path in editorial_pages(store.pages_path):
+            rel = path.relative_to(store.pages_path).as_posix()
+            rels.append(f"{store.config.wiki_dir}/{PAGES_DIR}/{rel}")
     if store.sources_path.is_dir():
         for path in store.sources_path.rglob("*"):
             if not path.is_file():

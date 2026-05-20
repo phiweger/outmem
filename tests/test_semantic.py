@@ -132,7 +132,7 @@ def test_vector_store_survives_cross_thread_use(tmp_path: Path) -> None:
     import threading
 
     vs = VectorStore.open(tmp_path / ".vectors.db", embedder=make_handle())
-    vs.reindex_file("wiki/a.md", body="cross-thread cat dog mouse", kind="wiki")
+    vs.reindex_file("wiki/pages/a.md", body="cross-thread cat dog mouse", kind="wiki")
 
     results: list[object] = []
 
@@ -150,56 +150,56 @@ def test_vector_store_survives_cross_thread_use(tmp_path: Path) -> None:
 class TestVectorStoreReindex:
     def test_reindex_creates_chunks(self, vstore: VectorStore) -> None:
         body = "first paragraph.\n\nsecond paragraph.\n\nthird paragraph."
-        result = vstore.reindex_file("wiki/a.md", body=body, kind="wiki")
+        result = vstore.reindex_file("wiki/pages/a.md", body=body, kind="wiki")
         assert result.skipped is False
         assert result.chunks_added >= 1
         assert result.chunks_removed == 0
         files = vstore.list_indexed_files()
         assert len(files) == 1
-        assert files[0][0] == "wiki/a.md"
+        assert files[0][0] == "wiki/pages/a.md"
 
     def test_reindex_same_content_is_skipped(self, vstore: VectorStore) -> None:
         body = "stable body"
-        first = vstore.reindex_file("wiki/a.md", body=body, kind="wiki")
-        second = vstore.reindex_file("wiki/a.md", body=body, kind="wiki")
+        first = vstore.reindex_file("wiki/pages/a.md", body=body, kind="wiki")
+        second = vstore.reindex_file("wiki/pages/a.md", body=body, kind="wiki")
         assert first.skipped is False
         assert second.skipped is True
         assert second.embeddings_called == 0
 
     def test_reindex_new_content_replaces_chunks(self, vstore: VectorStore) -> None:
-        vstore.reindex_file("wiki/a.md", body="alpha beta", kind="wiki")
-        result = vstore.reindex_file("wiki/a.md", body="gamma delta", kind="wiki")
+        vstore.reindex_file("wiki/pages/a.md", body="alpha beta", kind="wiki")
+        result = vstore.reindex_file("wiki/pages/a.md", body="gamma delta", kind="wiki")
         assert result.skipped is False
         assert result.chunks_removed >= 1
         files = vstore.list_indexed_files()
         assert len(files) == 1  # not duplicated
 
     def test_remove_file_drops_chunks(self, vstore: VectorStore) -> None:
-        vstore.reindex_file("wiki/a.md", body="some body", kind="wiki")
-        removed = vstore.remove_file("wiki/a.md")
+        vstore.reindex_file("wiki/pages/a.md", body="some body", kind="wiki")
+        removed = vstore.remove_file("wiki/pages/a.md")
         assert removed >= 1
         assert vstore.list_indexed_files() == []
         # Re-removing is a no-op.
-        assert vstore.remove_file("wiki/a.md") == 0
+        assert vstore.remove_file("wiki/pages/a.md") == 0
 
 
 class TestVectorStoreFindSimilar:
     def test_exact_text_scores_top(self, vstore: VectorStore) -> None:
         vstore.reindex_file(
-            "wiki/a.md", body="the cat sat on the mat", kind="wiki"
+            "wiki/pages/a.md", body="the cat sat on the mat", kind="wiki"
         )
         vstore.reindex_file(
-            "wiki/b.md", body="entirely unrelated quantum mechanics", kind="wiki"
+            "wiki/pages/b.md", body="entirely unrelated quantum mechanics", kind="wiki"
         )
         matches = vstore.find_similar("the cat sat on the mat", top_k=2)
         assert matches
-        assert matches[0].rel_path == "wiki/a.md"
+        assert matches[0].rel_path == "wiki/pages/a.md"
         assert matches[0].similarity > matches[1].similarity if len(matches) > 1 else True
 
     def test_threshold_filters_results(self, vstore: VectorStore) -> None:
-        vstore.reindex_file("wiki/a.md", body="cat dog mouse", kind="wiki")
+        vstore.reindex_file("wiki/pages/a.md", body="cat dog mouse", kind="wiki")
         vstore.reindex_file(
-            "wiki/b.md", body="cosmic radiation telescope", kind="wiki"
+            "wiki/pages/b.md", body="cosmic radiation telescope", kind="wiki"
         )
         # Very high threshold — only near-perfect matches survive.
         matches = vstore.find_similar(
@@ -207,22 +207,22 @@ class TestVectorStoreFindSimilar:
         )
         assert all(m.similarity >= 0.99 for m in matches)
         assert len(matches) == 1
-        assert matches[0].rel_path == "wiki/b.md"
+        assert matches[0].rel_path == "wiki/pages/b.md"
 
     def test_exclude_rel_path_filters(self, vstore: VectorStore) -> None:
-        vstore.reindex_file("wiki/a.md", body="alpha beta gamma", kind="wiki")
-        vstore.reindex_file("wiki/b.md", body="alpha beta gamma", kind="wiki")
+        vstore.reindex_file("wiki/pages/a.md", body="alpha beta gamma", kind="wiki")
+        vstore.reindex_file("wiki/pages/b.md", body="alpha beta gamma", kind="wiki")
         matches = vstore.find_similar(
             "alpha beta gamma",
             top_k=5,
-            exclude_rel_path="wiki/a.md",
+            exclude_rel_path="wiki/pages/a.md",
         )
         rels = {m.rel_path for m in matches}
-        assert "wiki/a.md" not in rels
-        assert "wiki/b.md" in rels
+        assert "wiki/pages/a.md" not in rels
+        assert "wiki/pages/b.md" in rels
 
     def test_empty_query_returns_empty(self, vstore: VectorStore) -> None:
-        vstore.reindex_file("wiki/a.md", body="something", kind="wiki")
+        vstore.reindex_file("wiki/pages/a.md", body="something", kind="wiki")
         assert vstore.find_similar("") == []
         assert vstore.find_similar("   ") == []
 
@@ -231,10 +231,10 @@ class TestVectorStoreMeta:
     def test_reopen_preserves_data(self, tmp_path: Path) -> None:
         db = tmp_path / ".vectors.db"
         vs = VectorStore.open(db, embedder=make_handle())
-        vs.reindex_file("wiki/a.md", body="persistent body", kind="wiki")
+        vs.reindex_file("wiki/pages/a.md", body="persistent body", kind="wiki")
         vs.close()
         vs2 = VectorStore.open(db, embedder=make_handle())
-        assert {f[0] for f in vs2.list_indexed_files()} == {"wiki/a.md"}
+        assert {f[0] for f in vs2.list_indexed_files()} == {"wiki/pages/a.md"}
         vs2.close()
 
     def test_dimension_mismatch_errors(self, tmp_path: Path) -> None:
@@ -303,13 +303,13 @@ class TestVectorStoreTransactionSafety:
         # for the real EmbedderHandle goes through embed_query, not
         # embed_documents, so call #1 here is the genuine first
         # embed_documents).
-        vs.reindex_file("wiki/a.md", body="alpha content survives.", kind="wiki")
+        vs.reindex_file("wiki/pages/a.md", body="alpha content survives.", kind="wiki")
         assert vs.find_similar("alpha content survives") != []
 
         # Second reindex aborts mid-flight — the open transaction MUST
         # be rolled back, not leaked into the connection.
         with pytest.raises(RuntimeError):
-            vs.reindex_file("wiki/b.md", body="beta would-be content.", kind="wiki")
+            vs.reindex_file("wiki/pages/b.md", body="beta would-be content.", kind="wiki")
 
         # Reset the embedder so the next call works.
         underlying.embed_documents = real_embed_documents  # type: ignore[method-assign]
@@ -322,7 +322,7 @@ class TestVectorStoreTransactionSafety:
         )
 
         # And the third reindex works cleanly.
-        vs.reindex_file("wiki/c.md", body="gamma works fine now.", kind="wiki")
+        vs.reindex_file("wiki/pages/c.md", body="gamma works fine now.", kind="wiki")
         assert vs.find_similar("gamma works fine") != []
         # A is still there too.
         assert vs.find_similar("alpha content survives") != []
@@ -395,7 +395,7 @@ class TestWikiStoreSemanticIntegration:
             top_k=3,
             threshold=0.0,
         )
-        assert any(m.rel_path == "wiki/pricing-formula.md" for m in matches)
+        assert any(m.rel_path == "wiki/pages/pricing-formula.md" for m in matches)
 
     def test_extend_page_updates_index(self, wiki_with_semantic: WikiStore) -> None:
         store = wiki_with_semantic
@@ -411,13 +411,13 @@ class TestWikiStoreSemanticIntegration:
             threshold=0.0,
         )
         assert matches
-        assert matches[0].rel_path == "wiki/pricing-formula.md"
+        assert matches[0].rel_path == "wiki/pages/pricing-formula.md"
         # Old body chunks should be gone.
         from outmem._store import semantic as _semantic
 
         files = _semantic.vector_store_or_open(store).list_indexed_files()
         slugs = [f[0] for f in files]
-        assert slugs.count("wiki/pricing-formula.md") == 1
+        assert slugs.count("wiki/pages/pricing-formula.md") == 1
 
     def test_add_source_indexes_text(
         self, wiki_with_semantic: WikiStore, tmp_path: Path
@@ -511,7 +511,7 @@ class TestCliSimilar:
         )
         # rc=1 means no matches; rc=0 means matches. Either is fine
         # — what matters is `alpha` is not in the result list.
-        assert "wiki/alpha.md" not in out
+        assert "wiki/pages/alpha.md" not in out
 
     def test_similar_disabled_returns_error(self, tmp_path: Path) -> None:
         store = WikiStore.init(tmp_path / "off")
@@ -529,11 +529,11 @@ class TestCliReindex:
 
     def test_reindex_path_targets_one_file(self, wiki_with_pages: WikiStore) -> None:
         rc, out, _ = _run_cli(
-            ["reindex", "--path", "wiki/alpha.md", "--force"],
+            ["reindex", "--path", "wiki/pages/alpha.md", "--force"],
             store=wiki_with_pages,
         )
         assert rc == 0
-        assert "wiki/alpha.md" in out
+        assert "wiki/pages/alpha.md" in out
 
 
 class TestCliHook:
@@ -581,14 +581,14 @@ class TestCliReindexStaged:
     def test_staged_indexes_and_stages_db(self, wiki_with_pages: WikiStore) -> None:
         # External edit: drop a page into wiki/ without going through the
         # WikiStore. This is the Obsidian workflow.
-        external = wiki_with_pages.wiki_path / "gamma.md"
+        external = wiki_with_pages.pages_path / "gamma.md"
         external.write_text(
             "---\ntitle: Gamma\nslug: gamma\ncreated: 2026-05-13T00:00:00+00:00\n"
             "updated: 2026-05-13T00:00:00+00:00\n---\n\nGamma rays are ionising.\n",
             encoding="utf-8",
         )
         subprocess.run(
-            ["git", "add", "--", "wiki/gamma.md"],
+            ["git", "add", "--", "wiki/pages/gamma.md"],
             cwd=wiki_with_pages.root,
             check=True,
         )
@@ -605,7 +605,7 @@ class TestCliReindexStaged:
             text=True,
         ).stdout.split()
         assert ".vectors.db" in staged
-        assert "wiki/gamma.md" in staged
+        assert "wiki/pages/gamma.md" in staged
         # Manual edit added a new page → index.md must also be in the
         # commit so the slug list stays current.
         assert "wiki/index.md" in staged
@@ -616,7 +616,7 @@ class TestCliReindexStaged:
             top_k=3,
             threshold=0.0,
         )
-        assert any(m.rel_path == "wiki/gamma.md" for m in matches)
+        assert any(m.rel_path == "wiki/pages/gamma.md" for m in matches)
 
         # index.md actually mentions the new page.
         index_text = (wiki_with_pages.wiki_path / "index.md").read_text(

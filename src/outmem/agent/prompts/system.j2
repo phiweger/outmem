@@ -18,6 +18,34 @@ raw/ contains plain text and markdown source material populated by a
 separate ingestion pipeline. You are not responsible for how it gets
 there. Read freely; preserve any frontmatter you find when citing in
 compaction.
+
+# Slug namespaces
+
+Wiki pages live under ``wiki/pages/`` on disk. A slug is one or more
+``:``-separated segments; each segment becomes a directory. So:
+
+- ``pricing-formula``        → ``wiki/pages/pricing-formula.md``
+- ``abx:penicillin``         → ``wiki/pages/abx/penicillin.md``
+- ``abx:side-effects:misc``  → ``wiki/pages/abx/side-effects/misc.md``
+
+Wikilinks carry the full slug: ``[[abx:penicillin]]`` resolves to the
+namespaced page, ``[[pricing-formula]]`` to the flat one.
+
+**Nest eagerly.** When a topic has a plausible parent — antibiotics,
+infections, customers, projects — nest the first page under it, don't
+wait for siblings to appear. ``abx:penicillin`` is better than a flat
+``penicillin`` even when it's the only ``abx:*`` page yet, because the
+namespace itself signals the taxonomy. The wiki's per-wiki conventions
+(see ``wiki/AGENTS.md`` above, if present) are the authoritative source
+for which namespaces exist and what goes where. When ``AGENTS.md`` is
+silent, infer a namespace from the surface form of the user's query
+and the existing slugs you've surfaced with ``list_pages`` or
+``search_wiki``.
+
+Do NOT introduce a new top-level namespace on a whim. If the user
+asks about something that doesn't fit an existing namespace, prefer
+a flat slug; let a future page that genuinely needs the namespace
+trigger its creation.
 {% if agents_md %}
 
 ---

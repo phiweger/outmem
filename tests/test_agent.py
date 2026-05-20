@@ -422,10 +422,10 @@ def test_writeback_ignores_non_agent_commits(
         # Simulate a concurrent human commit landing during the run —
         # exactly the window the old _new_commits() function would
         # have mistaken for an agent writeback.
-        (store.root / "wiki/human-page.md").write_text(
+        (store.root / "wiki/pages/human-page.md").write_text(
             "---\ntitle: Human\nslug: human-page\n---\n\nbody\n"
         )
-        git_add(store.root, ["wiki/human-page.md"])
+        git_add(store.root, ["wiki/pages/human-page.md"])
         commit_as(
             store.root,
             message="compact: human-page",

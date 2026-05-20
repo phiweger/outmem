@@ -8,4 +8,4 @@ log/2025-06-01.md
 
 ## Alice|alice@example.com|extend: pricing-formula
 log/2026-02-10.md
-wiki/pricing-formula.md
+wiki/pages/pricing-formula.md

@@ -69,10 +69,10 @@ def router_for(
     env = _build_jinja_env()
 
     def _wiki_url(slug: str) -> str:
-        return f"{base_path}/{slug}"
+        return f"{base_path}/{slug.replace(':', '/')}"
 
     def _history_url(slug: str) -> str:
-        return f"{base_path}/{slug}/history"
+        return f"{base_path}/{slug.replace(':', '/')}/history"
 
     def _template_globals() -> dict[str, object]:
         return {
@@ -96,12 +96,15 @@ def router_for(
         return HTMLResponse(html)
 
     @router.get(
-        base_path + "/{slug}/history",
+        base_path + "/{slug:path}/history",
         response_class=HTMLResponse,
         name="wiki_history",
     )
     async def wiki_history(slug: str) -> HTMLResponse:
         _ensure_fresh()
+        # The URL path encodes the slug with ``/``; convert back to
+        # outmem's ``:``-delimited slug form before lookup.
+        slug = slug.replace("/", ":")
         try:
             commits = store.history(slug)
         except SlugError as exc:
@@ -115,12 +118,13 @@ def router_for(
         return HTMLResponse(html)
 
     @router.get(
-        base_path + "/{slug}",
+        base_path + "/{slug:path}",
         response_class=HTMLResponse,
         name="wiki_page",
     )
     async def wiki_page(slug: str) -> HTMLResponse:
         _ensure_fresh()
+        slug = slug.replace("/", ":")
         try:
             page = store.read(slug)
         except SlugError as exc:

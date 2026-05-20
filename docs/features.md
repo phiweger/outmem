@@ -49,7 +49,7 @@ outmem similar "cost-plus pricing"             # free-form query
 outmem similar --slug pricing-formula           # use page body, exclude itself
 outmem reindex                                  # full re-walk; skip if hash unchanged
 outmem reindex --force                          # rebuild from scratch
-outmem reindex --path wiki/foo.md               # one file
+outmem reindex --path wiki/pages/foo.md         # one file
 ```
 
 Switching `embedding_model` invalidates the existing DB (sqlite-vec

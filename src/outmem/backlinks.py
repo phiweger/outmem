@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from outmem.slug import extract_wikilinks
+from outmem.slug import extract_wikilinks, relpath_to_slug
 from outmem.state import BACKLINKS_FILE, OutmemState
 
 
@@ -44,10 +44,12 @@ class BacklinkCache:
         *,
         state: OutmemState,
         wiki_dir: Path,
+        pages_dir: Path,
         read_only: bool = False,
     ) -> None:
         self._state = state
         self._wiki_dir = wiki_dir
+        self._pages_dir = pages_dir
         self._read_only = read_only
         self._memo: BacklinkGraph | None = None
 
@@ -83,14 +85,14 @@ class BacklinkCache:
         return self.graph_for(head_sha).referrers(slug)
 
     def rebuild(self, head_sha: str) -> BacklinkGraph:
-        """Walk ``wiki/`` and recompute the graph from scratch.
+        """Walk ``wiki/pages/`` and recompute the graph from scratch.
 
         Writes back to ``.outmem/backlinks.json`` so the next cold
         start hits the cache. The persist is skipped when this cache
         was opened ``read_only=True`` — useful for consult-only
         consumers that must not touch the wiki's filesystem state.
         """
-        graph = _build_graph(self._wiki_dir)
+        graph = _build_graph(self._pages_dir)
         snapshot = BacklinkGraph(head=head_sha, graph=graph)
         self._memo = snapshot
         if not self._read_only:
@@ -136,8 +138,8 @@ class BacklinkCache:
         )
 
 
-def _build_graph(wiki_dir: Path) -> dict[str, tuple[str, ...]]:
-    """Inverse map of every wikilink referenced from ``wiki/*.md``.
+def _build_graph(pages_dir: Path) -> dict[str, tuple[str, ...]]:
+    """Inverse map of every wikilink referenced from ``wiki/pages/**/*.md``.
 
     Pages with frontmatter ``generated: true`` (currently just the
     auto-maintained ``index.md``) are ignored on the *source* side —
@@ -145,7 +147,7 @@ def _build_graph(wiki_dir: Path) -> dict[str, tuple[str, ...]]:
     them would mean every page has at least one backlink from the
     index and no page is ever an orphan.
     """
-    if not wiki_dir.is_dir():
+    if not pages_dir.is_dir():
         return {}
 
     # Import lazily to avoid a frontmatter ↔ backlinks circular import.
@@ -154,8 +156,8 @@ def _build_graph(wiki_dir: Path) -> dict[str, tuple[str, ...]]:
     # slug -> set of referrer slugs (set so duplicates collapse).
     inverse: dict[str, set[str]] = {}
 
-    for page_path in sorted(wiki_dir.glob("*.md")):
-        page_slug = page_path.stem
+    for page_path in sorted(pages_dir.rglob("*.md")):
+        page_slug = relpath_to_slug(page_path.relative_to(pages_dir))
         try:
             text = page_path.read_text(encoding="utf-8")
         except OSError:

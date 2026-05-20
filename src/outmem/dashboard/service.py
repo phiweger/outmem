@@ -39,7 +39,8 @@ def wikilinks_to_markdown(body: str, *, base: str = "/wiki/") -> str:
             validate_slug(slug)
         except SlugError:
             return match.group(0)
-        href = f"{base.rstrip('/')}/{slug}"
+        # Render the slug as a real URL path: ``abx:penicillin`` → ``abx/penicillin``.
+        href = f"{base.rstrip('/')}/{slug.replace(':', '/')}"
         # Escape ``]`` in the display so it doesn't terminate the
         # markdown link prematurely.
         safe_display = display.replace("]", "\\]")

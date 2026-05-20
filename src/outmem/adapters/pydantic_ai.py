@@ -127,18 +127,27 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         names a raw source file rather than a wiki page, use
         ``search_wiki`` with ``scope="raw"`` instead.
 
+        Slugs may be flat (``pricing-formula``) or namespaced with
+        ``:`` separators (``abx:penicillin``,
+        ``abx:side-effects:misc``) — the namespace becomes a directory
+        on disk under ``wiki/pages/``.
+
         Example:
             read_page(slug="pricing-formula")
+            read_page(slug="abx:penicillin")
 
         Args:
-            slug: A slug from ``list_pages`` or ``search_wiki`` (lowercase, hyphen-separated).
+            slug: A slug from ``list_pages`` or ``search_wiki``.
         """
         _log_call("read_page", slug=slug)
         try:
             page = store.read(slug)
         except SlugError as exc:
             _log_error("read_page", exc)
-            return f"(invalid slug {slug!r}: lowercase letters/digits/hyphens only)"
+            return (
+                f"(invalid slug {slug!r}: one or more ``:``-separated segments, "
+                "each lowercase ASCII letters/digits with single hyphens only)"
+            )
         except FrontmatterError as exc:
             _log_error("read_page", exc)
             return f"(page {slug!r} has malformed frontmatter: {exc})"
@@ -184,7 +193,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         return "\n".join(refs) if refs else "(no backlinks)"
 
     def page_history(slug: str) -> str:
-        """Per-page commit log: every commit that touched ``wiki/<slug>.md``.
+        """Per-page commit log: every commit that touched the page for ``slug``.
 
         Returns ``sha  iso-date  author <email>  subject`` rows,
         newest first. Use to answer "when did X change and who changed it".
@@ -391,6 +400,13 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         Fails if a page with ``slug`` already exists — use ``extend_page``
         to edit existing pages.
 
+        Slugs may be flat (``pricing-formula``) or namespaced with
+        ``:`` separators — each namespace segment becomes a directory
+        on disk under ``wiki/pages/``. Use namespaces eagerly to group
+        related pages: as soon as a parent topic exists in the wiki's
+        conventions (see ``AGENTS.md``), nest under it from the first
+        page you write on that topic.
+
         Example with plain-string provenance:
             write_page(
                 slug="pricing-formula",
@@ -400,9 +416,17 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 tags=["pricing", "contracts"],
             )
 
+        Example with a namespaced slug:
+            write_page(
+                slug="abx:penicillin",
+                title="Penicillin",
+                body="Penicillin is a beta-lactam antibiotic ...\\n",
+                tags=["antibiotics"],
+            )
+
         Example with structured provenance (for ingested sources):
             write_page(
-                slug="amikacin-iv-dosing",
+                slug="abx:amikacin:iv-dosing",
                 title="Amikacin IV — Dosing",
                 body="...",
                 provenance=[{
@@ -414,7 +438,9 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             )
 
         Args:
-            slug: Lowercase, hyphen-separated identifier. Becomes ``wiki/<slug>.md``.
+            slug: One or more ``:``-separated segments (e.g.
+                ``pricing-formula`` or ``abx:penicillin``). On disk
+                this becomes ``wiki/pages/<seg>/.../<seg>.md``.
             title: Human-readable page title for the frontmatter.
             body: The complete markdown body (no frontmatter — that is generated).
             provenance: Optional list of source pointers. Each entry is
@@ -444,7 +470,10 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             raise  # propagate; the service surfaces this to the caller
         except SlugError as exc:
             _log_error("write_page", exc)
-            return f"(invalid slug {slug!r}: lowercase letters/digits/hyphens only)"
+            return (
+                f"(invalid slug {slug!r}: one or more ``:``-separated segments, "
+                "each lowercase ASCII letters/digits with single hyphens only)"
+            )
         except OutmemError as exc:
             _log_error("write_page", exc)
             return f"(write_page failed: {exc})"

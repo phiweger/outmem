@@ -151,7 +151,8 @@ class TestRead:
         assert fresh_store.list_slugs() == ["a", "b"]
 
     def test_read_malformed_page_raises(self, fresh_store: WikiStore) -> None:
-        bad = fresh_store.wiki_path / "broken.md"
+        bad = fresh_store.pages_path / "broken.md"
+        bad.parent.mkdir(parents=True, exist_ok=True)
         bad.write_text("no frontmatter here\n")
         with pytest.raises(FrontmatterError):
             fresh_store.read("broken")
@@ -599,7 +600,8 @@ class TestReadOnly:
         # Drop a new page directly on disk so the index is genuinely
         # stale — rebuild_index would otherwise short-circuit when
         # the regenerated file matches HEAD.
-        new_page = seeded / "wiki" / "extra.md"
+        new_page = seeded / "wiki" / "pages" / "extra.md"
+        new_page.parent.mkdir(parents=True, exist_ok=True)
         new_page.write_text(
             "---\ntitle: Extra\nslug: extra\n"
             "created: 2026-05-19T00:00:00Z\nupdated: 2026-05-19T00:00:00Z\n---\n\n"
