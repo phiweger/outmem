@@ -93,9 +93,12 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         """Search the wiki / raw / log directories with ripgrep.
 
         Use this as your first retrieval move. ``scope="wiki"`` (the
-        default, Tier 1) searches compiled pages; ``scope="raw"`` (Tier 2)
-        falls through to source material when the wiki did not contain
-        the answer. Returns ``path:line:text`` rows, one per match.
+        default, Tier 1) searches compiled pages and returns
+        ``slug:line:text`` rows — feed the slug straight to
+        ``read_page``. ``scope="raw"`` (Tier 2) falls through to source
+        material when the wiki did not contain the answer; raw / log
+        hits return path-shaped rows (``path:line:text``) since they
+        aren't slugs.
 
         Example:
             search_wiki(pattern="cost-plus", scope="wiki")
@@ -113,7 +116,20 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             return f"(search failed: {exc})"
         if not result.hits:
             return "(no matches)"
-        lines = [f"{hit.path}:{hit.line_number}:{hit.text}" for hit in result.hits]
+        # ``scope="wiki"`` searches ``wiki/pages/`` so hit paths are
+        # already shaped like ``abx/penicillin.md``. Convert each to its
+        # slug form (``abx:penicillin``) so the agent can pass it
+        # straight to ``read_page`` without inventing a translation step.
+        # Other scopes return real paths.
+        def _format_leading(p: str) -> str:
+            if scope != "wiki" or not p.endswith(".md"):
+                return p
+            return p[: -len(".md")].replace("/", ":")
+
+        lines = [
+            f"{_format_leading(hit.path)}:{hit.line_number}:{hit.text}"
+            for hit in result.hits
+        ]
         if result.truncated:
             lines.append("(truncated — narrow the pattern)")
         return "\n".join(lines)

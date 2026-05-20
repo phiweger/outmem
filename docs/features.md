@@ -161,9 +161,13 @@ app = FastAPI()
 store = WikiStore.open("/srv/agent")
 
 # Mount under any prefix; the router carries the routes:
-#   /wiki                  page index
-#   /wiki/{slug}           rendered page + backlinks + provenance
-#   /wiki/{slug}/history   git log timeline
+#   /wiki                       page index
+#   /wiki/{slug:path}           rendered page + backlinks + provenance
+#   /wiki/{slug:path}/history   git log timeline
+#
+# Namespaced slugs use ``/`` in URLs (``[[abx:penicillin]]`` →
+# ``/wiki/abx/penicillin``); the router maps ``/`` back to ``:`` for
+# the store lookup.
 app.include_router(
     router_for(store, pull_on_request=False, base_path="/wiki"),
     prefix="/memory",

@@ -261,6 +261,76 @@ class TestWrite:
 # ---------------------------------------------------------------------------
 
 
+class TestNamespacedSlugs:
+    """End-to-end coverage for the v0.2 slug grammar.
+
+    Pins the workflow a downstream consumer sees: write → read → list
+    → search → backlinks → history with namespaced slugs (``abx:foo``)
+    coexisting with flat slugs (``pricing-formula``) and with mixed
+    page-and-folder layouts (``abx`` + ``abx:penicillin``).
+    """
+
+    def test_write_read_namespaced(self, fresh_store: WikiStore) -> None:
+        fresh_store.write_page(
+            "abx:penicillin", title="Penicillin", body="A beta-lactam."
+        )
+        on_disk = fresh_store.pages_path / "abx" / "penicillin.md"
+        assert on_disk.exists()
+        page = fresh_store.read("abx:penicillin")
+        assert page.frontmatter.slug == "abx:penicillin"
+        assert page.frontmatter.title == "Penicillin"
+
+    def test_deep_nesting(self, fresh_store: WikiStore) -> None:
+        fresh_store.write_page(
+            "a:b:c:d", title="Deep", body="four levels deep"
+        )
+        on_disk = fresh_store.pages_path / "a" / "b" / "c" / "d.md"
+        assert on_disk.exists()
+
+    def test_page_and_folder_coexist(self, fresh_store: WikiStore) -> None:
+        # Write `abx:penicillin` first (creates wiki/pages/abx/ as a dir),
+        # then write `abx` as a flat page sibling to that dir.
+        fresh_store.write_page("abx:penicillin", title="P", body="x")
+        fresh_store.write_page("abx", title="Overview", body="y")
+        assert (fresh_store.pages_path / "abx.md").exists()
+        assert (fresh_store.pages_path / "abx" / "penicillin.md").exists()
+        # Both read back distinctly.
+        assert fresh_store.read("abx").frontmatter.title == "Overview"
+        assert fresh_store.read("abx:penicillin").frontmatter.title == "P"
+
+    def test_list_slugs_uses_colon_notation(self, fresh_store: WikiStore) -> None:
+        fresh_store.write_page("pricing-formula", title="P", body="x")
+        fresh_store.write_page("abx:penicillin", title="P", body="x")
+        fresh_store.write_page("abx:side-effects:misc", title="P", body="x")
+        slugs = fresh_store.list_slugs()
+        assert "pricing-formula" in slugs
+        assert "abx:penicillin" in slugs
+        assert "abx:side-effects:misc" in slugs
+
+    def test_backlinks_across_namespaces(self, fresh_store: WikiStore) -> None:
+        fresh_store.write_page("abx:penicillin", title="P", body="x")
+        fresh_store.write_page(
+            "infection:strep", title="Strep", body="Treat with [[abx:penicillin]]."
+        )
+        assert fresh_store.backlinks("abx:penicillin") == ("infection:strep",)
+
+    def test_history_for_namespaced_slug(self, fresh_store: WikiStore) -> None:
+        fresh_store.write_page("abx:penicillin", title="P", body="v1")
+        fresh_store.extend_page("abx:penicillin", body="v2")
+        hist = fresh_store.history("abx:penicillin")
+        assert len(hist) == 2
+        # Newest first.
+        assert hist[0].subject == "extend: abx:penicillin"
+        assert hist[1].subject == "compact: abx:penicillin"
+
+    def test_index_renders_namespaced_slugs(self, fresh_store: WikiStore) -> None:
+        fresh_store.write_page("pricing-formula", title="P", body="x")
+        fresh_store.write_page("abx:penicillin", title="P", body="x")
+        index = (fresh_store.wiki_path / "index.md").read_text(encoding="utf-8")
+        assert "[[pricing-formula]]" in index
+        assert "[[abx:penicillin]]" in index
+
+
 class TestSearchAndGraph:
     def test_search_wiki_scope(self, fresh_store: WikiStore) -> None:
         fresh_store.write_page(

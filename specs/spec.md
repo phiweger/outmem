@@ -108,7 +108,17 @@ Conflict handling is standard git: humans pull-then-edit-then-commit-then-push f
 
 ## 4. The wiki page model
 
-Each `wiki/*.md` file begins with YAML frontmatter:
+Editorial pages live recursively under `wiki/pages/`. A slug maps to
+its on-disk path by replacing each `:` separator with `/` and
+appending `.md`: `pricing-formula` → `wiki/pages/pricing-formula.md`,
+`abx:penicillin` → `wiki/pages/abx/penicillin.md`. The slug grammar is
+`^<seg>(?::<seg>)*$` where each segment is lowercase ASCII
+alphanumerics with single hyphens. Wiki infrastructure
+(`wiki/index.md`, `wiki/AGENTS.md`, `wiki/CONTRIBUTORS.md`,
+`wiki/sources/`) lives at the wiki root and never collides with a
+page slug.
+
+Each `wiki/pages/**/*.md` file begins with YAML frontmatter:
 
 ```yaml
 ---
@@ -127,7 +137,10 @@ There is no `authority` field. Any human or the agent may edit any wiki page. Th
 
 The `provenance` field is a list of pointers into `raw/`. The agent populates it during compaction and propagates any deeper provenance — Drive paths, page ranges, content hashes — that the ingestion pipeline embedded in the raw file's own frontmatter. The agent does not generate or interpret upstream provenance; it just preserves it.
 
-Wikilinks use `[[slug]]` syntax, resolved natively by Obsidian and rendered to `/wiki/<slug>` in the dashboard's read view (§5).
+Wikilinks use `[[slug]]` syntax — including namespaced slugs
+(`[[abx:penicillin]]`) — resolved natively by Obsidian and rendered to
+`/wiki/<slug-as-path>` in the dashboard's read view (the `:` separators
+in the slug become `/` in the URL; §5).
 
 ---
 
@@ -141,15 +154,21 @@ All editing paths produce identical commits attributable to the configured user.
 
 **The dashboard provides a read view.**
 
-A FastAPI route at `/wiki/{path:path}` reads the markdown file from disk, renders it to HTML via `markdown-it-py` [9] with a small wikilink-resolution pass that turns `[[slug]]` into anchor tags pointing at `/wiki/<slug>`, and serves it inside a thin template. Read-only. Gated behind the dashboard's existing auth.
+A FastAPI route at `/wiki/{slug:path}` reads the markdown file from
+disk (the URL's path segments are joined with `:` to form the slug,
+which `WikiStore.read` maps to `wiki/pages/<rel>.md`), renders it to
+HTML via `markdown-it-py` [9] with a small wikilink-resolution pass
+that turns `[[slug]]` into anchor tags pointing at `/wiki/<slug-as-path>`,
+and serves it inside a thin template. Read-only. Gated behind the
+dashboard's existing auth.
 
 The route's clone of `wiki/` is kept fresh either by `git pull` on every request (simplest, fine for a small team), by a webhook from the git remote (lower latency, requires remote configuration), or by a pull cron at fixed interval (compromise). Choose based on traffic; default is pull-on-request.
 
 Two read-side features earn their keep in v0.1:
 
-The **backlinks panel** at the bottom of each rendered page lists pages that wikilink to this one. The backlink index is precomputed — refreshed whenever the dashboard's clone moves to a new HEAD (post-pull, or on webhook) by running `rg "\[\[<slug>\]\]" wiki/` once per slug and caching the result on disk or in memory. Render reads the cache. At v0.1 scale a full rebuild is sub-second; an incremental update on the changed files is straightforward if it ever becomes necessary.
+The **backlinks panel** at the bottom of each rendered page lists pages that wikilink to this one. The backlink index is precomputed — refreshed whenever the dashboard's clone moves to a new HEAD (post-pull, or on webhook) by walking `wiki/pages/` once and caching the slug-keyed graph on disk or in memory. Render reads the cache. At v0.1 scale a full rebuild is sub-second; an incremental update on the changed files is straightforward if it ever becomes necessary.
 
-The **commit history view** for each page exposes `git log --follow -- wiki/<page>.md` as a vertical timeline — author, date, commit message. This is the user-facing surface of the temporal-evolution pattern: humans get the same affordance the agent does, and "why does this page say X now when it said Y last week" is answerable in one click.
+The **commit history view** for each page exposes `git log --follow -- wiki/pages/<slug-as-path>.md` as a vertical timeline — author, date, commit message. This is the user-facing surface of the temporal-evolution pattern: humans get the same affordance the agent does, and "why does this page say X now when it said Y last week" is answerable in one click.
 
 The **authorship indicator** — a blame-coloured overlay showing which lines were written by which author — is deferred to v0.2 (§12). It is the natural read-side surface for "who wrote what" now that the write-side authority rule is gone, but it adds dashboard surface area and visual design choices that v0.1 can do without.
 
@@ -211,7 +230,7 @@ Writeback is **mandatory**. At the end of every agent run, before responding, th
 
 Two output paths in v0.1:
 
-1. **Wiki write.** Either a new `wiki/<slug>.md` if the run produced understanding of an uncovered topic, or an edit to an existing page. The agent reads the file, decides on the edit, and commits — there is no blame-based gate, no authority lookup, no line-level permission check. If the agent edits something a human disagrees with, the human reverts or rewrites in their next commit, and the agent reads that commit as part of phase 1's steering signal on the following run. New pages include frontmatter and provenance (§4); existing pages preserve their frontmatter except for `updated:`.
+1. **Wiki write.** Either a new `wiki/pages/<slug-as-path>.md` if the run produced understanding of an uncovered topic, or an edit to an existing page. The agent reads the file, decides on the edit, and commits — there is no blame-based gate, no authority lookup, no line-level permission check. If the agent edits something a human disagrees with, the human reverts or rewrites in their next commit, and the agent reads that commit as part of phase 1's steering signal on the following run. New pages include frontmatter and provenance (§4); existing pages preserve their frontmatter except for `updated:`.
 
 2. **Log entry.** Append to `log/<today>.md` for findings that don't yet rise to a wiki page — observations, contradictions, questions raised but unanswered, decisions, or "no new compaction needed" notes. Timestamped and tagged with session ID.
 

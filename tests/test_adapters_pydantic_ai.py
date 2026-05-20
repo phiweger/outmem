@@ -70,11 +70,46 @@ def test_wiki_tools_returns_expected_set(seeded_store: WikiStore) -> None:
     }
 
 
-def test_search_wiki_returns_rg_format(seeded_store: WikiStore) -> None:
+def test_search_wiki_returns_slug_keyed_rows(seeded_store: WikiStore) -> None:
+    """``scope="wiki"`` rows lead with the slug, not the on-disk path,
+    so the agent can pass the leading token straight to ``read_page``."""
     tools = wiki_tools(seeded_store)
     out = _by_name(tools, "search_wiki")(pattern="cost-plus")
-    assert "pricing-formula.md" in out
-    assert ":" in out  # path:line:text
+    # No `.md` and no `/` in the slug-shaped leading token.
+    first_line = out.splitlines()[0]
+    leading = first_line.split(":")[0]
+    assert leading == "pricing-formula"
+    assert ".md" not in first_line.split(":", 2)[0]
+
+
+def test_search_wiki_emits_namespaced_slug(tmp_path: Path) -> None:
+    """Hits in a nested page (``wiki/pages/abx/penicillin.md``) come back
+    as ``abx:penicillin:line:text`` — slug, not path."""
+    from outmem.store import WikiStore
+
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("abx:penicillin", title="P", body="A beta-lactam.")
+    out = _by_name(wiki_tools(store), "search_wiki")(pattern="beta-lactam")
+    first = out.splitlines()[0]
+    assert first.startswith("abx:penicillin:")
+    # The middle is the line number, then ``:`` separator, then content.
+    parts = first.split(":", 3)
+    assert parts[0] == "abx"
+    assert parts[1] == "penicillin"
+    assert parts[2].isdigit()  # line number
+
+
+def test_search_wiki_raw_scope_keeps_paths(tmp_path: Path) -> None:
+    """Non-wiki scopes keep path-shaped output; only ``scope="wiki"``
+    converts to slugs."""
+    from outmem.store import WikiStore
+
+    store = WikiStore.init(tmp_path / "w")
+    (store.raw_path / "deck.md").write_text(
+        "Slide 3: cost-plus 35%.\n", encoding="utf-8"
+    )
+    out = _by_name(wiki_tools(store), "search_wiki")(pattern="cost-plus", scope="raw")
+    assert "deck.md" in out  # path preserved
 
 
 def test_search_wiki_no_match(seeded_store: WikiStore) -> None:
