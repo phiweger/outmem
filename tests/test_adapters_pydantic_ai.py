@@ -350,7 +350,7 @@ def test_skill_text_loads_from_supplied_dir(tmp_path: Path) -> None:
 
 
 def test_skill_text_unknown_raises(tmp_path: Path) -> None:
-    from skillfull import UnknownSkillError
+    from outskilled import UnknownSkillError
 
     skills = tmp_path / "skills"
     (skills / "notes").mkdir(parents=True)

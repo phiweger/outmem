@@ -5,14 +5,14 @@ inventory so accidental renames break loudly and validate that every
 SKILL.md has the metadata the runtime's prompt-renderer expects.
 
 The loader / manifest logic is owned by the
-`skillfull <https://github.com/phiweger/skillfull>`_ package and
+`outskilled <https://github.com/phiweger/outskilled>`_ package and
 isn't tested here; only the bundled CONTENT is.
 """
 
 from __future__ import annotations
 
 import pytest
-from skillfull import SkillRegistry, parse_frontmatter
+from outskilled import SkillRegistry, parse_frontmatter
 
 from outmem.skills import BUNDLED_SKILLS_DIR, bundled_registry
 
@@ -118,7 +118,7 @@ def test_skill_has_at_least_one_reference(category: str, skill: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# skillfull integration sanity (registry discovers what we expect)
+# outskilled integration sanity (registry discovers what we expect)
 # ---------------------------------------------------------------------------
 
 
@@ -130,7 +130,7 @@ def test_bundled_registry_discovers_all_skills() -> None:
 @pytest.mark.parametrize("skill", sorted(EXPECTED_SKILL_NAMES))
 def test_registry_load_returns_body_without_frontmatter(skill: str) -> None:
     body = bundled_registry().load(skill)
-    # Frontmatter is stripped by skillfull.
+    # Frontmatter is stripped by outskilled.
     assert not body.lstrip().startswith("---")
     # And the body is non-trivial.
     assert len(body.strip()) > 200

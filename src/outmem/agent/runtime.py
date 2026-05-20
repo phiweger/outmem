@@ -104,12 +104,12 @@ def render_system_prompt(
 def _load_injected_skills(
     names: tuple[str, ...],
 ) -> list[tuple[str, str]]:
-    """Load each named skill's body via :class:`skillfull.SkillRegistry`.
+    """Load each named skill's body via :class:`outskilled.SkillRegistry`.
 
     Missing skills are skipped silently — a deployment that doesn't
     ship one of the defaults shouldn't break the prompt render.
     """
-    from skillfull import UnknownSkillError  # type: ignore[import-untyped]
+    from outskilled import UnknownSkillError  # type: ignore[import-untyped]
 
     registry = bundled_registry()
     out: list[tuple[str, str]] = []

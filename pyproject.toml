@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
-    "skillfull>=0.2.0",
+    "outskilled>=0.1.0",
 ]
 
 [project.optional-dependencies]

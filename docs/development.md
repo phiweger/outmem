@@ -54,7 +54,7 @@ src/outmem/
 ├── search.py / backlinks.py    # rg --json + HEAD-keyed cache
 ├── identity.py / state.py      # CONTRIBUTORS.md + .outmem/ state (fcntl-locked)
 ├── sources.py                  # sources registry (SQLite-backed)
-├── skills.py                   # SKILL.md loader (uses `skillfull` dep)
+├── skills.py                   # SKILL.md loader (uses `outskilled` dep)
 ├── lint.py / index.py          # outmem lint + wiki/index.md auto-maintenance
 ├── exceptions.py               # OutmemError hierarchy
 ├── adapters/pydantic_ai.py     # wiki_tools() + skill_text()

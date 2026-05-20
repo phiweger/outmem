@@ -2,13 +2,13 @@
 
 The actual skill-loading machinery (frontmatter parsing, manifest
 rendering, name validation) lives in the
-`skillfull <https://github.com/phiweger/skillfull>`_ package. This
+`outskilled <https://github.com/phiweger/outskilled>`_ package. This
 module only owns:
 
 * :data:`BUNDLED_SKILLS_DIR` — the on-disk path to outmem's bundled
   ``notes/{search,write,evolution}/SKILL.md`` files.
 * :func:`bundled_registry` — a thin constructor that returns a
-  :class:`skillfull.SkillRegistry` over that directory. Memoised so
+  :class:`outskilled.SkillRegistry` over that directory. Memoised so
   consumers can call it freely without re-walking the tree.
 
 Callers that want a different skills root (tests, downstream
@@ -21,7 +21,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from skillfull import SkillRegistry  # type: ignore[import-untyped]
+from outskilled import SkillRegistry  # type: ignore[import-untyped]
 
 # The bundled skill files ship inside the package so ``outmem skill
 # install`` (and downstream consumers via :func:`bundled_registry`)

@@ -778,7 +778,7 @@ def skill_text(
 
     The YAML frontmatter (``name``, ``description``) is stripped — it's
     loader metadata, not content for the model. Loading is delegated
-    to :class:`skillfull.SkillRegistry`.
+    to :class:`outskilled.SkillRegistry`.
 
     Example::
 
@@ -796,7 +796,7 @@ def skill_text(
     if skills_dir is None:
         registry = bundled_registry()
     else:
-        from skillfull import SkillRegistry  # type: ignore[import-untyped]
+        from outskilled import SkillRegistry  # type: ignore[import-untyped]
 
         registry = SkillRegistry([skills_dir])
     body: str = registry.load(skill_name)
