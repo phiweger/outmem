@@ -1,0 +1,19 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ slug }} — history — outmem{% endblock %}
+{% block crumbs %}/ <a href="{{ wiki_index_url }}">wiki</a> / <a href="{{ wiki_url(slug) }}">{{ slug }}</a> / history{% endblock %}
+{% block content %}
+  <h1>{{ slug }} — history</h1>
+  {% if commits %}
+    <ul class="entries">
+      {% for commit in commits %}
+        <li class="commit">
+          <span class="sha">{{ commit.sha[:10] }}</span>
+          <span class="author">{{ commit.author_name }}</span>
+          <span class="subject">{{ commit.subject }}<br><span class="meta">{{ commit.date.isoformat() }}</span></span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="empty">No commits yet for this page.</p>
+  {% endif %}
+{% endblock %}

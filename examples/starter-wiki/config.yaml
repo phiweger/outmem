@@ -1,0 +1,43 @@
+# config.yaml — wiki-level config for the agent runtime
+# Tracked in git; secrets live in .env (gitignored).
+#
+# Resolution: CLI args > env vars > this file > built-in defaults.
+
+model: anthropic:claude-opus-4-7
+
+agent:
+  name: outmem agent
+  email: agent@host
+
+remote:
+  name: origin
+  branch: main
+
+git:
+  remove_stale_lock: true       # clean up .git/index.lock if older than stale_lock_seconds
+  stale_lock_seconds: 60
+  retry_on_lock: true            # retry once on transient index.lock failures
+  retry_delay_ms: 100
+
+sources:
+  max_chars: 200000    # cap on read_source returns
+
+# Semantic retrieval / lint — requires `pip install outmem[semantic]`.
+# Off by default; flip `enabled: true` to index pages and sources
+# into a local sqlite-vec DB and surface near-duplicate / similar chunks.
+semantic:
+  enabled: false
+  embedding_model: openai:text-embedding-3-small
+  db_filename: .vectors.db
+  chunk_size: 2000
+  chunk_max: 8000
+  overlap_paragraphs: 1
+  similarity_threshold: 0.8
+  top_k: 5
+
+# Human-in-the-loop approval for agent writes. When on, every
+# `write_page` / `extend_page` is shown to a reviewer (CLI
+# prompt by default) and only commits after explicit approval.
+# `append_log` and read tools are not gated.
+approval:
+  required_for_writes: false

@@ -1,0 +1,31 @@
+model: anthropic:claude-sonnet-4-6
+
+agent:
+  name: outmem agent
+  email: agent@host
+
+remote:
+  name: origin
+  branch: main
+
+git:
+  remove_stale_lock: true
+  stale_lock_seconds: 60
+  retry_on_lock: true
+  retry_delay_ms: 100
+
+sources:
+  max_chars: 200000
+
+semantic:
+  enabled: false
+  embedding_model: openai:text-embedding-3-small
+  db_filename: .vectors.db
+  chunk_size: 2000
+  chunk_max: 8000
+  overlap_paragraphs: 1
+  similarity_threshold: 0.8
+  top_k: 5
+
+approval:
+  required_for_writes: false

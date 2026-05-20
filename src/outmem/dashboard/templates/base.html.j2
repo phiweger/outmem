@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}outmem{% endblock %}</title>
+    <style>
+      :root {
+        --fg: #1f2937;
+        --muted: #6b7280;
+        --bg: #ffffff;
+        --accent: #4f46e5;
+        --rule: #e5e7eb;
+        --code-bg: #f3f4f6;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e5e7eb;
+          --muted: #9ca3af;
+          --bg: #0f172a;
+          --accent: #818cf8;
+          --rule: #1f2937;
+          --code-bg: #1e293b;
+        }
+      }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        line-height: 1.55;
+        max-width: 48rem;
+        margin: 0 auto;
+        padding: 2rem 1rem 4rem;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      code, pre {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.92em;
+      }
+      code { background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; }
+      pre { background: var(--code-bg); padding: 1em; overflow-x: auto; border-radius: 6px; }
+      pre code { background: transparent; padding: 0; }
+      nav.outmem-nav {
+        display: flex;
+        gap: 1rem;
+        align-items: baseline;
+        border-bottom: 1px solid var(--rule);
+        padding-bottom: 0.5rem;
+        margin-bottom: 1.5rem;
+        font-size: 0.9em;
+      }
+      nav.outmem-nav .brand { font-weight: 600; }
+      nav.outmem-nav .crumbs { color: var(--muted); }
+      .meta { color: var(--muted); font-size: 0.85em; margin-bottom: 1.5rem; }
+      .meta .tag {
+        display: inline-block;
+        background: var(--code-bg);
+        padding: 0.05em 0.5em;
+        border-radius: 3px;
+        margin-right: 0.4em;
+        font-size: 0.95em;
+      }
+      .panel {
+        border-top: 1px solid var(--rule);
+        margin-top: 3rem;
+        padding-top: 1.25rem;
+        font-size: 0.9em;
+      }
+      .panel h2 {
+        font-size: 0.85em;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        margin: 0 0 0.75rem;
+      }
+      ul.entries { list-style: none; padding: 0; }
+      ul.entries li { padding: 0.2rem 0; }
+      .commit { display: flex; gap: 0.75rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }
+      .commit .sha { color: var(--muted); width: 5.5rem; }
+      .commit .author { color: var(--muted); flex: 0 0 12rem; }
+      .commit .subject { flex: 1; }
+      .empty { color: var(--muted); font-style: italic; }
+    </style>
+  </head>
+  <body>
+    <nav class="outmem-nav">
+      <span class="brand"><a href="{{ wiki_index_url }}">outmem</a></span>
+      <span class="crumbs">{% block crumbs %}{% endblock %}</span>
+    </nav>
+    {% block content %}{% endblock %}
+  </body>
+</html>

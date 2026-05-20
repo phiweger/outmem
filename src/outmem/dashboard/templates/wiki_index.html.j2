@@ -1,0 +1,16 @@
+{% extends "base.html.j2" %}
+{% block title %}wiki — outmem{% endblock %}
+{% block crumbs %}/ wiki{% endblock %}
+{% block content %}
+  <h1>Wiki</h1>
+  <p class="meta">{{ slugs | length }} page{{ "" if slugs | length == 1 else "s" }}</p>
+  {% if slugs %}
+    <ul class="entries">
+      {% for slug in slugs %}
+        <li><a href="{{ wiki_url(slug) }}">{{ slug }}</a></li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="empty">No pages yet. <code>outmem write &lt;slug&gt; --title &lt;…&gt; &lt;&lt;&lt; body</code></p>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,67 @@
+# Virtualenvs
+.venv/
+venv/
+ENV/
+
+# Python build artefacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Python bytecode + extensions
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Tooling caches — each tool drops its own self-ignore inside the cache
+# dir, but only AFTER first run. Listing here is defensive.
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Lockfiles — outmem is a library; consumers pick their own resolver.
+uv.lock
+poetry.lock
+Pipfile.lock
+
+# Pyenv pin — let contributors use any 3.12+ patch.
+.python-version
+
+# Secrets — never commit.
+.env
+.env.*
+.secrets.*
+
+# Outmem wiki state — only created if a contributor points
+# OUTMEM_PATH at this repo during dev.
+.outmem/
+.vectors.db
+
+# IDE / editor
+.idea/
+.vscode/
+.cursor/
+.zed/
+*.swp
+*.swo
+*~
+
+# Scratch
+tmp/
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini

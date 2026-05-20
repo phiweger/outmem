@@ -1,0 +1,38 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ page.title }} — outmem{% endblock %}
+{% block crumbs %}/ <a href="{{ wiki_index_url }}">wiki</a> / {{ page.slug }}{% endblock %}
+{% block content %}
+  <article>
+    <h1>{{ page.title }}</h1>
+    <p class="meta">
+      {% if page.updated %}updated {{ page.updated.isoformat() }}{% endif %}
+      <a href="{{ history_url(page.slug) }}">history</a>
+      {% for tag in tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+    </p>
+    <div class="body">{{ page.body_html | safe }}</div>
+  </article>
+
+  <section class="panel">
+    <h2>Backlinks</h2>
+    {% if page.backlinks %}
+      <ul class="entries">
+        {% for ref in page.backlinks %}
+          <li><a href="{{ wiki_url(ref) }}">{{ ref }}</a></li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty">No backlinks.</p>
+    {% endif %}
+  </section>
+
+  {% if provenance %}
+    <section class="panel">
+      <h2>Provenance</h2>
+      <ul class="entries">
+        {% for entry in provenance %}
+          <li>{{ entry }}</li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endif %}
+{% endblock %}

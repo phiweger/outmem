@@ -1,0 +1,30 @@
+# Top-level repo config — applies to outmem dev / eval tooling AND
+# acts as the per-user default for `outmem init`.
+#
+# This is SEPARATE from a wiki's `config.yaml` (which configures one
+# individual wiki). Top-level fields here (e.g. `model:`) are seeded
+# into every NEW wiki's `config.yaml` by `outmem init`; the `evals:`
+# block is picked up by `python -m evals.run`. Per-CLI flags override
+# this; env vars sit between (`OUTMEM_MODEL` etc.).
+#
+# Resolution order for `outmem init`'s seeded wiki model:
+#   1. Built-in `DEFAULT_MODEL`
+#   2. `model:` field below (if set)
+# Resolution order at agent run time, highest priority first:
+#   1. Explicit CLI flag (`--model`, `--judge-model`)
+#   2. Environment variable (`OUTMEM_MODEL`)
+#   3. The wiki's own `config.yaml`
+#   4. Built-in default
+
+# Default model that `outmem init` writes into a new wiki's
+# `config.yaml`. Edit to change the per-user default.
+model: anthropic:claude-sonnet-4-6
+
+evals:
+  # Agent under test. Leave commented to fall through to $OUTMEM_MODEL
+  # or the fixture wiki's own config.yaml model field.
+  # agent_model: anthropic:claude-sonnet-4-6
+
+  # LLM judge model. Sonnet 4.6 is a good cost/quality balance; bump
+  # to Opus for stricter grading on contentious cases.
+  judge_model: anthropic:claude-sonnet-4-6

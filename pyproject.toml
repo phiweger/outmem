@@ -1,0 +1,108 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "outmem"
+version = "0.1.0.dev0"
+description = "Agentic RAG memory: a git-versioned wiki an agent maintains for itself and a team."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "phiweger" },
+]
+keywords = ["rag", "agent", "memory", "wiki", "git"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "skillfull>=0.2.0",
+]
+
+[project.optional-dependencies]
+pydantic-ai = [
+    "pydantic-ai>=0.1.0",
+]
+agent = [
+    "pydantic-ai>=0.1.0",
+    "jinja2>=3.1",
+]
+semantic = [
+    "pydantic-ai>=0.1.0",
+    "sqlite-vec>=0.1.7",
+]
+logfire = [
+    "logfire>=3.0",
+]
+dashboard = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "markdown-it-py>=3.0",
+    "jinja2>=3.1",
+]
+# Everything except [dev] and [evals]. Use this when you want the full
+# feature surface — agent runtime, semantic index, dashboard, logfire —
+# without specifying each extra by hand.
+all = [
+    "pydantic-ai>=0.1.0",
+    "jinja2>=3.1",
+    "sqlite-vec>=0.1.7",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "markdown-it-py>=3.0",
+    "logfire>=3.0",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-pyyaml>=6.0",
+]
+evals = [
+    "pydantic-ai>=0.1.0",
+    "jinja2>=3.1",
+    "sqlite-vec>=0.1.7",
+    "pytest>=8.3",
+]
+
+[project.scripts]
+outmem = "outmem.cli.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/phiweger/outmem"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/outmem"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+warn_return_any = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+files = ["src/outmem"]
