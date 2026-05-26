@@ -389,6 +389,9 @@ agent = Agent(
 ## Where to go next
 
 - [`docs/cli.md`](docs/cli.md) — every subcommand with examples.
+- [`docs/search.md`](docs/search.md) — the search & retrieval workflow:
+  `search_wiki` → `read_page`, scopes, and the lexical / relevance /
+  semantic tiers (when to reach for each).
 - [`docs/python-api.md`](docs/python-api.md) — `WikiStore` + the
   PydanticAI adapter + the standalone agent runtime.
 - [`docs/growing-the-wiki.md`](docs/growing-the-wiki.md) — reading

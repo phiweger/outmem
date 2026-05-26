@@ -62,6 +62,10 @@ Install: `pip install "outmem[agent]"` (the triage model needs
 PydanticAI). Off by default — flip `relevance.enabled: true` in
 `config.yaml`.
 
+For how this tier fits the end-to-end retrieval workflow (and when to
+reach for it vs plain lexical or semantic), see
+[search.md](search.md#three-retrieval-tiers).
+
 A cheap-model **gate** between lexical `search_wiki` and the expensive
 outer agent. Today `search_wiki` returns raw ripgrep lines, byte-capped
 at 8 KiB, and the expensive model triages them in-context. With the
