@@ -56,6 +56,95 @@ Switching `embedding_model` invalidates the existing DB (sqlite-vec
 bakes the dim into the virtual table). `VectorStore.open` detects the
 mismatch and surfaces a clear error pointing at `outmem reindex --force`.
 
+## Relevance filter
+
+Install: `pip install "outmem[agent]"` (the triage model needs
+PydanticAI). Off by default — flip `relevance.enabled: true` in
+`config.yaml`.
+
+A cheap-model **gate** between lexical `search_wiki` and the expensive
+outer agent. Today `search_wiki` returns raw ripgrep lines, byte-capped
+at 8 KiB, and the expensive model triages them in-context. With the
+filter on, the swapped `search_wiki` casts a *wider* ripgrep net (64
+KiB), hands the candidate pages to a small model (default
+`anthropic:claude-haiku-4-5`), and keeps only the ones the model judges
+relevant — each with a one-line "why". Triage moves off the expensive
+model and out of its context; the candidate net can be wider than what
+the outer agent should ever see.
+
+It is a **filter, not a ranker**: per candidate the model answers "is
+this relevant — yes/no". There is no score and no re-ordering. The
+load-bearing invariant: **no model ever emits wiki content here.** The
+filter model consumes deterministic file reads (the candidate
+excerpts) and emits only decisions `{slug, reason}`; the supporting
+lines shown are verbatim ripgrep hits, and the full page text the agent
+reads still comes from `read_page` reading disk. The one-line `reason`
+is the only model-generated string in the path.
+
+Drop-in: the agent's mental model is unchanged ("call `search_wiki`,
+then `read_page(slug)`"). Only wiki-scope searches are filtered;
+`scope="raw"`/`"log"`/`"all"` stay plain path-shaped searches.
+
+```yaml
+relevance:
+  enabled: true
+  model: anthropic:claude-haiku-4-5
+  max_relevant: 8               # cap on kept pages
+  max_candidates: 20            # distinct slugs sent to the filter
+  context: page                 # "page" (cap below) | "lines"
+  context_chars_per_page: 2000  # per-page text the filter sees
+```
+
+Agent-facing output becomes:
+
+```
+abx:penicillin  why: IV penicillin dosing for endocarditis
+  abx:penicillin:14:IV penicillin G 18-24 MU/day in divided doses
+abx:ceftriaxone  why: listed as a beta-lactam alternative
+  abx:ceftriaxone:9:ceftriaxone 2g IV q24h
+```
+
+**Reliability.** Any filter error/timeout/malformed output falls back to
+the candidate hits in lexical order, **trimmed back to the normal 8 KiB
+agent budget** (`fell_back=True`) — a filter failure never makes
+retrieval worse than today, and never floods the expensive context with
+the wide net. An empty result (nothing relevant) is a valid answer, not
+a failure — a weak keyword isn't laundered into a false positive.
+
+**Embedding in your own agent / consumer hook.** Pass an explicit
+`RelevanceConfig` to the adapter factories — this is also how you get
+the `on_filter` observability hook (outmem stays ignorant of your
+tracing; it just hands you each `FilterOutcome`):
+
+```python
+from outmem import WikiStore, RelevanceConfig, FilterOutcome
+from outmem.adapters.pydantic_ai import wiki_read_tools
+
+def record(outcome: FilterOutcome) -> None:
+    my_trace.append({
+        "query": outcome.query,
+        "candidates": outcome.candidates_considered,
+        "model": outcome.model,          # records that Haiku did the triage
+        "fell_back": outcome.fell_back,
+        "kept": [(p.slug, p.reason) for p in outcome.kept],
+    })
+
+store = WikiStore.open("/srv/wiki")
+cfg = RelevanceConfig(model="anthropic:claude-haiku-4-5", on_filter=record)
+tools = wiki_read_tools(store, relevance=cfg)   # search_wiki is now filtered
+```
+
+`wiki_read_tools(store)` / `wiki_tools(store)` with no `relevance=` and
+the config flag off is byte-for-byte today's behaviour. The standalone
+`relevance_filter(store, query=..., model=...) -> FilterOutcome` is
+public for non-PydanticAI consumers and tests.
+
+This buys **precision + context savings, not semantic recall** — recall
+stays bounded by ripgrep (keyword). If ripgrep returns nothing the
+filter has nothing to keep and correctly returns empty; that empty
+signal, logged via `on_filter`, is useful evidence for whether a
+semantic tier (the `semantic` index above) would earn its keep.
+
 ## Write approval (HITL)
 
 Off by default. When `approval.required_for_writes: true` in `config.yaml`,

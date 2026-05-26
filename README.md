@@ -395,8 +395,8 @@ agent = Agent(
   the log + lint signals to figure out what to ingest next.
 - [`docs/configuration.md`](docs/configuration.md) — `wiki/AGENTS.md`,
   `config.yaml`, `.env`, environment variables, system requirements.
-- [`docs/features.md`](docs/features.md) — semantic index, write
-  approval, Logfire, dashboard (all opt-in).
+- [`docs/features.md`](docs/features.md) — semantic index, relevance
+  filter, write approval, Logfire, dashboard (all opt-in).
 - [`docs/development.md`](docs/development.md) — dev install,
   repository layout.
 - [`specs/concept.md`](specs/concept.md) — the original pattern this

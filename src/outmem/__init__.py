@@ -28,6 +28,13 @@ from outmem.exceptions import (
 )
 from outmem.frontmatter import ProvenanceEntry, WikiFrontmatter
 from outmem.observability import setup_logfire
+from outmem.relevance import (
+    FilterOutcome,
+    RelevanceConfig,
+    RelevantPage,
+    relevance_filter,
+)
+from outmem.search import SearchHit
 from outmem.store import AgentIdentity, WikiPage, WikiStore, WikiStoreConfig
 
 __version__ = "0.1.0.dev0"
@@ -35,11 +42,15 @@ __version__ = "0.1.0.dev0"
 __all__ = [
     "AgentIdentity",
     "ConflictError",
+    "FilterOutcome",
     "FrontmatterError",
     "GitOperationError",
     "IdentityWarning",
     "OutmemError",
     "ProvenanceEntry",
+    "RelevanceConfig",
+    "RelevantPage",
+    "SearchHit",
     "SlugError",
     "WikiFrontmatter",
     "WikiPage",
@@ -47,5 +58,6 @@ __all__ = [
     "WikiStoreConfig",
     "WritebackError",
     "__version__",
+    "relevance_filter",
     "setup_logfire",
 ]

@@ -16,6 +16,12 @@ from outmem import (
     FrontmatterError,
     GitOperationError,
     ConflictError,
+    # Relevance filter (optional; see docs/features.md):
+    RelevanceConfig,    # the config object a consumer passes to the adapter
+    FilterOutcome,      # what on_filter receives per search
+    RelevantPage,       # one kept page: slug + reason + supporting SearchHits
+    SearchHit,          # a single ripgrep hit (path, line_number, text)
+    relevance_filter,   # standalone core fn (non-PydanticAI consumers / tests)
 )
 ```
 

@@ -282,6 +282,93 @@ def test_wiki_read_tools_with_read_only_store_cannot_commit(
     assert ro.head() == head_before
 
 
+def _filter_model(selections: list[dict[str, str]]):
+    """FunctionModel emitting the relevance filter's structured output."""
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    def respond(messages, info):  # type: ignore[no-untyped-def]
+        name = info.output_tools[0].name
+        return ModelResponse(
+            parts=[ToolCallPart(tool_name=name, args={"relevant": selections})]
+        )
+
+    return FunctionModel(respond)
+
+
+def test_relevance_swaps_search_wiki_only(seeded_store: WikiStore) -> None:
+    from outmem.relevance import RelevanceConfig
+
+    plain = wiki_read_tools(seeded_store)
+    cfg = RelevanceConfig(model=_filter_model([]))
+    ranked = wiki_read_tools(seeded_store, relevance=cfg)
+    # Same tool set, same order, exactly one search_wiki — the swap
+    # replaces only that entry; all other tools are present unchanged.
+    assert [t.__name__ for t in plain] == [t.__name__ for t in ranked]
+    assert [t.__name__ for t in ranked].count("search_wiki") == 1
+
+
+def test_relevance_on_filter_fires_once(seeded_store: WikiStore) -> None:
+    from outmem.relevance import FilterOutcome, RelevanceConfig
+
+    seen: list[FilterOutcome] = []
+    cfg = RelevanceConfig(
+        model=_filter_model([{"slug": "pricing-formula", "reason": "the formula"}]),
+        on_filter=seen.append,
+    )
+    search = _by_name(wiki_read_tools(seeded_store, relevance=cfg), "search_wiki")
+    out = search(pattern="cost-plus")
+    assert len(seen) == 1
+    assert seen[0].query == "cost-plus"
+    assert "pricing-formula  why: the formula" in out
+
+
+def test_relevance_callback_error_does_not_break_search(
+    seeded_store: WikiStore,
+) -> None:
+    from outmem.relevance import RelevanceConfig
+
+    def angry(_outcome: object) -> None:
+        raise ValueError("consumer tracing bug")
+
+    cfg = RelevanceConfig(
+        model=_filter_model([{"slug": "pricing-formula", "reason": "x"}]),
+        on_filter=angry,
+    )
+    search = _by_name(wiki_read_tools(seeded_store, relevance=cfg), "search_wiki")
+    out = search(pattern="cost-plus")  # must not raise
+    assert "pricing-formula" in out
+
+
+def test_relevance_raw_scope_unfiltered(seeded_store: WikiStore) -> None:
+    """Non-wiki scopes bypass the filter entirely (path-shaped output)."""
+    from outmem.relevance import FilterOutcome, RelevanceConfig
+
+    (seeded_store.raw_path / "deck.md").write_text(
+        "cost-plus pricing deck\n", encoding="utf-8"
+    )
+    seen: list[FilterOutcome] = []
+    cfg = RelevanceConfig(model=_filter_model([]), on_filter=seen.append)
+    search = _by_name(wiki_read_tools(seeded_store, relevance=cfg), "search_wiki")
+    out = search(pattern="cost-plus", scope="raw")
+    assert "deck.md" in out  # real path, not a slug
+    assert seen == []  # filter never ran for raw scope
+
+
+def test_relevance_config_block_enables_swap(tmp_path: Path) -> None:
+    """rerank=None + `relevance.enabled: true` in config ⇒ swap happens."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("pricing", title="Pricing", body="cost-plus 35%.\n")
+    # Flip the config flag on the open store.
+    store.config.outmem.relevance.enabled = True
+    store.config.outmem.relevance.model = "test"  # unused unless a search runs
+    tools = wiki_read_tools(store)  # no explicit relevance=
+    # The swapped search_wiki has a distinct closure identity vs a plain build.
+    store.config.outmem.relevance.enabled = False
+    plain = wiki_read_tools(store)
+    assert _by_name(tools, "search_wiki") is not _by_name(plain, "search_wiki")
+
+
 def test_build_consult_wiki_returns_callable(tmp_path: Path) -> None:
     """The factory returns a single-arg ``consult_wiki(question)`` function
     with a docstring describing the WHEN of using it (not the HOW of the
