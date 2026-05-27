@@ -149,6 +149,63 @@ filter has nothing to keep and correctly returns empty; that empty
 signal, logged via `on_filter`, is useful evidence for whether a
 semantic tier (the `semantic` index above) would earn its keep.
 
+## Retrieval tuning
+
+Install: `pip install "outmem[agent]"` (the optimizer + bank generator
+need a model; the `semantic` block additionally needs
+`outmem[semantic]`).
+
+Which retrieval strategy is best — keyword, keyword+rerank, semantic,
+hybrid — is **corpus-dependent**; there's no universal winner. So
+instead of shipping one default and hoping, outmem exposes retrieval as
+composable **blocks** plus a script that searches the space for the
+config that's best on *your* wiki.
+
+**The blocks** (`outmem.optimize.blocks`) share one contract —
+`retrieve(question, k) -> ranked slugs`, where an empty result means
+"nothing relevant" (a deliberate abstention):
+
+* `lexical` — keyword ripgrep, pages ranked by hit frequency (no model).
+* `rerank` — wide keyword net → the relevance filter as a gate.
+* `semantic` — vector similarity over the semantic index; recall for
+  paraphrases that share no keywords (needs `semantic.enabled` + a
+  built index).
+
+**The benchmark.** A `QuestionBank` is questions with known gold
+page(s). Generate one from the wiki — a model writes natural questions
+per page, gold = that page (this measures *retrieval*: can search find
+page X from a reworded question?) — or, if your content is sensitive,
+**hand-author the JSON and never send a page to a model**; the bank is
+just `{"answerable": [...], "unanswerable": [...]}`. The metric
+(`bench.evaluate`) is one scalar to hill-climb: the mean of `Hit@k` on
+answerable questions and *abstention* (returned empty) on unanswerable
+ones — plus the two sub-rates for diagnosis. No F1 until you add
+multi-page (list) questions.
+
+**The optimizer is an agent, not a grid sweep.** It runs an eval, reads
+the gold pages of failing questions to see *why* retrieval missed, forms
+a hypothesis, and picks the next config to try. It returns the
+best-*scoring* config it measured — the metric decides, not the agent's
+self-report.
+
+```python
+from outmem import WikiStore
+from outmem.optimize import generate_bank, optimize_retrieval
+
+store = WikiStore.open("/srv/wiki")
+bank = generate_bank(store, model="anthropic:claude-haiku-4-5")
+# …or, for sensitive corpora: bank = QuestionBank.load("bank.json")
+result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-4-6")
+print(result.best_config, result.best_score)   # then write it into config.yaml
+```
+
+This is the **config-space** loop: it picks among shipped, tested blocks
+and writes no code. The **code-space** loop — an agent that writes *new*
+blocks (BM25, hybrid fusion), gated by tests + the benchmark across
+multiple corpora, opening a PR — is a maintainer activity, documented in
+[`improve.md`](../improve.md) with a stub workflow at
+`.github/workflows/autoresearch.yml`.
+
 ## Write approval (HITL)
 
 Off by default. When `approval.required_for_writes: true` in `config.yaml`,

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from outmem.exceptions import OutmemError
 from outmem.relevance import DEFAULT_RELEVANCE_MODEL, relevance_filter
-from outmem.slug import relpath_to_slug
+from outmem.slug import PAGES_DIR, relpath_to_slug
 
 if TYPE_CHECKING:
     from outmem.store import WikiStore
@@ -196,13 +196,18 @@ class RerankRetriever:
 
 
 class SemanticRetriever:
-    """STUB lego block — vector similarity over the semantic index.
+    """Vector-similarity block — wraps the wiki's semantic index.
 
-    Left unimplemented on purpose: it needs ``outmem[semantic]`` and a
-    built index, and wiring ``VectorStore.find_similar`` → ranked slugs
-    is the obvious next block. Raising here keeps it visible in the
-    search space; the optimizer's ``run_eval`` catches the error and
-    reports "semantic unavailable" rather than crashing the loop.
+    Embeds the question (via ``store.semantic_find_similar``) and returns
+    the wiki *pages* whose chunks are most similar, deduped to one entry
+    per page (best chunk wins) with source chunks filtered out. Empty
+    when nothing clears the config similarity threshold — a real
+    abstention. This is the recall tier: it surfaces pages that share no
+    keywords with the query, which lexical/rerank cannot.
+
+    Requires ``semantic.enabled`` + a built index (``outmem[semantic]``);
+    raises :class:`OutmemError` otherwise, so the optimizer marks the
+    config unavailable instead of crashing the loop.
     """
 
     name = "semantic"
@@ -212,10 +217,32 @@ class SemanticRetriever:
         self._top_k = top_k
 
     def retrieve(self, question: str, *, k: int) -> RetrievalResult:
-        raise OutmemError(
-            "semantic retriever is a stub — wire VectorStore.find_similar "
-            "(needs outmem[semantic] + an index) to enable this block"
-        )
+        if not self._store.semantic_enabled():
+            raise OutmemError(
+                "semantic block needs `semantic.enabled: true` + a built "
+                "index (outmem[semantic]); run `outmem reindex`"
+            )
+        # Chunks → pages: over-fetch chunks so dedup-to-pages still yields k.
+        chunk_k = max(self._top_k, k) * 4
+        try:
+            matches = self._store.semantic_find_similar(question, top_k=chunk_k)
+        except OutmemError:
+            raise
+        except Exception as exc:  # missing extra / embedder / db error
+            raise OutmemError(f"semantic retrieval failed: {exc}") from exc
+
+        prefix = f"{self._store.config.wiki_dir}/{PAGES_DIR}/"
+        slugs: list[str] = []
+        for match in matches:  # similarity-descending
+            rel = match.rel_path
+            if not rel.startswith(prefix):  # source chunk → no page slug
+                continue
+            slug = relpath_to_slug(Path(rel[len(prefix):]))
+            if slug not in slugs:
+                slugs.append(slug)
+            if len(slugs) >= k:
+                break
+        return RetrievalResult(tuple(slugs))
 
 
 # --- shared helpers --------------------------------------------------------

@@ -74,6 +74,10 @@ in [features.md](features.md#relevance-filter) and
 [features.md](features.md#semantic-index); this page covers *when* and
 *how they fit the workflow*.
 
+Rather than pick by hand, you can let outmem search this space for you:
+[retrieval tuning](features.md#retrieval-tuning) scores the blocks on a
+question bank built from your wiki and reports the best config.
+
 ## Choosing a tier
 
 * **You know the keyword** (`penicillin`, an error code, a customer
