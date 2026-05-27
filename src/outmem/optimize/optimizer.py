@@ -22,6 +22,8 @@ here.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +36,8 @@ from outmem.optimize.dataset import QuestionBank
 if TYPE_CHECKING:
     from outmem.store import WikiStore
 
+log = logging.getLogger(__name__)
+
 
 @dataclass
 class OptimizeResult:
@@ -42,6 +46,18 @@ class OptimizeResult:
     scorecard: Scorecard
     trace: list[tuple[dict[str, Any], float]]  # (config, score) in eval order
     notes: str  # the agent's closing rationale (advisory)
+
+
+@dataclass(frozen=True)
+class EvalEvent:
+    """One scored step of the optimizer loop — the ``on_eval`` payload (an
+    "epoch": the config just tried, its metrics, and the best so far)."""
+
+    index: int  # 1-based, among scored evals
+    max_evals: int
+    config: RetrievalConfig
+    scorecard: Scorecard
+    best_score: float  # best score seen so far, this eval included
 
 
 _OPTIMIZER_SYSTEM_PROMPT = (
@@ -73,13 +89,20 @@ def optimize_retrieval(
     k: int = 5,
     max_evals: int = 12,
     max_failures_shown: int = 6,
+    on_eval: Callable[[EvalEvent], None] | None = None,
 ) -> OptimizeResult:
     """Let ``optimizer_model`` search the config space over ``bank``.
 
     ``rerank_model`` overrides the rerank block's model object (pass a
     cheap model / a ``FunctionModel`` in tests); ``None`` uses each
     config's ``rerank_model`` string. ``max_evals`` soft-caps how many
-    configs the agent may score.
+    configs the agent may score (the "turn budget").
+
+    ``on_eval(EvalEvent)`` fires once per scored eval — an epoch-style
+    progress hook carrying the config just tried, its metrics, and the
+    best score so far. Defaults to one INFO log line per eval (e.g.
+    ``[eval 3/12] strategy=rerank score=0.620 (hit@5=0.550 abstain=0.800)
+    best=0.710``); wire it to your own display if you like.
     """
     from pydantic_ai import Agent
 
@@ -132,10 +155,21 @@ def optimize_retrieval(
             retriever = build_retriever(store, cfg, model=rerank_model)
             card = evaluate(retriever, bank, k=k)
         except OutmemError as exc:
+            log.info("optimize: skipped strategy=%s (%s)", strategy, exc)
             return f"config unavailable: {exc}"
         trace.append((cfg.to_dict(), card.score))
         if card.score > best["score"]:
             best.update(score=card.score, cfg=cfg, card=card)
+        _report_eval(
+            on_eval,
+            EvalEvent(
+                index=len(trace),
+                max_evals=max_evals,
+                config=cfg,
+                scorecard=card,
+                best_score=best["score"],
+            ),
+        )
         return _format_card(cfg, card, remaining=max_evals - len(trace),
                             max_failures_shown=max_failures_shown)
 
@@ -173,6 +207,25 @@ def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:
         f"{max_evals} `run_eval` calls. Start with the lexical baseline, "
         f"diagnose its failures by reading gold pages, then improve."
     )
+
+
+def _format_epoch(event: EvalEvent) -> str:
+    c = event.scorecard
+    return (
+        f"[eval {event.index}/{event.max_evals}] strategy={event.config.strategy} "
+        f"score={c.score:.3f} (hit@{c.k}={c.hit_at_k:.3f} abstain={c.abstention:.3f}) "
+        f"best={event.best_score:.3f}"
+    )
+
+
+def _report_eval(on_eval: Callable[[EvalEvent], None] | None, event: EvalEvent) -> None:
+    if on_eval is None:
+        log.info(_format_epoch(event))
+        return
+    try:
+        on_eval(event)
+    except Exception as exc:  # a progress callback must never break the loop
+        log.warning("on_eval raised (%s); ignoring", exc)
 
 
 def _format_card(

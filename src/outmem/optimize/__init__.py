@@ -29,9 +29,10 @@ from outmem.optimize.dataset import (
     generate_bank,
     harvest_unanswerable,
 )
-from outmem.optimize.optimizer import OptimizeResult, optimize_retrieval
+from outmem.optimize.optimizer import EvalEvent, OptimizeResult, optimize_retrieval
 
 __all__ = [
+    "EvalEvent",
     "OptimizeResult",
     "Question",
     "QuestionBank",

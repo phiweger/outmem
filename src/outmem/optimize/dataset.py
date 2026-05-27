@@ -20,8 +20,10 @@ this module never requires the ``agent`` extra.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -75,36 +77,55 @@ def generate_bank(
     slugs: list[str] | None = None,
     max_pages: int | None = None,
     include_unanswerable: bool = True,
+    max_concurrency: int = 8,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> QuestionBank:
     """Generate a provenance-labelled bank from the wiki.
 
-    For each page (optionally a ``slugs`` subset / ``max_pages`` cap),
-    ask ``model`` for ``per_page`` natural questions the page answers;
-    gold = that slug. Unanswerable questions are harvested from the gap
-    log when ``include_unanswerable``.
+    Volume knobs: ``per_page`` questions per page (a cap), over
+    ``store.list_slugs()`` — or a ``slugs`` subset / the first
+    ``max_pages``. So roughly ``per_page * pages`` answerable samples,
+    plus up to 20 unanswerable harvested from the gap log.
+
+    The per-page model calls run concurrently, at most ``max_concurrency``
+    in flight (default 8). ``on_progress(done, total)`` fires as each page
+    finishes (defaults to INFO logging) — wire it to a progress bar if you
+    like.
     """
     page_slugs = slugs if slugs is not None else store.list_slugs()
     if max_pages is not None:
         page_slugs = page_slugs[:max_pages]
 
-    answerable: list[Question] = []
+    # Read pages up front (cheap, sequential); skip unreadable ones so one
+    # malformed page can't abort the bank.
+    pages: list[tuple[str, str, str, str | None]] = []
     for slug in page_slugs:
         try:
             page = store.read(slug)
-        except OutmemError as exc:  # one malformed page must not abort the bank
+        except OutmemError as exc:
             log.warning("skipping unreadable page %r (%s)", slug, exc)
             continue
-        source = _first_source(page.frontmatter)
-        for q in _generate_for_page(model, page.title, page.body, per_page):
-            answerable.append(Question(question=q, gold_slugs=(slug,), source=source))
+        pages.append((slug, page.title, page.body, _first_source(page.frontmatter)))
 
-    # …but if EVERY page produced nothing, that's a systemic failure (bad
-    # model id, missing/invalid API key) — surface it loudly rather than
+    # Generate for all pages concurrently — the slow, I/O-bound part.
+    generated = (
+        asyncio.run(_generate_pages(model, pages, per_page, max_concurrency, on_progress))
+        if pages
+        else []
+    )
+    answerable = [
+        Question(question=q, gold_slugs=(slug,), source=source)
+        for slug, source, questions in generated
+        for q in questions
+    ]
+
+    # If pages were readable but EVERY one produced nothing, that's a
+    # systemic failure (bad model id / API key) — surface it rather than
     # return a silently empty bank the optimizer would "tune" against.
     if page_slugs and not answerable:
         raise OutmemError(
             f"question generation produced no questions across {len(page_slugs)} "
-            "page(s) — check the model id and API key"
+            "page(s) — all unreadable, or the model id / API key is misconfigured"
         )
 
     unanswerable = harvest_unanswerable(store) if include_unanswerable else []
@@ -155,7 +176,15 @@ _GEN_SYSTEM_PROMPT = (
 )
 
 
-def _generate_for_page(model: Any, title: str, body: str, n: int) -> list[str]:
+async def _generate_pages(
+    model: Any,
+    pages: list[tuple[str, str, str, str | None]],
+    per_page: int,
+    max_concurrency: int,
+    on_progress: Callable[[int, int], None] | None,
+) -> list[tuple[str, str | None, list[str]]]:
+    """Generate questions for every page, at most ``max_concurrency`` in
+    flight. Returns ``(slug, source, questions)`` in input order."""
     from pydantic_ai import Agent
 
     agent_kwargs: dict[str, Any] = {"model_settings": {"max_tokens": 1024}}
@@ -165,9 +194,30 @@ def _generate_for_page(model: Any, title: str, body: str, n: int) -> list[str]:
         system_prompt=_GEN_SYSTEM_PROMPT,
         **agent_kwargs,
     )
+    sem = asyncio.Semaphore(max(1, max_concurrency))
+    total = len(pages)
+    results: list[tuple[str, str | None, list[str]]] = [
+        (slug, source, []) for slug, _, _, source in pages
+    ]
+    done = 0
+
+    async def _one(index: int) -> None:
+        nonlocal done
+        slug, title, body, source = pages[index]
+        async with sem:
+            questions = await _gen_one(agent, title, body, per_page)
+        results[index] = (slug, source, questions)
+        done += 1
+        _report_progress(on_progress, done, total)
+
+    await asyncio.gather(*(_one(i) for i in range(total)))
+    return results
+
+
+async def _gen_one(agent: Any, title: str, body: str, n: int) -> list[str]:
     prompt = f"Write {n} questions.\n\nTITLE: {title}\n\nBODY:\n{body[:4000]}"
     try:
-        run = agent.run_sync(prompt)
+        run = await agent.run(prompt)
     except Exception as exc:  # one page failing must not abort the whole bank…
         log.warning("question generation failed for a page (%s); skipping", exc)
         return []
@@ -179,6 +229,18 @@ def _generate_for_page(model: Any, title: str, body: str, n: int) -> list[str]:
         if len(out) >= n:
             break
     return out
+
+
+def _report_progress(
+    on_progress: Callable[[int, int], None] | None, done: int, total: int
+) -> None:
+    if on_progress is None:
+        log.info("generate_bank: %d/%d pages", done, total)
+        return
+    try:
+        on_progress(done, total)
+    except Exception as exc:  # a progress callback must never break generation
+        log.warning("on_progress raised (%s); ignoring", exc)
 
 
 def _first_source(frontmatter: Any) -> str | None:

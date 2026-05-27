@@ -19,6 +19,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from outmem.exceptions import OutmemError
 from outmem.optimize import (
+    EvalEvent,
     Question,
     QuestionBank,
     RetrievalConfig,
@@ -187,6 +188,31 @@ class TestDataset:
         )
         assert _first_source(SimpleNamespace(provenance=["raw/deck.md"])) == "raw/deck.md"
         assert _first_source(SimpleNamespace(provenance=[])) is None
+
+    def test_generate_bank_reports_progress(self, store: WikiStore) -> None:
+        calls: list[tuple[int, int]] = []
+        generate_bank(
+            store,
+            model=_questions_model(["q?"]),
+            per_page=1,
+            include_unanswerable=False,
+            on_progress=lambda done, total: calls.append((done, total)),
+        )
+        n = len(store.list_slugs())
+        assert len(calls) == n                              # one tick per page
+        assert [done for done, _ in calls] == list(range(1, n + 1))  # monotonic
+        assert calls[-1] == (n, n)                          # ends at total
+
+    def test_generate_bank_max_concurrency_one(self, store: WikiStore) -> None:
+        # Serialised generation must produce the same count as parallel.
+        gb = generate_bank(
+            store,
+            model=_questions_model(["a?", "b?"]),
+            per_page=2,
+            include_unanswerable=False,
+            max_concurrency=1,
+        )
+        assert len(gb.answerable) == 2 * len(store.list_slugs())
 
 
 # --- rerank block (relevance filter as a retriever) ------------------------
@@ -365,3 +391,32 @@ def test_optimize_survives_bad_strategy_from_agent(
     # real scored baseline rather than crashing.
     assert result.trace == []
     assert result.best_config.strategy == "lexical"
+
+
+def test_optimize_reports_epochs(store: WikiStore, bank: QuestionBank) -> None:
+    """on_eval fires once per scored eval — an epoch with index/max_evals,
+    the config tried, its metrics, and best-so-far."""
+    events: list[EvalEvent] = []
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        if state["n"] <= 2:  # two scored evals, then finish
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name="run_eval", args={"strategy": "lexical"})]
+            )
+        return ModelResponse(parts=[TextPart("done")])
+
+    optimize_retrieval(
+        store,
+        bank,
+        optimizer_model=FunctionModel(optimizer),
+        k=3,
+        max_evals=5,
+        on_eval=events.append,
+    )
+    assert [e.index for e in events] == [1, 2]          # one epoch per scored eval
+    assert all(e.max_evals == 5 for e in events)        # the turn budget is carried
+    assert events[1].best_score >= events[0].best_score  # best is non-decreasing
+    assert events[-1].config.strategy == "lexical"
+    assert 0.0 <= events[-1].scorecard.score <= 1.0
