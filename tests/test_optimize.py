@@ -27,7 +27,11 @@ from outmem.optimize import (
     generate_bank,
     optimize_retrieval,
 )
-from outmem.optimize.blocks import LexicalRetriever, SemanticRetriever
+from outmem.optimize.blocks import (
+    HybridRetriever,
+    LexicalRetriever,
+    SemanticRetriever,
+)
 from outmem.store import WikiStore
 
 
@@ -210,6 +214,44 @@ class TestSemanticBlock:
         monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
         assert len(SemanticRetriever(store).retrieve("x", k=2).slugs) == 2
+
+
+# --- hybrid block (RRF of lexical + semantic) ------------------------------
+
+
+class TestHybridBlock:
+    def test_fuses_both_signals(
+        self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prefix = f"{store.config.wiki_dir}/pages/"
+
+        # Semantic surfaces ceftriaxone first, then penicillin — a different
+        # order than lexical (which keys on the word "penicillin").
+        def fake_find(text: str, *, top_k: int = 0, **_: Any) -> list[Any]:
+            return [
+                SimpleNamespace(rel_path=f"{prefix}abx/ceftriaxone.md", chunk_index=0,
+                                similarity=0.9, content="…"),
+                SimpleNamespace(rel_path=f"{prefix}abx/penicillin.md", chunk_index=0,
+                                similarity=0.7, content="…"),
+            ]
+
+        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_find_similar", fake_find)
+
+        fused = HybridRetriever(store).retrieve("penicillin", k=5).slugs
+        # penicillin appears in BOTH lists → fuses to the top.
+        assert fused[0] == "abx:penicillin"
+        # ceftriaxone (semantic-only) is still pulled in.
+        assert "abx:ceftriaxone" in fused
+
+    def test_degrades_to_lexical_when_semantic_off(self, store: WikiStore) -> None:
+        # Fresh wiki: semantic disabled. Hybrid must still run (lexical-only).
+        out = HybridRetriever(store).retrieve("penicillin endocarditis", k=3)
+        assert "abx:penicillin" in out.slugs
+
+    def test_build_retriever_hybrid(self, store: WikiStore) -> None:
+        r = build_retriever(store, RetrievalConfig(strategy="hybrid", rrf_k=30))
+        assert r.name == "hybrid"
 
 
 # --- the agent-driven optimizer --------------------------------------------

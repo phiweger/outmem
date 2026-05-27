@@ -400,6 +400,9 @@ agent = Agent(
   `config.yaml`, `.env`, environment variables, system requirements.
 - [`docs/features.md`](docs/features.md) — semantic index, relevance
   filter, retrieval tuning, write approval, Logfire, dashboard (all opt-in).
+- [`docs/autoresearch.md`](docs/autoresearch.md) — making outmem improve
+  its own retrieval: the block optimizer (now) and the self-modifying
+  code loop (future).
 - [`docs/development.md`](docs/development.md) — dev install,
   repository layout.
 - [`specs/concept.md`](specs/concept.md) — the original pattern this

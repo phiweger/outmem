@@ -93,18 +93,21 @@ def optimize_retrieval(
         rerank_model_id: str = DEFAULT_RELEVANCE_MODEL,
         max_relevant: int = 8,
         semantic_top_k: int = 8,
+        rrf_k: int = 60,
     ) -> str:
         """Score one retrieval config on the benchmark and report the
         result plus a sample of failing questions.
 
         Args:
             strategy: "lexical" (keyword only), "rerank" (keyword net +
-                cheap-model relevance gate), or "semantic" (stub).
+                cheap-model relevance gate), "semantic" (vector
+                similarity), or "hybrid" (RRF of lexical + semantic).
             case_insensitive: case-fold the keyword search.
             max_candidates: width of the keyword net before reranking.
             rerank_model_id: model id for the rerank block.
             max_relevant: cap on pages the rerank block keeps.
-            semantic_top_k: neighbours for the semantic block.
+            semantic_top_k: neighbours for the semantic / hybrid blocks.
+            rrf_k: Reciprocal Rank Fusion constant for the hybrid block.
         """
         if len(trace) >= max_evals:
             return (
@@ -119,6 +122,7 @@ def optimize_retrieval(
                 "rerank_model": rerank_model_id,
                 "max_relevant": max_relevant,
                 "semantic_top_k": semantic_top_k,
+                "rrf_k": rrf_k,
             }
         )
         try:

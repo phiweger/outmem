@@ -21,6 +21,7 @@ shared helper.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -52,7 +53,7 @@ class Retriever(Protocol):
 
 # --- the (small, honest) search space ------------------------------------
 
-_STRATEGIES = ("lexical", "rerank", "semantic")
+_STRATEGIES = ("lexical", "rerank", "semantic", "hybrid")
 
 
 @dataclass(frozen=True)
@@ -64,12 +65,13 @@ class RetrievalConfig:
     plain dict.
     """
 
-    strategy: str = "lexical"  # "lexical" | "rerank" | "semantic"
+    strategy: str = "lexical"  # "lexical" | "rerank" | "semantic" | "hybrid"
     case_insensitive: bool = True
     max_candidates: int = 30  # width of the keyword net before rerank
     rerank_model: str = DEFAULT_RELEVANCE_MODEL
     max_relevant: int = 8
-    semantic_top_k: int = 8  # used by the (stub) semantic block
+    semantic_top_k: int = 8  # neighbours for the semantic / hybrid blocks
+    rrf_k: int = 60  # Reciprocal Rank Fusion constant (hybrid block)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +81,7 @@ class RetrievalConfig:
             "rerank_model": self.rerank_model,
             "max_relevant": self.max_relevant,
             "semantic_top_k": self.semantic_top_k,
+            "rrf_k": self.rrf_k,
         }
 
     @classmethod
@@ -101,6 +104,8 @@ class RetrievalConfig:
             cfg = replace(cfg, max_relevant=int(data["max_relevant"]))
         if "semantic_top_k" in data:
             cfg = replace(cfg, semantic_top_k=int(data["semantic_top_k"]))
+        if "rrf_k" in data:
+            cfg = replace(cfg, rrf_k=int(data["rrf_k"]))
         if "rerank_model" in data:
             cfg = replace(cfg, rerank_model=str(data["rerank_model"]))
         return cfg
@@ -126,6 +131,13 @@ def build_retriever(
         )
     if config.strategy == "semantic":
         return SemanticRetriever(store, top_k=config.semantic_top_k)
+    if config.strategy == "hybrid":
+        return HybridRetriever(
+            store,
+            top_k=config.semantic_top_k,
+            case_insensitive=config.case_insensitive,
+            rrf_k=config.rrf_k,
+        )
     raise OutmemError(f"unknown strategy {config.strategy!r}")
 
 
@@ -245,6 +257,46 @@ class SemanticRetriever:
         return RetrievalResult(tuple(slugs))
 
 
+class HybridRetriever:
+    """Reciprocal Rank Fusion of the ``lexical`` and ``semantic`` blocks.
+
+    Runs both, then fuses their ranked lists by RRF — each page scores
+    ``sum 1 / (rrf_k + rank)`` across the lists it appears in, so a page
+    ranked highly by *either* signal surfaces, and one ranked by *both*
+    surfaces strongest. Often the best single strategy: keyword precision
+    plus semantic recall.
+
+    Degrades gracefully: if the semantic block is unavailable
+    (``semantic.enabled`` off / no index), fusion proceeds with the
+    lexical list alone rather than failing — so ``hybrid`` is always
+    runnable (it just collapses toward ``lexical``).
+    """
+
+    name = "hybrid"
+
+    def __init__(
+        self,
+        store: WikiStore,
+        *,
+        top_k: int = 8,
+        case_insensitive: bool = True,
+        rrf_k: int = 60,
+    ) -> None:
+        self._lexical = LexicalRetriever(store, case_insensitive=case_insensitive)
+        self._semantic = SemanticRetriever(store, top_k=top_k)
+        self._rrf_k = rrf_k
+
+    def retrieve(self, question: str, *, k: int) -> RetrievalResult:
+        depth = max(k, 10)  # fuse a little deeper than the cutoff
+        lists: list[tuple[str, ...]] = [
+            self._lexical.retrieve(question, k=depth).slugs
+        ]
+        # Semantic unavailable (disabled / no index) → lexical-only fusion.
+        with contextlib.suppress(OutmemError):
+            lists.append(self._semantic.retrieve(question, k=depth).slugs)
+        return RetrievalResult(_reciprocal_rank_fusion(lists, self._rrf_k)[:k])
+
+
 # --- shared helpers --------------------------------------------------------
 
 # Tiny stopword set — enough to stop the keyword net from being dominated
@@ -269,6 +321,18 @@ def _keywords(question: str, *, max_terms: int = 12) -> str:
         if len(tok) >= 3 and tok not in _STOP and tok not in seen:
             seen.append(tok)
     return "|".join(seen[:max_terms])
+
+
+def _reciprocal_rank_fusion(
+    ranked_lists: list[tuple[str, ...]], rrf_k: int
+) -> tuple[str, ...]:
+    """Fuse ranked slug lists by RRF; ties keep first-contributed order."""
+    scores: dict[str, float] = {}
+    for slugs in ranked_lists:
+        for rank, slug in enumerate(slugs):
+            scores[slug] = scores.get(slug, 0.0) + 1.0 / (rrf_k + rank + 1)
+    # sorted() is stable, so equal-score slugs retain dict insertion order.
+    return tuple(sorted(scores, key=lambda s: -scores[s]))
 
 
 def _rank_by_frequency(hits: tuple[Any, ...]) -> tuple[str, ...]:

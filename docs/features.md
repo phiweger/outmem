@@ -206,6 +206,9 @@ multiple corpora, opening a PR — is a maintainer activity, documented in
 [`improve.md`](../improve.md) with a stub workflow at
 `.github/workflows/autoresearch.yml`.
 
+Full design (and the current-vs-future split) is in
+[autoresearch.md](autoresearch.md).
+
 ## Write approval (HITL)
 
 Off by default. When `approval.required_for_writes: true` in `config.yaml`,
