@@ -213,10 +213,11 @@ def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:
 
 def _format_epoch(event: EvalEvent) -> str:
     c = event.scorecard
+    star = " *" if c.score >= event.best_score else ""  # this eval is (tied) best
     return (
-        f"[eval {event.index}/{event.max_evals}] strategy={event.config.strategy} "
+        f"[eval {event.index}/{event.max_evals}] {event.config.strategy} "
         f"score={c.score:.3f} (hit@{c.k}={c.hit_at_k:.3f} abstain={c.abstention:.3f}) "
-        f"best={event.best_score:.3f}"
+        f"best={event.best_score:.3f}{star}"
     )
 
 
