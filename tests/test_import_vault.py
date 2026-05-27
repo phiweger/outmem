@@ -154,15 +154,26 @@ def test_import_creates_single_commit(store: WikiStore, vault: Path) -> None:
     head_after = store.head()
     assert head_before is not None and head_after is not None and head_before != head_after
 
-    # Walk the parent chain: exactly one commit between head_before and head_after.
-    from outmem.git_ops import log_since
+    # Exactly one commit in the SHA range head_before..head_after. Use a
+    # rev-list range (deterministic) rather than `git log --since`, which
+    # parses its argument as an approximate *date* — feeding it a commit SHA
+    # is version-dependent and flaky.
+    import subprocess
 
-    new_commits = [
-        c for c in log_since(store.root, since=head_before)
-        if c.sha != head_before
-    ]
-    assert len(new_commits) == 1
-    assert new_commits[0].subject == "import: vault"
+    new_shas = subprocess.run(
+        ["git", "-C", str(store.root), "rev-list", f"{head_before}..{head_after}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert len(new_shas) == 1
+    subject = subprocess.run(
+        ["git", "-C", str(store.root), "log", "-1", "--format=%s", head_after],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert subject == "import: vault"
 
 
 def test_import_skips_hidden_dirs(store: WikiStore, vault: Path) -> None:
