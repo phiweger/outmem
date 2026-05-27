@@ -89,7 +89,11 @@ def generate_bank(
 
     answerable: list[Question] = []
     for slug in page_slugs:
-        page = store.read(slug)
+        try:
+            page = store.read(slug)
+        except OutmemError as exc:  # one malformed page must not abort the bank
+            log.warning("skipping unreadable page %r (%s)", slug, exc)
+            continue
         source = _first_source(page.frontmatter)
         for q in _generate_for_page(model, page.title, page.body, per_page):
             answerable.append(Question(question=q, gold_slugs=(slug,), source=source))
@@ -178,16 +182,20 @@ def _generate_for_page(model: Any, title: str, body: str, n: int) -> list[str]:
 
 
 def _first_source(frontmatter: Any) -> str | None:
+    """First provenance pointer as a string, or None. Provenance entries
+    are ``str`` (a path) or ``dict`` (path + ingestion metadata)."""
     prov = getattr(frontmatter, "provenance", None) or []
     if not prov:
         return None
     entry = prov[0]
-    # ProvenanceEntry may be a str or a small object; render best-effort.
-    for attr in ("path", "source", "ref"):
-        val = getattr(entry, attr, None)
-        if val:
-            return str(val)
-    return str(entry)
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        for key in ("path", "source", "ref"):
+            val = entry.get(key)
+            if val:
+                return str(val)
+    return None
 
 
 def _q_to_dict(q: Question) -> dict[str, Any]:

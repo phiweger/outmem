@@ -15,7 +15,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from outmem.relevance import relevance_filter
+from outmem.relevance import FilterOutcome, relevance_filter
 from outmem.store import WikiStore
 
 
@@ -126,3 +126,11 @@ class TestRelevanceFilter:
             store, query="penicillin", model=model, context="lines"
         )
         assert [p.slug for p in out.kept] == ["abx:penicillin"]
+
+    def test_survives_non_utf8_page(self, store: WikiStore) -> None:
+        """A non-UTF-8 page must not crash the filter — plain search
+        tolerates it, so the filtered variant must too (regression:
+        _excerpt only caught OutmemError, letting UnicodeDecodeError escape)."""
+        (store.pages_path / "badpage.md").write_bytes(b"penicillin \xff\xfe bytes\n")
+        out = relevance_filter(store, query="penicillin", model=_model_returning([]))
+        assert isinstance(out, FilterOutcome)  # did not raise

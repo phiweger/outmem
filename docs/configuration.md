@@ -7,7 +7,7 @@ Four files configure outmem at startup:
   domain framing ("what this wiki is for"), page structure templates,
   source-handling preferences, what-rises-to-a-page-vs-log heuristics.
   Seeded by `outmem init` with sparse placeholders. You and the agent
-  co-evolve it. See [wiki/AGENTS.md](#wikis-agentsmd) below.
+  co-evolve it. See [wiki/AGENTS.md](#wikiagentsmd) below.
 * **`config.yaml`** at the **wiki root** — machine-readable settings
   (model, agent identity, git resilience, remote, optional features).
   Tracked in git so a team shares the same defaults. `outmem init`
@@ -92,6 +92,16 @@ semantic:
   overlap_paragraphs: 1                   # paragraphs of overlap between chunks
   similarity_threshold: 0.80              # min cosine sim for find_similar
   top_k: 5
+
+# Optional — relevance filter over lexical search; requires `pip install outmem[agent]`. See features.md.
+relevance:
+  enabled: false                          # cheap-model gate; swaps the search_wiki tool
+  model: anthropic:claude-haiku-4-5
+  max_relevant: 8                         # cap on pages kept per search
+  max_candidates: 20                      # distinct pages sent to the filter
+  candidate_max_bytes: 65536              # width of the wide ripgrep net (bytes)
+  context: page                           # "page" (cap below) | "lines"
+  context_chars_per_page: 2000
 
 # Optional — HITL gate around write_page / extend_page. See features.md.
 approval:

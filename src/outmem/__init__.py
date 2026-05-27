@@ -37,7 +37,12 @@ from outmem.relevance import (
 from outmem.search import SearchHit
 from outmem.store import AgentIdentity, WikiPage, WikiStore, WikiStoreConfig
 
-__version__ = "0.1.0.dev0"
+try:
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("outmem")
+except Exception:  # not installed (bare source checkout) — avoid hard failure
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     "AgentIdentity",

@@ -168,6 +168,26 @@ class TestDataset:
         with pytest.raises(OutmemError):
             generate_bank(store, model=FunctionModel(boom), per_page=2)
 
+    def test_generate_bank_skips_unreadable_page(self, store: WikiStore) -> None:
+        # One malformed page (no frontmatter) must not abort the whole bank.
+        (store.pages_path / "malformed.md").write_text("no frontmatter", encoding="utf-8")
+        gb = generate_bank(
+            store, model=_questions_model(["q?"]), per_page=1, include_unanswerable=False
+        )
+        assert gb.answerable  # the good fixture pages still generated
+        assert all("malformed" not in s for q in gb.answerable for s in q.gold_slugs)
+
+    def test_first_source_handles_str_and_dict_provenance(self) -> None:
+        from outmem.optimize.dataset import _first_source
+
+        # dict-shaped provenance (ingested source) → the path, not a stringified dict
+        assert (
+            _first_source(SimpleNamespace(provenance=[{"path": "sources/x/doc.md"}]))
+            == "sources/x/doc.md"
+        )
+        assert _first_source(SimpleNamespace(provenance=["raw/deck.md"])) == "raw/deck.md"
+        assert _first_source(SimpleNamespace(provenance=[])) is None
+
 
 # --- rerank block (relevance filter as a retriever) ------------------------
 

@@ -27,8 +27,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from outmem.config import DEFAULT_RELEVANCE_MODEL
 from outmem.exceptions import OutmemError
-from outmem.relevance import DEFAULT_RELEVANCE_MODEL, relevance_filter
+from outmem.relevance import relevance_filter
 from outmem.slug import PAGES_DIR, relpath_to_slug
 
 if TYPE_CHECKING:

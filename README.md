@@ -276,7 +276,7 @@ store = WikiStore.open("/path/to/wiki")
 
 agent = Agent(
     "anthropic:claude-sonnet-4-6",
-    tools=wiki_tools(store),                   # 9 typed functions
+    tools=wiki_tools(store),                   # 12 tools (13 with semantic)
     system_prompt=render_system_prompt(store), # identical to outmem ask's
 )
 ```

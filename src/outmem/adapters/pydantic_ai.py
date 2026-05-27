@@ -708,6 +708,7 @@ def _resolve_relevance(
         model=settings.model,
         max_relevant=settings.max_relevant,
         max_candidates=settings.max_candidates,
+        candidate_max_bytes=settings.candidate_max_bytes,
         context=settings.context,
         context_chars_per_page=settings.context_chars_per_page,
     )

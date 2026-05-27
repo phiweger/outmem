@@ -112,6 +112,14 @@ def test_relevance_block_parsed(tmp_path: Path) -> None:
     assert cfg.relevance.context_chars_per_page == 1500
 
 
+def test_relevance_candidate_max_bytes_parsed(tmp_path: Path) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "relevance:\n  enabled: true\n  candidate_max_bytes: 131072\n", encoding="utf-8"
+    )
+    cfg = load_yaml_config(tmp_path)
+    assert cfg.relevance.candidate_max_bytes == 131072
+
+
 def test_relevance_bad_context_ignored(tmp_path: Path) -> None:
     """An out-of-enum context value is rejected, keeping the default."""
     (tmp_path / "config.yaml").write_text(

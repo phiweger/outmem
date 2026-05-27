@@ -53,7 +53,8 @@ def retrieve(self, question: str, *, k: int) -> RetrievalResult: ...
 ```bash
 ruff check src/outmem/optimize && mypy src/outmem      # must pass
 pytest -q                                              # must stay green
-python -m outmem.optimize.run --corpus <fixture> ...   # benchmark; record score
+# score the bank, e.g. outmem.optimize.evaluate(build_retriever(store, cfg), bank)
+# (add a `python -m outmem.optimize.run` entry point to make this one command)
 ```
 
 Keep the change (commit) only if **tests pass AND score improved**;

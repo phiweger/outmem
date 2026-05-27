@@ -213,7 +213,7 @@ agent = Agent(
 result = await agent.run("what did we decide about pricing?")
 ```
 
-The nine tools:
+The tools — twelve, plus `find_similar` when `semantic.enabled` (thirteen):
 
 | Tool | Required args | Purpose |
 |------|---------------|---------|
@@ -223,9 +223,13 @@ The nine tools:
 | `find_backlinks(slug)` | 1 | Pages linking *to* slug |
 | `page_history(slug)` | 1 | Commits touching the page |
 | `topic_evolution(slugs, include_log)` | 1 | `git log -p --follow` diff stream |
+| `list_sources()` | 0 | Registered source files under `wiki/sources/` |
+| `read_source(rel_path)` | 1 | Full text of a registered source |
 | `write_page(slug, title, body, provenance, tags)` | **3** | New page → commit `compact: <slug>` |
 | `extend_page(slug, body)` | **2** | Replace body → commit `extend: <slug>` |
 | `append_log(topic, content)` | **2** | Append entry → commit `log: <topic>` |
+| `record_ingestion(rel_path, prompt, pages_touched)` | 1 | Note a source as ingested |
+| `find_similar(text, top_k, exclude_slug)` | 1 | Vector search — only when `semantic.enabled` |
 
 ## Read-only consult — wiki as a tool in someone else's agent
 
@@ -362,5 +366,40 @@ The runtime enforces the spec §9 contract:
   re-read is a v0.2 enhancement).
 
 The system prompt comes from `src/outmem/agent/prompts/system.j2` plus
-the user's `wiki/AGENTS.md` (see [configuration.md](configuration.md#wikis-agentsmd))
+the user's `wiki/AGENTS.md` (see [configuration.md](configuration.md#wikiagentsmd))
 — the runtime process layer + per-wiki conventions layer.
+
+## Retrieval tuning — `outmem.optimize`
+
+Optional (`pip install outmem[agent]`; the `semantic`/`hybrid` blocks also
+need `outmem[semantic]`). Search composable retrieval blocks for the config
+that scores best on *your* wiki. Design:
+[features.md](features.md#retrieval-tuning) and [autoresearch.md](autoresearch.md).
+
+```python
+from outmem import WikiStore
+from outmem.optimize import (
+    RetrievalConfig,     # a point in the search space (strategy + knobs)
+    build_retriever,     # RetrievalConfig -> a live Retriever
+    Question, QuestionBank,
+    generate_bank,       # provenance-labelled bank from the wiki (LLM)
+    evaluate,            # score a retriever -> Scorecard
+    optimize_retrieval,  # agent-driven config search -> OptimizeResult
+)
+
+store = WikiStore.open("/srv/wiki")
+bank = generate_bank(store, model="anthropic:claude-haiku-4-5")  # or QuestionBank.load("bank.json")
+result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-4-6")
+result.best_config   # winning strategy + knobs for this corpus
+result.best_score    # the metric it achieved (Hit@k blended with abstention)
+result.trace         # [(config_dict, score), ...] — every config tried
+```
+
+Entry-point signatures:
+
+- `generate_bank(store, *, model, per_page=2, slugs=None, max_pages=None, include_unanswerable=True) -> QuestionBank`
+- `optimize_retrieval(store, bank, *, optimizer_model, rerank_model=None, k=5, max_evals=12) -> OptimizeResult`
+- `evaluate(retriever, bank, *, k=5) -> Scorecard` — `.score`, `.hit_at_k`, `.abstention`, `.failures`
+
+The bank is plain JSON (`QuestionBank.save` / `.load`), so a team with
+sensitive content can hand-author it and never send a page to a model.

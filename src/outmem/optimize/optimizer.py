@@ -25,11 +25,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from outmem.config import DEFAULT_RELEVANCE_MODEL
 from outmem.exceptions import OutmemError
 from outmem.optimize.bench import Scorecard, evaluate
 from outmem.optimize.blocks import RetrievalConfig, build_retriever
 from outmem.optimize.dataset import QuestionBank
-from outmem.relevance import DEFAULT_RELEVANCE_MODEL
 
 if TYPE_CHECKING:
     from outmem.store import WikiStore

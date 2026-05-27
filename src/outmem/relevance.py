@@ -44,7 +44,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from outmem.exceptions import OutmemError
+from outmem.config import (
+    DEFAULT_RELEVANCE_CANDIDATE_MAX_BYTES,
+    DEFAULT_RELEVANCE_CONTEXT,
+    DEFAULT_RELEVANCE_CONTEXT_CHARS,
+    DEFAULT_RELEVANCE_MAX_CANDIDATES,
+    DEFAULT_RELEVANCE_MAX_RELEVANT,
+)
 from outmem.search import DEFAULT_RESULT_BYTES, SearchHit
 from outmem.slug import relpath_to_slug
 
@@ -53,14 +59,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Defaults — also seeded into config.RelevanceSettings so a wiki can
-# flip the feature on from config.yaml without code.
-DEFAULT_RELEVANCE_MODEL = "anthropic:claude-haiku-4-5"
-DEFAULT_RELEVANCE_MAX_RELEVANT = 8
-DEFAULT_RELEVANCE_MAX_CANDIDATES = 20
-DEFAULT_RELEVANCE_CANDIDATE_MAX_BYTES = 64 * 1024
-DEFAULT_RELEVANCE_CONTEXT = "page"
-DEFAULT_RELEVANCE_CONTEXT_CHARS = 2000
+# Defaults for RelevanceConfig live in config.py (the single home for every
+# DEFAULT_* constant); imported above so the dataclass defaults and
+# config.RelevanceSettings can never drift.
 
 
 @dataclass(frozen=True)
@@ -314,7 +315,7 @@ def _excerpt(
     if context == "page" and scope == "wiki":
         try:
             body = store.read(key).body
-        except OutmemError:
+        except Exception:  # unreadable page (e.g. non-UTF-8) → fall back to lines
             body = ""
         if body:
             return body[:context_chars_per_page]

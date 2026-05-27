@@ -66,6 +66,7 @@ DEFAULT_RELEVANCE_MAX_RELEVANT = 8
 DEFAULT_RELEVANCE_MAX_CANDIDATES = 20
 DEFAULT_RELEVANCE_CONTEXT = "page"
 DEFAULT_RELEVANCE_CONTEXT_CHARS = 2000
+DEFAULT_RELEVANCE_CANDIDATE_MAX_BYTES = 64 * 1024
 
 DEFAULT_LOGFIRE_PROJECT: str | None = None
 LOGFIRE_SERVICE_NAME = "outmem"
@@ -161,6 +162,7 @@ class RelevanceSettings:
           model: anthropic:claude-haiku-4-5
           max_relevant: 8
           max_candidates: 20
+          candidate_max_bytes: 65536      # width of the wide ripgrep net
           context: page                 # "page" | "lines"
           context_chars_per_page: 2000
     """
@@ -169,6 +171,7 @@ class RelevanceSettings:
     model: str = DEFAULT_RELEVANCE_MODEL
     max_relevant: int = DEFAULT_RELEVANCE_MAX_RELEVANT
     max_candidates: int = DEFAULT_RELEVANCE_MAX_CANDIDATES
+    candidate_max_bytes: int = DEFAULT_RELEVANCE_CANDIDATE_MAX_BYTES
     context: str = DEFAULT_RELEVANCE_CONTEXT
     context_chars_per_page: int = DEFAULT_RELEVANCE_CONTEXT_CHARS
 
@@ -429,6 +432,8 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
             config.relevance.max_relevant = relevance_block["max_relevant"]
         if isinstance(relevance_block.get("max_candidates"), int):
             config.relevance.max_candidates = relevance_block["max_candidates"]
+        if isinstance(relevance_block.get("candidate_max_bytes"), int):
+            config.relevance.candidate_max_bytes = relevance_block["candidate_max_bytes"]
         if relevance_block.get("context") in ("page", "lines"):
             config.relevance.context = relevance_block["context"]
         if isinstance(relevance_block.get("context_chars_per_page"), int):
