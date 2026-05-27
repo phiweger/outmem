@@ -23,6 +23,7 @@ here.
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -100,9 +101,10 @@ def optimize_retrieval(
 
     ``on_eval(EvalEvent)`` fires once per scored eval — an epoch-style
     progress hook carrying the config just tried, its metrics, and the
-    best score so far. Defaults to one INFO log line per eval (e.g.
-    ``[eval 3/12] strategy=rerank score=0.620 (hit@5=0.550 abstain=0.800)
-    best=0.710``); wire it to your own display if you like.
+    best score so far. By default it prints one line per eval to stderr
+    (silent under pytest), e.g. ``[eval 3/12] strategy=rerank score=0.620
+    (hit@5=0.550 abstain=0.800) best=0.710``; wire it to your own display
+    or a logger if you like.
     """
     from pydantic_ai import Agent
 
@@ -219,13 +221,16 @@ def _format_epoch(event: EvalEvent) -> str:
 
 
 def _report_eval(on_eval: Callable[[EvalEvent], None] | None, event: EvalEvent) -> None:
-    if on_eval is None:
-        log.info(_format_epoch(event))
+    if on_eval is not None:
+        try:
+            on_eval(event)
+        except Exception as exc:  # a progress callback must never break the loop
+            log.warning("on_eval raised (%s); ignoring", exc)
         return
-    try:
-        on_eval(event)
-    except Exception as exc:  # a progress callback must never break the loop
-        log.warning("on_eval raised (%s); ignoring", exc)
+    # Default: print each epoch to stderr (silent under pytest, which
+    # captures it). Pass on_eval to route epochs to a logger / your own UI.
+    sys.stderr.write(_format_epoch(event) + "\n")
+    sys.stderr.flush()
 
 
 def _format_card(

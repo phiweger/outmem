@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,8 +90,9 @@ def generate_bank(
 
     The per-page model calls run concurrently, at most ``max_concurrency``
     in flight (default 8). ``on_progress(done, total)`` fires as each page
-    finishes (defaults to INFO logging) — wire it to a progress bar if you
-    like.
+    finishes; by default it prints a live counter to stderr (silent under
+    pytest, which captures stderr) — pass your own to route it to a bar or
+    a logger.
     """
     page_slugs = slugs if slugs is not None else store.list_slugs()
     if max_pages is not None:
@@ -234,13 +236,19 @@ async def _gen_one(agent: Any, title: str, body: str, n: int) -> list[str]:
 def _report_progress(
     on_progress: Callable[[int, int], None] | None, done: int, total: int
 ) -> None:
-    if on_progress is None:
-        log.info("generate_bank: %d/%d pages", done, total)
+    if on_progress is not None:
+        try:
+            on_progress(done, total)
+        except Exception as exc:  # a progress callback must never break generation
+            log.warning("on_progress raised (%s); ignoring", exc)
         return
-    try:
-        on_progress(done, total)
-    except Exception as exc:  # a progress callback must never break generation
-        log.warning("on_progress raised (%s); ignoring", exc)
+    # Default: a live counter on stderr — `\r`-updated on a TTY, one line
+    # per page otherwise (Jupyter, redirected output). pytest captures
+    # stderr, so this is silent in test runs. Pass on_progress to route
+    # progress elsewhere (a bar, a logger).
+    end = "\r" if (sys.stderr.isatty() and done < total) else "\n"
+    sys.stderr.write(f"generate_bank: {done}/{total} pages{end}")
+    sys.stderr.flush()
 
 
 def _first_source(frontmatter: Any) -> str | None:
