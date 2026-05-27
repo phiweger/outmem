@@ -124,18 +124,68 @@ worse than it measured.
 
 ### Quickstart
 
+Progress prints to **stderr** as it runs — a live page counter for
+`generate_bank`, one epoch line per eval for `optimize_retrieval`
+(`[eval 3/12] rerank score=0.620 (hit@5=0.550 abstain=0.800) best=0.710 *`,
+`*` marks a new best). No logging setup required.
+
 ```python
 from outmem import WikiStore
 from outmem.optimize import generate_bank, optimize_retrieval, QuestionBank
 
 store = WikiStore.open("/srv/wiki")
-bank = generate_bank(store, model="anthropic:claude-haiku-4-5")
-# …or sensitive corpus: bank = QuestionBank.load("bank.json")
 
-result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-4-6")
-print(result.best_config, result.best_score)   # write best_config into config.yaml
-for cfg, score in result.trace:                 # the experiment log
+# Build the bank (per-page calls run in parallel; progress on stderr).
+bank = generate_bank(store, model="anthropic:claude-haiku-4-5", max_pages=50)
+# …or, for sensitive content, hand-author the JSON and load it:
+# bank = QuestionBank.load("bank.json")
+
+result = optimize_retrieval(
+    store,
+    bank,
+    optimizer_model="anthropic:claude-sonnet-4-6",
+    eval_sample=30,       # score each config on 30 questions while tuning
+    eval_concurrency=8,   # 8 retrievals in flight per eval
+)
+print(result.best_config, result.best_score)   # winning config + its full-bank score
+for cfg, score in result.trace:                 # every config tried (sampled scores)
     print(score, cfg)
+```
+
+### Cost, scale & logging
+
+Every step is LLM calls, and `rerank`/`hybrid` are the multiplier:
+
+| step | model calls |
+| --- | --- |
+| `lexical` eval | 0 (pure ripgrep) |
+| `semantic` eval | embeddings only |
+| `rerank` / `hybrid` eval | **one filter call per bank question** |
+| the optimizer agent | one per reasoning turn (propose / diagnose) |
+
+So a single `rerank` eval over a 120-question bank is ~120 small-model
+calls; the optimizer trying it a few times reaches the hundreds. Three
+knobs bound it:
+
+- **`eval_sample=N`** — score each config on a fixed, seeded subset of N
+  answerable questions while tuning (the winner is re-scored on the full
+  bank, so `best_score` stays honest). The biggest lever.
+- **`eval_concurrency`** (and `generate_bank`'s `max_concurrency`) — run
+  the per-question / per-page calls in parallel (default 8). Cuts wall
+  time, not total cost.
+- **bank size** — `generate_bank(..., max_pages=…, per_page=…, slugs=[…])`;
+  `max_evals` caps the optimizer's turns.
+
+**Logging.** Progress and epochs write to stderr directly, so you don't
+need to configure logging to see them. If you *do* turn logging on, keep
+the HTTP client quiet — otherwise its one-line-per-request output buries
+everything:
+
+```python
+import logging
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 ```
 
 ---

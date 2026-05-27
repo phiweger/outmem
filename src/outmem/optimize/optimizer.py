@@ -88,6 +88,8 @@ def optimize_retrieval(
     optimizer_model: Any,
     rerank_model: Any = None,
     k: int = 5,
+    eval_concurrency: int = 8,
+    eval_sample: int | None = None,
     max_evals: int = 12,
     max_failures_shown: int = 6,
     on_eval: Callable[[EvalEvent], None] | None = None,
@@ -98,6 +100,15 @@ def optimize_retrieval(
     cheap model / a ``FunctionModel`` in tests); ``None`` uses each
     config's ``rerank_model`` string. ``max_evals`` soft-caps how many
     configs the agent may score (the "turn budget").
+
+    **Cost control.** A ``rerank`` / ``hybrid`` eval makes one model call
+    per bank question, so cost ≈ ``bank_size * rerank_evals`` (plus the
+    optimizer's own turns). Two knobs bound it: ``eval_concurrency``
+    (default 8) runs each eval's per-question calls in parallel, and
+    ``eval_sample`` caps the answerable questions scored *per eval* to a
+    fixed seeded subset — the winner is then re-scored on the full bank
+    so the reported score is honest. See ``docs/autoresearch.md`` for the
+    full run + logging recipe.
 
     ``on_eval(EvalEvent)`` fires once per scored eval — an epoch-style
     progress hook carrying the config just tried, its metrics, and the
@@ -155,7 +166,10 @@ def optimize_retrieval(
                 }
             )
             retriever = build_retriever(store, cfg, model=rerank_model)
-            card = evaluate(retriever, bank, k=k)
+            card = evaluate(
+                retriever, bank, k=k,
+                max_concurrency=eval_concurrency, sample=eval_sample,
+            )
         except OutmemError as exc:
             log.info("optimize: skipped strategy=%s (%s)", strategy, exc)
             return f"config unavailable: {exc}"
@@ -195,9 +209,20 @@ def optimize_retrieval(
 
     if best["cfg"] is None:  # agent never produced a scorable config
         cfg = RetrievalConfig()
-        card = evaluate(build_retriever(store, cfg, model=rerank_model), bank, k=k)
+        card = evaluate(
+            build_retriever(store, cfg, model=rerank_model),
+            bank, k=k, max_concurrency=eval_concurrency,
+        )
         return OptimizeResult(cfg, card.score, card, trace, notes)
-    return OptimizeResult(best["cfg"], best["score"], best["card"], trace, notes)
+
+    best_cfg: RetrievalConfig = best["cfg"]
+    best_card: Scorecard = best["card"]
+    if eval_sample is not None:  # winner chosen on a sample → re-score on full bank
+        best_card = evaluate(
+            build_retriever(store, best_cfg, model=rerank_model),
+            bank, k=k, max_concurrency=eval_concurrency,
+        )
+    return OptimizeResult(best_cfg, best_card.score, best_card, trace, notes)
 
 
 def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:

@@ -31,6 +31,7 @@ from outmem.optimize import (
 from outmem.optimize.blocks import (
     HybridRetriever,
     LexicalRetriever,
+    RetrievalResult,
     SemanticRetriever,
 )
 from outmem.store import WikiStore
@@ -112,6 +113,38 @@ class TestLexicalAndMetric:
         assert card.hit_at_k == 0.0
         assert len(card.failures) == 1
         assert card.failures[0].gold_slugs == ("abx:penicillin",)
+
+    def test_sample_caps_answerable_only(self) -> None:
+        class _Counting:
+            name = "count"
+
+            def __init__(self) -> None:
+                self.n = 0
+
+            def retrieve(self, question: str, *, k: int) -> RetrievalResult:
+                self.n += 1
+                return RetrievalResult(())
+
+        bank = QuestionBank(
+            answerable=[Question(f"q{i}?", ("s",)) for i in range(10)],
+            unanswerable=[Question("u?", ())],
+        )
+        r = _Counting()
+        card = evaluate(r, bank, sample=3, max_concurrency=1)
+        assert r.n == 3 + 1  # 3 sampled answerable + all (1) unanswerable
+        assert card.n_answerable == 3
+        assert card.n_unanswerable == 1
+
+    def test_concurrency_matches_sequential(
+        self, store: WikiStore, bank: QuestionBank
+    ) -> None:
+        seq = evaluate(LexicalRetriever(store), bank, k=3, max_concurrency=1)
+        par = evaluate(LexicalRetriever(store), bank, k=3, max_concurrency=8)
+        assert (seq.score, seq.hit_at_k, seq.abstention) == (
+            par.score,
+            par.hit_at_k,
+            par.abstention,
+        )
 
 
 class TestRetrievalConfig:
@@ -420,3 +453,30 @@ def test_optimize_reports_epochs(store: WikiStore, bank: QuestionBank) -> None:
     assert events[1].best_score >= events[0].best_score  # best is non-decreasing
     assert events[-1].config.strategy == "lexical"
     assert 0.0 <= events[-1].scorecard.score <= 1.0
+
+
+def test_optimize_eval_sample_rescores_winner_on_full_bank(
+    store: WikiStore, bank: QuestionBank
+) -> None:
+    """With eval_sample, configs are tuned on a subset but the winner is
+    re-scored on the FULL bank, so the reported scorecard covers all of it."""
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        if state["n"] == 1:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name="run_eval", args={"strategy": "lexical"})]
+            )
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store,
+        bank,
+        optimizer_model=FunctionModel(optimizer),
+        k=3,
+        max_evals=5,
+        eval_sample=1,  # tune on 1 answerable question…
+    )
+    # …but the returned scorecard reflects the whole bank (re-scored).
+    assert result.scorecard.n_answerable == len(bank.answerable)

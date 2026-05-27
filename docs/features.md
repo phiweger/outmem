@@ -186,7 +186,10 @@ multi-page (list) questions.
 the gold pages of failing questions to see *why* retrieval missed, forms
 a hypothesis, and picks the next config to try. It returns the
 best-*scoring* config it measured — the metric decides, not the agent's
-self-report.
+self-report. Progress prints to stderr as epoch lines. Since a `rerank`
+eval costs one model call per bank question, bound it with `eval_sample`
+(score on a seeded subset) and `eval_concurrency` — see
+[autoresearch.md](autoresearch.md#cost-scale--logging).
 
 ```python
 from outmem import WikiStore
