@@ -97,15 +97,15 @@ class RetrievalConfig:
                 )
             cfg = replace(cfg, strategy=strat)
         if "case_insensitive" in data:
-            cfg = replace(cfg, case_insensitive=bool(data["case_insensitive"]))
+            cfg = replace(cfg, case_insensitive=_as_bool(data["case_insensitive"]))
         if "max_candidates" in data:
-            cfg = replace(cfg, max_candidates=int(data["max_candidates"]))
+            cfg = replace(cfg, max_candidates=_as_int(data["max_candidates"], "max_candidates"))
         if "max_relevant" in data:
-            cfg = replace(cfg, max_relevant=int(data["max_relevant"]))
+            cfg = replace(cfg, max_relevant=_as_int(data["max_relevant"], "max_relevant"))
         if "semantic_top_k" in data:
-            cfg = replace(cfg, semantic_top_k=int(data["semantic_top_k"]))
+            cfg = replace(cfg, semantic_top_k=_as_int(data["semantic_top_k"], "semantic_top_k"))
         if "rrf_k" in data:
-            cfg = replace(cfg, rrf_k=int(data["rrf_k"]))
+            cfg = replace(cfg, rrf_k=_as_int(data["rrf_k"], "rrf_k"))
         if "rerank_model" in data:
             cfg = replace(cfg, rerank_model=str(data["rerank_model"]))
         return cfg
@@ -321,6 +321,25 @@ def _keywords(question: str, *, max_terms: int = 12) -> str:
         if len(tok) >= 3 and tok not in _STOP and tok not in seen:
             seen.append(tok)
     return "|".join(seen[:max_terms])
+
+
+def _as_bool(value: Any) -> bool:
+    """Lenient bool coercion. ``bool("false")`` is ``True`` in Python — a
+    footgun for hand-authored/JSON configs — so treat strings explicitly."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on"}
+    return bool(value)
+
+
+def _as_int(value: Any, field: str) -> int:
+    """Int coercion that fails as :class:`OutmemError` (honouring the
+    'lenient parse' contract) instead of a bare ``ValueError`` traceback."""
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise OutmemError(f"{field} must be an integer, got {value!r}") from exc
 
 
 def _reciprocal_rank_fusion(

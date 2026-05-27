@@ -114,18 +114,21 @@ def optimize_retrieval(
                 f"Eval budget exhausted ({max_evals}). Stop evaluating and "
                 "summarise the best config you found."
             )
-        cfg = RetrievalConfig.from_dict(
-            {
-                "strategy": strategy,
-                "case_insensitive": case_insensitive,
-                "max_candidates": max_candidates,
-                "rerank_model": rerank_model_id,
-                "max_relevant": max_relevant,
-                "semantic_top_k": semantic_top_k,
-                "rrf_k": rrf_k,
-            }
-        )
+        # from_dict raises OutmemError on a bad strategy and _as_int does
+        # the same on a bad number — keep it inside the try so a fumbled
+        # config is reported back to the agent, not crashed out of the run.
         try:
+            cfg = RetrievalConfig.from_dict(
+                {
+                    "strategy": strategy,
+                    "case_insensitive": case_insensitive,
+                    "max_candidates": max_candidates,
+                    "rerank_model": rerank_model_id,
+                    "max_relevant": max_relevant,
+                    "semantic_top_k": semantic_top_k,
+                    "rrf_k": rrf_k,
+                }
+            )
             retriever = build_retriever(store, cfg, model=rerank_model)
             card = evaluate(retriever, bank, k=k)
         except OutmemError as exc:

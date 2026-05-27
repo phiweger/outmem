@@ -21,6 +21,7 @@ this module never requires the ``agent`` extra.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,8 @@ from outmem.exceptions import OutmemError
 
 if TYPE_CHECKING:
     from outmem.store import WikiStore
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,15 @@ def generate_bank(
         for q in _generate_for_page(model, page.title, page.body, per_page):
             answerable.append(Question(question=q, gold_slugs=(slug,), source=source))
 
+    # …but if EVERY page produced nothing, that's a systemic failure (bad
+    # model id, missing/invalid API key) — surface it loudly rather than
+    # return a silently empty bank the optimizer would "tune" against.
+    if page_slugs and not answerable:
+        raise OutmemError(
+            f"question generation produced no questions across {len(page_slugs)} "
+            "page(s) — check the model id and API key"
+        )
+
     unanswerable = harvest_unanswerable(store) if include_unanswerable else []
     return QuestionBank(answerable=answerable, unanswerable=unanswerable)
 
@@ -152,7 +164,8 @@ def _generate_for_page(model: Any, title: str, body: str, n: int) -> list[str]:
     prompt = f"Write {n} questions.\n\nTITLE: {title}\n\nBODY:\n{body[:4000]}"
     try:
         run = agent.run_sync(prompt)
-    except Exception:  # generation failure for one page must not abort the bank
+    except Exception as exc:  # one page failing must not abort the whole bank…
+        log.warning("question generation failed for a page (%s); skipping", exc)
         return []
     out: list[str] = []
     for q in run.output.questions:

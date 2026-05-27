@@ -127,6 +127,17 @@ class TestRetrievalConfig:
         with pytest.raises(OutmemError):
             RetrievalConfig.from_dict({"strategy": "bm25-typo"})
 
+    def test_bad_int_raises_outmemerror(self) -> None:
+        # Lenient parser must fail as OutmemError, not a bare ValueError.
+        with pytest.raises(OutmemError):
+            RetrievalConfig.from_dict({"max_candidates": "abc"})
+
+    def test_lenient_bool_strings(self) -> None:
+        # bool("false") is True in Python — the parser must not fall for it.
+        assert RetrievalConfig.from_dict({"case_insensitive": "false"}).case_insensitive is False
+        assert RetrievalConfig.from_dict({"case_insensitive": "true"}).case_insensitive is True
+        assert RetrievalConfig.from_dict({"case_insensitive": False}).case_insensitive is False
+
 
 # --- dataset ---------------------------------------------------------------
 
@@ -147,6 +158,15 @@ class TestDataset:
         )
         assert len(gb.answerable) == 4  # 2 pages x 2 questions
         assert all(len(q.gold_slugs) == 1 for q in gb.answerable)
+
+    def test_generate_bank_raises_on_total_failure(self, store: WikiStore) -> None:
+        # A bad API key makes every page's generation raise → swallowed to
+        # []. The bank must refuse to come back silently empty.
+        def boom(messages: object, info: AgentInfo) -> ModelResponse:
+            raise RuntimeError("invalid api key")
+
+        with pytest.raises(OutmemError):
+            generate_bank(store, model=FunctionModel(boom), per_page=2)
 
 
 # --- rerank block (relevance filter as a retriever) ------------------------
@@ -301,3 +321,27 @@ def test_optimize_falls_back_when_agent_never_evals(
     assert result.trace == []
     assert result.best_config.strategy == "lexical"  # the default baseline
     assert 0.0 <= result.best_score <= 1.0
+
+
+def test_optimize_survives_bad_strategy_from_agent(
+    store: WikiStore, bank: QuestionBank
+) -> None:
+    """An agent proposing an out-of-enum strategy must be told "unavailable",
+    not crash the whole run (regression: from_dict was outside the try)."""
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        if state["n"] == 1:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name="run_eval", args={"strategy": "bm25"})]
+            )
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store, bank, optimizer_model=FunctionModel(optimizer), k=3, max_evals=5
+    )
+    # The bad config was rejected (not recorded), and we still return a
+    # real scored baseline rather than crashing.
+    assert result.trace == []
+    assert result.best_config.strategy == "lexical"
