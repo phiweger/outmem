@@ -81,3 +81,45 @@ message.
 - Stay inside the allowed edit surface. Never touch secrets, CI
   credentials, or files outside `src/outmem/optimize/`.
 - Output a PR for human review — never merge yourself.
+
+## CI skeleton (for when you wire this up)
+
+`.github/workflows/autoresearch.yml` is currently an inert placeholder
+(it does no real work, so it can't fail). When you implement the loop,
+replace it with something like the skeleton below — one bounded,
+manually-/schedule-triggered job that installs deps, runs the loop, and
+opens a PR. The agent-invocation step is the part to fill in (Claude
+Code GitHub Action headless, or a Claude Agent SDK driver reading this
+file); `ANTHROPIC_API_KEY` comes from repo secrets.
+
+```yaml
+name: autoresearch (retrieval)
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "0 3 * * *"     # nightly, once trusted
+permissions:
+  contents: write             # push the experiment branch
+  pull-requests: write        # open the PR
+jobs:
+  improve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120       # the loop's time budget
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: |
+          sudo apt-get update && sudo apt-get install -y ripgrep
+          python -m pip install -e ".[dev,agent,semantic]"
+      - name: Run the improvement loop
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # TODO: invoke the agent with improve.md as the brief. Each
+          # iteration: edit blocks.py → `ruff && mypy && pytest` + the
+          # benchmark → keep (commit) if score up & green, else revert.
+          echo "not implemented"
+      # TODO: open a PR with the score delta + experiment log.
+```
+

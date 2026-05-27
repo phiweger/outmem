@@ -1,59 +1,24 @@
-# Retrieval self-improvement (code-space loop) — STUB / TEMPLATE.
+# Retrieval self-improvement (code-space loop) — PLACEHOLDER, not implemented.
 #
-# This is the maintainer-side autoresearch loop: an agent edits retrieval
-# blocks (src/outmem/optimize/blocks.py), gated by tests + the benchmark,
-# and opens a PR. It is intentionally a skeleton — the agent-invocation
-# step is a placeholder. Wire it to one of:
-#   * the Claude Code GitHub Action (headless), or
-#   * a small driver using the Claude Agent SDK (`python -m outmem.optimize.autoresearch`)
-# both reading improve.md as the brief and ANTHROPIC_API_KEY from secrets.
+# The code-space autoresearch loop (an agent that edits retrieval blocks,
+# gated by tests + the benchmark, opening a PR) is NOT built yet. Its design
+# and the real CI skeleton live in improve.md and issue #1.
 #
-# Design notes:
-#   * One bounded job runs the agent's internal propose -> test -> keep/revert
-#     loop, time-boxed. Do NOT make the workflow re-trigger itself per step.
-#   * The reward signal is `python -m outmem.optimize.run` (the benchmark);
-#     the gate is `pytest` + `ruff` + `mypy`. The output is a PR, never a
-#     direct push to main — a human merges.
-#   * Run against MULTIPLE corpora (the eval fixtures) so a winner generalises.
+# This file is only a manually-dispatchable placeholder so the workflow has a
+# home. It does NO real work and always succeeds — it must never apt/pip/build,
+# so it can't fail or send failure emails. Replace the single step below with
+# the skeleton from improve.md when actually wiring up the loop.
 
-name: autoresearch (retrieval)
+name: autoresearch (placeholder)
 
 on:
-  workflow_dispatch: {}        # manual: start a run on demand
-  # schedule:
-  #   - cron: "0 3 * * *"      # nightly, once wired up
-
-permissions:
-  contents: write              # to push the experiment branch
-  pull-requests: write         # to open the PR
+  workflow_dispatch: {}   # manual only; never on push/schedule
 
 jobs:
-  improve:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 120        # the time budget for the loop
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install ripgrep + deps
+      - name: Not implemented yet
         run: |
-          sudo apt-get update && sudo apt-get install -y ripgrep
-          python -m pip install -e ".[dev,agent,semantic]"
-
-      - name: Baseline benchmark (records the score to beat)
-        run: echo "TODO: python -m outmem.optimize.run --corpus evals/fixtures/... --report baseline.json"
-
-      - name: Run the improvement loop
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          echo "TODO: invoke the agent with improve.md as the brief."
-          echo "It edits src/outmem/optimize/blocks.py, runs 'pytest && ruff && mypy'"
-          echo "and the benchmark each iteration, keeps a change only if the score"
-          echo "improves and tests pass, else reverts. Commits each kept experiment."
-
-      - name: Open PR with the winning change + score delta
-        run: echo "TODO: create-pull-request action with the benchmark delta + experiment log in the body"
+          echo "The code-space autoresearch loop is not implemented yet."
+          echo "Design + CI skeleton: see improve.md and issue #1."
