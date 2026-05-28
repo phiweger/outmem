@@ -480,3 +480,31 @@ def test_optimize_eval_sample_rescores_winner_on_full_bank(
     )
     # …but the returned scorecard reflects the whole bank (re-scored).
     assert result.scorecard.n_answerable == len(bank.answerable)
+
+
+def test_generate_bank_invokes_logfire_setup(
+    store: WikiStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import outmem._logfire as lf
+
+    seen: list[object] = []
+    monkeypatch.setattr(lf, "setup", lambda s: bool(seen.append(s)))
+    generate_bank(
+        store, model=_questions_model(["q?"]), per_page=1, include_unanswerable=False
+    )
+    assert len(seen) == 1 and seen[0] is store.config.outmem.logfire
+
+
+def test_optimize_invokes_logfire_setup(
+    store: WikiStore, bank: QuestionBank, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import outmem._logfire as lf
+
+    seen: list[object] = []
+    monkeypatch.setattr(lf, "setup", lambda s: bool(seen.append(s)))
+
+    def opt(messages: object, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("done")])
+
+    optimize_retrieval(store, bank, optimizer_model=FunctionModel(opt), k=3, max_evals=2)
+    assert len(seen) == 1 and seen[0] is store.config.outmem.logfire

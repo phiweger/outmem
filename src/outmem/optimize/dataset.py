@@ -98,6 +98,12 @@ def generate_bank(
     if max_pages is not None:
         page_slugs = page_slugs[:max_pages]
 
+    # Reuse outmem's Logfire wiring (no-op unless logfire.project is set) so
+    # the generation model calls are traced like the rest of outmem.
+    from outmem._logfire import setup as _setup_logfire
+
+    _setup_logfire(store.config.outmem.logfire)
+
     # Read pages up front (cheap, sequential); skip unreadable ones so one
     # malformed page can't abort the bank.
     pages: list[tuple[str, str, str, str | None]] = []

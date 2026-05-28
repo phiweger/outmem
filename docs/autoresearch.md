@@ -188,6 +188,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 ```
 
+**Logfire.** If `logfire.project` is set in `config.yaml`, the generation,
+optimizer, and per-question rerank calls are traced in Pydantic Logfire
+automatically — the same `instrument_pydantic_ai` wiring `outmem ask`
+uses (`pip install 'outmem[logfire]'`). No extra setup in your script.
+
 ---
 
 ## What this is NOT (yet): the self-modifying loop
