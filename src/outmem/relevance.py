@@ -225,7 +225,8 @@ def relevance_filter(
         )
     except Exception as exc:  # any model/timeout/validation failure
         log.warning(
-            "relevance filter failed (%s); falling back to lexical order", exc
+            "relevance filter failed (%s); falling back to lexical order",
+            _brief_error(exc),
         )
         return FilterOutcome(
             query=query,
@@ -389,6 +390,16 @@ def _format_prompt(query: str, candidates: list[_Candidate]) -> str:
     for c in candidates:
         parts.append(f"\n[slug: {c.slug}]\n{c.excerpt}")
     return "\n".join(parts)
+
+
+def _brief_error(exc: Exception, *, limit: int = 160) -> str:
+    """One-line, length-capped error summary. Model failures (e.g. an
+    Anthropic content-filter refusal) can carry a multi-KB JSON body;
+    this keeps the per-question fallback log to a single readable line."""
+    msg = " ".join(str(exc).split())
+    if len(msg) > limit:
+        msg = msg[:limit] + "…"
+    return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
 
 
 def _model_name(model: Any) -> str:

@@ -127,6 +127,17 @@ class TestRelevanceFilter:
         )
         assert [p.slug for p in out.kept] == ["abx:penicillin"]
 
+    def test_fallback_log_is_concise(self) -> None:
+        # A content-filter refusal carries a multi-KB JSON body; the fallback
+        # log must collapse it to one capped line, not dump the whole thing.
+        from outmem.relevance import _brief_error
+
+        exc = RuntimeError("Content filter triggered.\n" + "x" * 5000)
+        out = _brief_error(exc)
+        assert "\n" not in out
+        assert len(out) <= 200
+        assert out.startswith("RuntimeError: Content filter triggered.")
+
     def test_survives_non_utf8_page(self, store: WikiStore) -> None:
         """A non-UTF-8 page must not crash the filter — plain search
         tolerates it, so the filtered variant must too (regression:
