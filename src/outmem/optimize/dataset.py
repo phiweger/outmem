@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from outmem.config import ANTHROPIC_CACHE_SETTINGS
 from outmem.exceptions import OutmemError
 
 if TYPE_CHECKING:
@@ -195,7 +196,9 @@ async def _generate_pages(
     flight. Returns ``(slug, source, questions)`` in input order."""
     from pydantic_ai import Agent
 
-    agent_kwargs: dict[str, Any] = {"model_settings": {"max_tokens": 1024}}
+    agent_kwargs: dict[str, Any] = {
+        "model_settings": {**ANTHROPIC_CACHE_SETTINGS, "max_tokens": 1024}
+    }
     agent: Agent[None, _Questions] = Agent(
         model,
         output_type=_Questions,

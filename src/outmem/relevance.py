@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from outmem.config import (
+    ANTHROPIC_CACHE_SETTINGS,
     DEFAULT_RELEVANCE_CANDIDATE_MAX_BYTES,
     DEFAULT_RELEVANCE_CONTEXT,
     DEFAULT_RELEVANCE_CONTEXT_CHARS,
@@ -111,9 +112,8 @@ class RelevanceConfig:
 # prompt + tool defs across calls. Output is a short structured list, so
 # a small max_tokens is plenty.
 _RELEVANCE_MODEL_SETTINGS: dict[str, Any] = {
+    **ANTHROPIC_CACHE_SETTINGS,  # no tools (structured output) → no tool-def cache
     "max_tokens": 2048,
-    "anthropic_cache": True,
-    "anthropic_cache_instructions": True,
 }
 
 _RELEVANCE_SYSTEM_PROMPT = (

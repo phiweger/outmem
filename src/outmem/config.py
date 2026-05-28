@@ -71,6 +71,21 @@ DEFAULT_RELEVANCE_CANDIDATE_MAX_BYTES = 64 * 1024
 DEFAULT_LOGFIRE_PROJECT: str | None = None
 LOGFIRE_SERVICE_NAME = "outmem"
 
+# Anthropic prompt-caching keys for ``model_settings`` (pydantic_ai passes
+# them through; no-ops on non-Anthropic models). Caching the static system
+# prompt + tool-def array across the many calls an agent or tuning loop
+# makes cuts the bill ~5-10x. Spread into a per-call ``model_settings``
+# dict alongside ``max_tokens``; agents that expose tools use the
+# ``*_WITH_TOOLS`` variant to also cache the tool schemas.
+ANTHROPIC_CACHE_SETTINGS: dict[str, bool] = {
+    "anthropic_cache": True,               # top-level auto-cache breakpoint
+    "anthropic_cache_instructions": True,  # cache the system-prompt block
+}
+ANTHROPIC_CACHE_WITH_TOOLS: dict[str, bool] = {
+    **ANTHROPIC_CACHE_SETTINGS,
+    "anthropic_cache_tool_definitions": True,  # cache the tool-def array
+}
+
 # Error string when a caller hits a semantic-only path but the wiki has
 # the feature off — shared across the CLI, the WikiStore facet, and the
 # PydanticAI adapter so the user sees the same fix-it advice everywhere.

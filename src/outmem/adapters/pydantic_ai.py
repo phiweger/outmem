@@ -28,6 +28,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from outmem.config import ANTHROPIC_CACHE_WITH_TOOLS
 from outmem.exceptions import (
     FrontmatterError,
     OutmemError,
@@ -845,10 +846,8 @@ _CONSULT_WIKI_SYSTEM_PROMPT = (
 # repeated calls. Kept inline (not imported) so this module has no
 # dependency on the optional `outmem.agent` runtime.
 _CONSULT_MODEL_SETTINGS: dict[str, Any] = {
+    **ANTHROPIC_CACHE_WITH_TOOLS,
     "max_tokens": 16384,
-    "anthropic_cache": True,
-    "anthropic_cache_instructions": True,
-    "anthropic_cache_tool_definitions": True,
 }
 
 

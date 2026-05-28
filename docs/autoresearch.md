@@ -176,6 +176,13 @@ knobs bound it:
 - **bank size** — `generate_bank(..., max_pages=…, per_page=…, slugs=[…])`;
   `max_evals` caps the optimizer's turns.
 
+**Caching.** Every call uses Anthropic prompt caching — the static system
+prompt (and, for the optimizer, its tool definitions) is cached across
+calls, so the repeated prefix is near-free after the first hit. It's on
+by default; nothing to configure. When Logfire is enabled the per-call
+`cache_read` / `cache_write` token counts show up in each span's usage,
+so you can confirm the cache is landing.
+
 **Logging.** Progress and epochs write to stderr directly, so you don't
 need to configure logging to see them. If you *do* turn logging on, keep
 the HTTP client quiet — otherwise its one-line-per-request output buries

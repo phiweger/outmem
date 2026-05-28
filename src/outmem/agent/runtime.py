@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from outmem.adapters.pydantic_ai import wiki_tools
+from outmem.config import ANTHROPIC_CACHE_WITH_TOOLS
 from outmem.exceptions import OutmemError
 from outmem.skills import bundled_registry
 from outmem.store import WikiStore
@@ -223,19 +224,11 @@ def build_agent(
     existing_settings: dict[str, Any] = agent_kwargs.get("model_settings") or {}
     merged_settings: dict[str, Any] = {**existing_settings}
     merged_settings.setdefault("max_tokens", DEFAULT_MAX_TOKENS)
-    # Anthropic prompt-caching knobs. The model_settings dict is shared
-    # across providers; these keys are no-ops on non-Anthropic models
-    # (silently ignored). For Anthropic, they cut the bill by ~5-10x
-    # on multi-turn ingest runs where the system prompt + tool defs +
-    # long tool results would otherwise be re-shipped on every chat.
-    for key in (
-        # Top-level auto-cache, moves the breakpoint with the conversation.
-        "anthropic_cache",
-        # Caches the system prompt block.
-        "anthropic_cache_instructions",
-        # Caches the tool-def array.
-        "anthropic_cache_tool_definitions",
-    ):
+    # Anthropic prompt-caching knobs (single source of truth in config) —
+    # no-ops on non-Anthropic models, ~5-10x cheaper on multi-turn runs
+    # where the system prompt + tool defs would otherwise be re-shipped.
+    # setdefault so an explicit caller model_settings still wins.
+    for key in ANTHROPIC_CACHE_WITH_TOOLS:
         merged_settings.setdefault(key, True)
     agent_kwargs["model_settings"] = merged_settings
 
