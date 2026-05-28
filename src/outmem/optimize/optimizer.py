@@ -28,7 +28,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from outmem.config import ANTHROPIC_CACHE_WITH_TOOLS, DEFAULT_RELEVANCE_MODEL
+from outmem.config import (
+    ANTHROPIC_CACHE_WITH_TOOLS,
+    DEFAULT_OPTIMIZE_CONCURRENCY,
+    DEFAULT_OPTIMIZE_K,
+    DEFAULT_OPTIMIZE_MAX_CANDIDATES,
+    DEFAULT_OPTIMIZE_MAX_EVALS,
+    DEFAULT_OPTIMIZE_MAX_FAILURES_SHOWN,
+    DEFAULT_OPTIMIZE_MAX_RELEVANT,
+    DEFAULT_OPTIMIZE_RRF_K,
+    DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
+    DEFAULT_OPTIMIZE_STRATEGY,
+    DEFAULT_RELEVANCE_MODEL,
+)
 from outmem.exceptions import OutmemError
 from outmem.optimize.bench import Scorecard, evaluate
 from outmem.optimize.blocks import RetrievalConfig, build_retriever
@@ -86,11 +98,11 @@ def optimize_retrieval(
     *,
     optimizer_model: Any,
     rerank_model: Any = None,
-    k: int = 5,
-    eval_concurrency: int = 8,
+    k: int = DEFAULT_OPTIMIZE_K,
+    eval_concurrency: int = DEFAULT_OPTIMIZE_CONCURRENCY,
     eval_sample: int | None = None,
-    max_evals: int = 12,
-    max_failures_shown: int = 6,
+    max_evals: int = DEFAULT_OPTIMIZE_MAX_EVALS,
+    max_failures_shown: int = DEFAULT_OPTIMIZE_MAX_FAILURES_SHOWN,
     on_eval: Callable[[EvalEvent], None] | None = None,
 ) -> OptimizeResult:
     """Let ``optimizer_model`` search the config space over ``bank``.
@@ -129,13 +141,13 @@ def optimize_retrieval(
     best: dict[str, Any] = {"score": -1.0, "cfg": None, "card": None}
 
     def run_eval(
-        strategy: str = "lexical",
+        strategy: str = DEFAULT_OPTIMIZE_STRATEGY,
         case_insensitive: bool = True,
-        max_candidates: int = 30,
+        max_candidates: int = DEFAULT_OPTIMIZE_MAX_CANDIDATES,
         rerank_model_id: str = DEFAULT_RELEVANCE_MODEL,
-        max_relevant: int = 8,
-        semantic_top_k: int = 8,
-        rrf_k: int = 60,
+        max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT,
+        semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
+        rrf_k: int = DEFAULT_OPTIMIZE_RRF_K,
     ) -> str:
         """Score one retrieval config on the benchmark and report the
         result plus a sample of failing questions.

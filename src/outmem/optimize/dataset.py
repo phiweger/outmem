@@ -29,7 +29,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from outmem.config import ANTHROPIC_CACHE_SETTINGS
+from outmem.config import (
+    ANTHROPIC_CACHE_SETTINGS,
+    DEFAULT_OPTIMIZE_CONCURRENCY,
+    DEFAULT_OPTIMIZE_PER_PAGE,
+    DEFAULT_OPTIMIZE_UNANSWERABLE_LIMIT,
+)
 from outmem.exceptions import OutmemError
 
 if TYPE_CHECKING:
@@ -75,11 +80,11 @@ def generate_bank(
     store: WikiStore,
     *,
     model: Any,
-    per_page: int = 2,
+    per_page: int = DEFAULT_OPTIMIZE_PER_PAGE,
     slugs: list[str] | None = None,
     max_pages: int | None = None,
     include_unanswerable: bool = True,
-    max_concurrency: int = 8,
+    max_concurrency: int = DEFAULT_OPTIMIZE_CONCURRENCY,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> QuestionBank:
     """Generate a provenance-labelled bank from the wiki.
@@ -141,7 +146,9 @@ def generate_bank(
     return QuestionBank(answerable=answerable, unanswerable=unanswerable)
 
 
-def harvest_unanswerable(store: WikiStore, *, limit: int = 20) -> list[Question]:
+def harvest_unanswerable(
+    store: WikiStore, *, limit: int = DEFAULT_OPTIMIZE_UNANSWERABLE_LIMIT
+) -> list[Question]:
     """Best-effort: pull question-shaped lines from the gap log.
 
     The log records "I needed X and had nothing" entries; lines ending

@@ -27,7 +27,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from outmem.config import DEFAULT_RELEVANCE_MODEL
+from outmem.config import (
+    DEFAULT_OPTIMIZE_MAX_CANDIDATES,
+    DEFAULT_OPTIMIZE_MAX_RELEVANT,
+    DEFAULT_OPTIMIZE_RRF_K,
+    DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
+    DEFAULT_OPTIMIZE_STRATEGY,
+    DEFAULT_RELEVANCE_MODEL,
+)
 from outmem.exceptions import OutmemError
 from outmem.relevance import relevance_filter
 from outmem.slug import PAGES_DIR, relpath_to_slug
@@ -66,13 +73,13 @@ class RetrievalConfig:
     plain dict.
     """
 
-    strategy: str = "lexical"  # "lexical" | "rerank" | "semantic" | "hybrid"
+    strategy: str = DEFAULT_OPTIMIZE_STRATEGY  # lexical | rerank | semantic | hybrid
     case_insensitive: bool = True
-    max_candidates: int = 30  # width of the keyword net before rerank
+    max_candidates: int = DEFAULT_OPTIMIZE_MAX_CANDIDATES  # keyword net width
     rerank_model: str = DEFAULT_RELEVANCE_MODEL
-    max_relevant: int = 8
-    semantic_top_k: int = 8  # neighbours for the semantic / hybrid blocks
-    rrf_k: int = 60  # Reciprocal Rank Fusion constant (hybrid block)
+    max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT
+    semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K  # semantic / hybrid blocks
+    rrf_k: int = DEFAULT_OPTIMIZE_RRF_K  # Reciprocal Rank Fusion (hybrid block)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -183,8 +190,8 @@ class RerankRetriever:
         store: WikiStore,
         *,
         model: Any,
-        max_candidates: int = 30,
-        max_relevant: int = 8,
+        max_candidates: int = DEFAULT_OPTIMIZE_MAX_CANDIDATES,
+        max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT,
         case_insensitive: bool = True,
     ) -> None:
         self._store = store
@@ -225,7 +232,9 @@ class SemanticRetriever:
 
     name = "semantic"
 
-    def __init__(self, store: WikiStore, *, top_k: int = 8) -> None:
+    def __init__(
+        self, store: WikiStore, *, top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K
+    ) -> None:
         self._store = store
         self._top_k = top_k
 
@@ -279,9 +288,9 @@ class HybridRetriever:
         self,
         store: WikiStore,
         *,
-        top_k: int = 8,
+        top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
         case_insensitive: bool = True,
-        rrf_k: int = 60,
+        rrf_k: int = DEFAULT_OPTIMIZE_RRF_K,
     ) -> None:
         self._lexical = LexicalRetriever(store, case_insensitive=case_insensitive)
         self._semantic = SemanticRetriever(store, top_k=top_k)

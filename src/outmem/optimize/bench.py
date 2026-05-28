@@ -22,6 +22,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from outmem.config import DEFAULT_OPTIMIZE_CONCURRENCY, DEFAULT_OPTIMIZE_K
 from outmem.optimize.blocks import Retriever
 from outmem.optimize.dataset import Question, QuestionBank
 
@@ -54,8 +55,8 @@ def evaluate(
     retriever: Retriever,
     bank: QuestionBank,
     *,
-    k: int = 5,
-    max_concurrency: int = 8,
+    k: int = DEFAULT_OPTIMIZE_K,
+    max_concurrency: int = DEFAULT_OPTIMIZE_CONCURRENCY,
     sample: int | None = None,
     seed: int = 0,
 ) -> Scorecard:

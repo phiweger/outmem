@@ -68,6 +68,21 @@ DEFAULT_RELEVANCE_CONTEXT = "page"
 DEFAULT_RELEVANCE_CONTEXT_CHARS = 2000
 DEFAULT_RELEVANCE_CANDIDATE_MAX_BYTES = 64 * 1024
 
+# Defaults for the optional retrieval-tuning tool (outmem.optimize). It is an
+# API/script tool — not config.yaml-driven — but its defaults live here, the
+# one defaults home, rather than inline across the optimize modules.
+DEFAULT_OPTIMIZE_STRATEGY = "lexical"
+DEFAULT_OPTIMIZE_MAX_CANDIDATES = 30        # keyword-net width before reranking
+DEFAULT_OPTIMIZE_MAX_RELEVANT = 8           # pages the rerank block keeps
+DEFAULT_OPTIMIZE_SEMANTIC_TOP_K = 8         # neighbours for semantic / hybrid
+DEFAULT_OPTIMIZE_RRF_K = 60                 # Reciprocal Rank Fusion constant
+DEFAULT_OPTIMIZE_PER_PAGE = 2               # generated questions per page
+DEFAULT_OPTIMIZE_CONCURRENCY = 8            # in-flight model calls (gen + eval)
+DEFAULT_OPTIMIZE_K = 5                      # Hit@k cutoff
+DEFAULT_OPTIMIZE_MAX_EVALS = 12             # optimizer turn budget
+DEFAULT_OPTIMIZE_MAX_FAILURES_SHOWN = 6     # failing questions shown per eval
+DEFAULT_OPTIMIZE_UNANSWERABLE_LIMIT = 20    # gap-log questions harvested
+
 DEFAULT_LOGFIRE_PROJECT: str | None = None
 LOGFIRE_SERVICE_NAME = "outmem"
 
