@@ -9,10 +9,11 @@ writes back to. Retrieval is shell-tool based (`ripgrep`, `git log`,
 to produce a git commit so identical future queries don't re-pay
 retrieval cost.
 
-This implements the pattern in [`specs/concept.md`](specs/concept.md):
-the LLM owns the wiki, the human curates sources and asks questions,
-the wiki is a compounding artifact that gets richer with every source
-ingested.
+The idea is Andrej Karpathy's ["LLM Wiki" sketch][kw]: the LLM owns the
+wiki, the human curates sources and asks questions, and the wiki is a
+compounding artifact that gets richer with every source ingested.
+outmem is a working implementation of it — full rationale and the v0.1
+spec in [`specs/concept.md`](specs/concept.md).
 
 ---
 
@@ -43,9 +44,8 @@ Three design choices anchor the rest of the system:
    Codebase"][cc]; [SmartScope, "Settling the RAG Debate"][rd]).
 3. **Mandatory writeback.** Every agent turn ends with at least one
    commit (`compact:` / `extend:` / `log:`), so the system records
-   not just what was retrieved but what it was retrieved *for*. The
-   pattern is closest to Karpathy's "LLM Wiki" sketch
-   ([gist][kw]). Adoption is measured via the **TARS** product
+   not just what was retrieved but what it was retrieved *for*.
+   Adoption is measured via the **TARS** product
    metric — Target / Adopted / Retained / Satisfied — rather than
    recall@k or nDCG ([Raudaschl, "TARS"][tars]).
 
