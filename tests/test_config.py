@@ -84,7 +84,6 @@ def test_logfire_disabled_by_default(tmp_path: Path) -> None:
     (tmp_path / "config.yaml").write_text("model: x\n", encoding="utf-8")
     cfg = load_yaml_config(tmp_path)
     assert cfg.logfire.enabled is False
-    assert cfg.logfire.project is None
 
 
 def test_logfire_enabled_flag(tmp_path: Path) -> None:
@@ -93,17 +92,6 @@ def test_logfire_enabled_flag(tmp_path: Path) -> None:
     )
     cfg = load_yaml_config(tmp_path)
     assert cfg.logfire.enabled is True
-
-
-def test_logfire_project_back_compat_parsed(tmp_path: Path) -> None:
-    # Deprecated `project` is still parsed (and opts in via setup()), so
-    # existing config.yaml files keep working.
-    (tmp_path / "config.yaml").write_text(
-        "logfire:\n  project: my-proj\n", encoding="utf-8"
-    )
-    cfg = load_yaml_config(tmp_path)
-    assert cfg.logfire.project == "my-proj"
-    assert cfg.logfire.enabled is False
 
 
 def test_relevance_disabled_by_default(tmp_path: Path) -> None:

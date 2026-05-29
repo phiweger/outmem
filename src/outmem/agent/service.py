@@ -140,7 +140,7 @@ async def ask(
     opts = _RunOptions(push=push, pull=pull, record=record, agent_kwargs=dict(agent_kwargs))
     started = utc_now()
 
-    # Library entry point: honour `logfire.project` from config.yaml the
+    # Library entry point: honour `logfire.enabled` from config.yaml the
     # same way the CLI's `_open_store` does. Idempotent — re-calls from
     # subsequent ask() invocations in the same process are no-ops.
     from outmem._logfire import setup as _setup_logfire
