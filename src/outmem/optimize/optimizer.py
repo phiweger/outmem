@@ -150,6 +150,7 @@ def optimize_retrieval(
         max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT,
         semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
         rrf_k: int = DEFAULT_OPTIMIZE_RRF_K,
+        fuse: list[str] | None = None,
     ) -> str:
         """Score one retrieval config on the benchmark and report the
         result plus a sample of failing questions.
@@ -158,13 +159,18 @@ def optimize_retrieval(
             strategy: "lexical" (keyword frequency rank), "bm25" (SQLite
                 FTS5 BM25 ranking — no model/index needed), "rerank"
                 (keyword net + cheap-model relevance gate), "semantic"
-                (vector similarity), or "hybrid" (RRF of lexical + semantic).
+                (vector similarity), "hyde" (generate a hypothetical answer,
+                then semantic-search on it — needs a model + the index), or
+                "hybrid" (Reciprocal Rank Fusion of the `fuse` legs).
             case_insensitive: case-fold the keyword search.
             max_candidates: width of the keyword net before reranking.
             rerank_model_id: model id for the rerank block.
             max_relevant: cap on pages the rerank block keeps.
-            semantic_top_k: neighbours for the semantic / hybrid blocks.
+            semantic_top_k: neighbours for the semantic / hyde / hybrid blocks.
             rrf_k: Reciprocal Rank Fusion constant for the hybrid block.
+            fuse: for strategy="hybrid", the 2+ atomic legs to fuse, e.g.
+                ["lexical","semantic"], ["bm25","semantic"], or
+                ["semantic","hyde"]. Ignored for non-hybrid strategies.
         """
         if len(trace) >= max_evals:
             return (
@@ -175,17 +181,18 @@ def optimize_retrieval(
         # the same on a bad number — keep it inside the try so a fumbled
         # config is reported back to the agent, not crashed out of the run.
         try:
-            cfg = RetrievalConfig.from_dict(
-                {
-                    "strategy": strategy,
-                    "case_insensitive": case_insensitive,
-                    "max_candidates": max_candidates,
-                    "rerank_model": rerank_model_id,
-                    "max_relevant": max_relevant,
-                    "semantic_top_k": semantic_top_k,
-                    "rrf_k": rrf_k,
-                }
-            )
+            cfg_dict: dict[str, Any] = {
+                "strategy": strategy,
+                "case_insensitive": case_insensitive,
+                "max_candidates": max_candidates,
+                "rerank_model": rerank_model_id,
+                "max_relevant": max_relevant,
+                "semantic_top_k": semantic_top_k,
+                "rrf_k": rrf_k,
+            }
+            if fuse is not None:
+                cfg_dict["fuse"] = fuse
+            cfg = RetrievalConfig.from_dict(cfg_dict)
             retriever = build_retriever(store, cfg, model=rerank_model)
             card = evaluate(
                 retriever, bank, k=k,

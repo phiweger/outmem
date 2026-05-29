@@ -30,7 +30,6 @@ from outmem.optimize import (
 )
 from outmem.optimize.blocks import (
     BM25Retriever,
-    HybridRetriever,
     LexicalRetriever,
     RetrievalResult,
     SemanticRetriever,
@@ -409,21 +408,104 @@ class TestHybridBlock:
         monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
         monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
-        fused = HybridRetriever(store).retrieve("penicillin", k=5).slugs
+        # Default hybrid fuses lexical + semantic.
+        r = build_retriever(store, RetrievalConfig(strategy="hybrid"))
+        fused = r.retrieve("penicillin", k=5).slugs
         # penicillin appears in BOTH lists → fuses to the top.
         assert fused[0] == "abx:penicillin"
         # ceftriaxone (semantic-only) is still pulled in.
         assert "abx:ceftriaxone" in fused
 
+    def test_fuse_bm25_semantic(
+        self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prefix = f"{store.config.wiki_dir}/pages/"
+        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
+        monkeypatch.setattr(
+            store, "semantic_find_similar",
+            lambda text, *, top_k=0, **_: [
+                SimpleNamespace(rel_path=f"{prefix}abx/penicillin.md", chunk_index=0,
+                                similarity=0.9, content="x")
+            ],
+        )
+        r = build_retriever(store, RetrievalConfig(strategy="hybrid", fuse=("bm25", "semantic")))
+        assert "abx:penicillin" in r.retrieve("penicillin endocarditis", k=5).slugs
+
     def test_raises_when_semantic_off(self, store: WikiStore) -> None:
-        # Fresh wiki: semantic disabled. Hybrid must RAISE (not silently run
-        # lexical-only under a "hybrid" label), so the optimizer skips it.
+        # Fresh wiki: semantic disabled. A hybrid with a semantic leg must
+        # RAISE (not silently fuse what's available), so the optimizer skips it.
+        r = build_retriever(store, RetrievalConfig(strategy="hybrid"))
         with pytest.raises(OutmemError):
-            HybridRetriever(store).retrieve("penicillin endocarditis", k=3)
+            r.retrieve("penicillin endocarditis", k=3)
 
     def test_build_retriever_hybrid(self, store: WikiStore) -> None:
         r = build_retriever(store, RetrievalConfig(strategy="hybrid", rrf_k=30))
         assert r.name == "hybrid"
+
+    def test_fuse_validation(self) -> None:
+        # A fuse leg must be an atomic strategy (not nested hybrid), 2+ legs.
+        with pytest.raises(OutmemError):
+            RetrievalConfig.from_dict({"fuse": ["lexical", "hybrid"]})
+        with pytest.raises(OutmemError):
+            RetrievalConfig.from_dict({"fuse": ["lexical"]})
+
+
+class TestHydeBlock:
+    def _store_with_fake_semantic(
+        self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> str:
+        prefix = f"{store.config.wiki_dir}/pages/"
+        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
+        monkeypatch.setattr(
+            store, "semantic_find_similar",
+            lambda text, *, top_k=0, **_: [
+                SimpleNamespace(rel_path=f"{prefix}abx/penicillin.md", chunk_index=0,
+                                similarity=0.9, content="x")
+            ],
+        )
+        return prefix
+
+    def test_generates_then_searches(
+        self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._store_with_fake_semantic(store, monkeypatch)
+
+        def hyde_model(messages: object, info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[TextPart("Penicillin G is dosed IV for endocarditis.")])
+
+        r = build_retriever(
+            store, RetrievalConfig(strategy="hyde"), model=FunctionModel(hyde_model)
+        )
+        out = r.retrieve("how much penicillin?", k=3)
+        assert out.slugs == ("abx:penicillin",)
+        assert out.note is None  # generation succeeded
+
+    def test_generation_failure_falls_back(
+        self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._store_with_fake_semantic(store, monkeypatch)
+
+        def boom(messages: object, info: AgentInfo) -> ModelResponse:
+            raise RuntimeError("model down")
+
+        r = build_retriever(
+            store, RetrievalConfig(strategy="hyde"), model=FunctionModel(boom)
+        )
+        out = r.retrieve("penicillin", k=3)
+        assert out.slugs == ("abx:penicillin",)  # fell back to raw question
+        assert out.note and "failed" in out.note
+
+    def test_raises_when_semantic_off(self, store: WikiStore) -> None:
+        def hyde_model(messages: object, info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[TextPart("x")])
+
+        r = build_retriever(
+            store, RetrievalConfig(strategy="hyde"), model=FunctionModel(hyde_model)
+        )
+        with pytest.raises(OutmemError):  # no index
+            r.retrieve("penicillin", k=3)
 
 
 # --- the agent-driven optimizer --------------------------------------------

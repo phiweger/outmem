@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from outmem.config import (
+    ANTHROPIC_CACHE_SETTINGS,
     DEFAULT_OPTIMIZE_MAX_CANDIDATES,
     DEFAULT_OPTIMIZE_MAX_RELEVANT,
     DEFAULT_OPTIMIZE_RRF_K,
@@ -63,7 +64,11 @@ class Retriever(Protocol):
 
 # --- the (small, honest) search space ------------------------------------
 
-_STRATEGIES = ("lexical", "bm25", "rerank", "semantic", "hybrid")
+# Atomic strategies are single retrievers; ``hybrid`` fuses 2+ of them by
+# RRF (its legs, named in ``RetrievalConfig.fuse``). Keeping hybrid out of
+# the atomic set prevents a fuse leg from recursively nesting hybrids.
+_ATOMIC_STRATEGIES = ("lexical", "bm25", "rerank", "semantic", "hyde")
+_STRATEGIES = (*_ATOMIC_STRATEGIES, "hybrid")
 
 
 @dataclass(frozen=True)
@@ -75,13 +80,18 @@ class RetrievalConfig:
     plain dict.
     """
 
-    strategy: str = DEFAULT_OPTIMIZE_STRATEGY  # lexical | rerank | semantic | hybrid
+    strategy: str = DEFAULT_OPTIMIZE_STRATEGY  # lexical|bm25|rerank|semantic|hyde|hybrid
     case_insensitive: bool = True
     max_candidates: int = DEFAULT_OPTIMIZE_MAX_CANDIDATES  # keyword net width
     rerank_model: str = DEFAULT_RELEVANCE_MODEL
     max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT
-    semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K  # semantic / hybrid blocks
+    semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K  # semantic / hyde / hybrid
     rrf_k: int = DEFAULT_OPTIMIZE_RRF_K  # Reciprocal Rank Fusion (hybrid block)
+    hyde_model: str = DEFAULT_RELEVANCE_MODEL  # generates the hypothetical doc
+    # Legs the ``hybrid`` strategy fuses (atomic strategy names). Default
+    # ``lexical`` + ``semantic``; set e.g. ["bm25","semantic"] or
+    # ["semantic","hyde"] ("search question + hypothetical together").
+    fuse: tuple[str, ...] = ("lexical", "semantic")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +102,8 @@ class RetrievalConfig:
             "max_relevant": self.max_relevant,
             "semantic_top_k": self.semantic_top_k,
             "rrf_k": self.rrf_k,
+            "hyde_model": self.hyde_model,
+            "fuse": list(self.fuse),
         }
 
     @classmethod
@@ -118,6 +130,19 @@ class RetrievalConfig:
             cfg = replace(cfg, rrf_k=_as_int(data["rrf_k"], "rrf_k"))
         if "rerank_model" in data:
             cfg = replace(cfg, rerank_model=str(data["rerank_model"]))
+        if "hyde_model" in data:
+            cfg = replace(cfg, hyde_model=str(data["hyde_model"]))
+        if "fuse" in data:
+            legs = tuple(str(x).strip().lower() for x in data["fuse"])
+            bad = [x for x in legs if x not in _ATOMIC_STRATEGIES]
+            if bad:
+                raise OutmemError(
+                    f"fuse legs {bad} must be atomic strategies "
+                    f"{_ATOMIC_STRATEGIES} (not 'hybrid')"
+                )
+            if len(legs) < 2:
+                raise OutmemError("fuse needs at least 2 legs")
+            cfg = replace(cfg, fuse=legs)
         return cfg
 
 
@@ -126,14 +151,26 @@ def build_retriever(
 ) -> Retriever:
     """Compose the lego blocks named by ``config`` into a live retriever.
 
-    ``model`` overrides the rerank model object (e.g. a ``FunctionModel``
-    in tests); when ``None`` the string ``config.rerank_model`` is used.
+    ``model`` overrides the rerank/hyde model object (e.g. a
+    ``FunctionModel`` in tests); when ``None`` the model-id strings on the
+    config are used.
     """
-    if config.strategy == "lexical":
+    if config.strategy == "hybrid":
+        legs = [_atomic_retriever(store, leg, config, model=model) for leg in config.fuse]
+        return HybridRetriever(legs, rrf_k=config.rrf_k)
+    return _atomic_retriever(store, config.strategy, config, model=model)
+
+
+def _atomic_retriever(
+    store: WikiStore, strategy: str, config: RetrievalConfig, *, model: Any = None
+) -> Retriever:
+    """Build a single (non-fusion) retriever by name. Used directly for
+    atomic strategies and per-leg by the ``hybrid`` fusion strategy."""
+    if strategy == "lexical":
         return LexicalRetriever(store, case_insensitive=config.case_insensitive)
-    if config.strategy == "bm25":
+    if strategy == "bm25":
         return BM25Retriever(store)
-    if config.strategy == "rerank":
+    if strategy == "rerank":
         return RerankRetriever(
             store,
             model=model if model is not None else config.rerank_model,
@@ -141,16 +178,15 @@ def build_retriever(
             max_relevant=config.max_relevant,
             case_insensitive=config.case_insensitive,
         )
-    if config.strategy == "semantic":
+    if strategy == "semantic":
         return SemanticRetriever(store, top_k=config.semantic_top_k)
-    if config.strategy == "hybrid":
-        return HybridRetriever(
+    if strategy == "hyde":
+        return HydeRetriever(
             store,
+            model=model if model is not None else config.hyde_model,
             top_k=config.semantic_top_k,
-            case_insensitive=config.case_insensitive,
-            rrf_k=config.rrf_k,
         )
-    raise OutmemError(f"unknown strategy {config.strategy!r}")
+    raise OutmemError(f"unknown strategy {strategy!r}")
 
 
 # --- concrete blocks (wrapping outmem's existing retrieval) ----------------
@@ -292,88 +328,165 @@ class SemanticRetriever:
         self._top_k = top_k
 
     def retrieve(self, question: str, *, k: int) -> RetrievalResult:
-        if not self._store.semantic_enabled():
-            raise OutmemError(
-                "semantic retrieval needs `semantic.enabled: true` in "
-                "config.yaml (+ `pip install outmem[semantic]`)"
-            )
-        # Enabled but never indexed → fail loud rather than silently return
-        # nothing (which would look like a useless retriever, not a setup gap).
-        try:
-            empty = self._store.semantic_index_is_empty()
-        except OutmemError:
-            raise
-        except Exception as exc:  # missing extra / db open error
-            raise OutmemError(f"semantic index unavailable: {exc}") from exc
-        if empty:
-            raise OutmemError(
-                "semantic index is empty — run `outmem reindex` to build it "
-                "before tuning with the semantic/hybrid strategies"
-            )
-        # Chunks → pages: over-fetch chunks so dedup-to-pages still yields k.
-        chunk_k = max(self._top_k, k) * 4
-        try:
-            matches = self._store.semantic_find_similar(question, top_k=chunk_k)
-        except OutmemError:
-            raise
-        except Exception as exc:  # embedder / query error
-            raise OutmemError(f"semantic retrieval failed: {exc}") from exc
+        _require_semantic_ready(self._store)
+        return RetrievalResult(
+            _semantic_pages(self._store, question, top_k=self._top_k, k=k)
+        )
 
-        prefix = f"{self._store.config.wiki_dir}/{PAGES_DIR}/"
-        slugs: list[str] = []
-        for match in matches:  # similarity-descending
-            rel = match.rel_path
-            if not rel.startswith(prefix):  # source chunk → no page slug
-                continue
-            slug = relpath_to_slug(Path(rel[len(prefix):]))
-            if slug not in slugs:
-                slugs.append(slug)
-            if len(slugs) >= k:
-                break
-        return RetrievalResult(tuple(slugs))
+
+class HydeRetriever:
+    """HyDE — Hypothetical Document Embeddings.
+
+    Asks a cheap model to write a short *hypothetical answer* to the
+    question, then runs semantic search on THAT (not the bare question).
+    The synthetic passage sits closer in embedding space to the real
+    page than a terse question does, lifting recall on oblique/paraphrased
+    queries. Reuses the same chunk→page mapping as ``semantic``.
+
+    Needs both a generation model AND the semantic index (``semantic.enabled``
+    + ``outmem reindex``); raises :class:`OutmemError` otherwise so the
+    optimizer marks the config unavailable. If generation fails it falls
+    back to embedding the raw question (with a note), so a model hiccup
+    degrades to plain semantic rather than abstaining.
+    """
+
+    name = "hyde"
+
+    def __init__(
+        self, store: WikiStore, *, model: Any, top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K
+    ) -> None:
+        self._store = store
+        self._model = model
+        self._top_k = top_k
+
+    def retrieve(self, question: str, *, k: int) -> RetrievalResult:
+        _require_semantic_ready(self._store)
+        hypothetical, note = _hyde_document(self._model, question)
+        # Search on the hypothetical answer; on generation failure note it
+        # and fall back to the raw question (still better than abstaining).
+        query = hypothetical or question
+        return RetrievalResult(
+            _semantic_pages(self._store, query, top_k=self._top_k, k=k), note=note
+        )
 
 
 class HybridRetriever:
-    """Reciprocal Rank Fusion of the ``lexical`` and ``semantic`` blocks.
+    """Reciprocal Rank Fusion of two or more retriever legs.
 
-    Runs both, then fuses their ranked lists by RRF — each page scores
-    ``sum 1 / (rrf_k + rank)`` across the lists it appears in, so a page
-    ranked highly by *either* signal surfaces, and one ranked by *both*
-    surfaces strongest. Often the best single strategy: keyword precision
-    plus semantic recall.
+    Each leg produces a ranked slug list; a page scores
+    ``sum 1 / (rrf_k + rank)`` across the legs it appears in, so a page
+    ranked highly by *any* leg surfaces and one ranked by *several*
+    surfaces strongest. The classic pairing is ``lexical`` + ``semantic``
+    (keyword precision + vector recall), but any atomic legs work — e.g.
+    ``bm25`` + ``semantic`` or ``semantic`` + ``hyde`` ("search the
+    question and a hypothetical answer together").
 
-    Requires the semantic block to be available (``semantic.enabled`` +
-    a built index); otherwise :meth:`retrieve` raises :class:`OutmemError`
-    so the optimizer marks the config unavailable rather than scoring a
-    lexical-only result under a misleading ``hybrid`` label.
+    A leg's :class:`OutmemError` (e.g. semantic with no index) propagates,
+    so the optimizer skips an unavailable composition rather than scoring
+    a degraded one.
     """
 
     name = "hybrid"
 
-    def __init__(
-        self,
-        store: WikiStore,
-        *,
-        top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
-        case_insensitive: bool = True,
-        rrf_k: int = DEFAULT_OPTIMIZE_RRF_K,
-    ) -> None:
-        self._lexical = LexicalRetriever(store, case_insensitive=case_insensitive)
-        self._semantic = SemanticRetriever(store, top_k=top_k)
+    def __init__(self, legs: list[Retriever], *, rrf_k: int = DEFAULT_OPTIMIZE_RRF_K) -> None:
+        self._legs = legs
         self._rrf_k = rrf_k
 
     def retrieve(self, question: str, *, k: int) -> RetrievalResult:
         depth = max(k, 10)  # fuse a little deeper than the cutoff
-        # Semantic must be available — let its OutmemError propagate so the
-        # optimizer skips hybrid rather than scoring it as lexical-only.
-        semantic = self._semantic.retrieve(question, k=depth).slugs
-        lexical = self._lexical.retrieve(question, k=depth).slugs
-        return RetrievalResult(
-            _reciprocal_rank_fusion([lexical, semantic], self._rrf_k)[:k]
-        )
+        ranked: list[tuple[str, ...]] = []
+        notes: list[str] = []
+        for leg in self._legs:
+            result = leg.retrieve(question, k=depth)  # OutmemError propagates
+            ranked.append(result.slugs)
+            if result.note:
+                notes.append(f"{leg.name}: {result.note}")
+        note = "; ".join(notes) if notes else None
+        return RetrievalResult(_reciprocal_rank_fusion(ranked, self._rrf_k)[:k], note=note)
 
 
 # --- shared helpers --------------------------------------------------------
+
+
+def _require_semantic_ready(store: WikiStore) -> None:
+    """Raise :class:`OutmemError` unless semantic is enabled AND indexed.
+
+    Distinguishes disabled (config gap) from enabled-but-empty (forgot
+    ``outmem reindex``) so the optimizer reports the right reason and skips
+    the config rather than scoring an empty/useless retriever."""
+    if not store.semantic_enabled():
+        raise OutmemError(
+            "semantic retrieval needs `semantic.enabled: true` in "
+            "config.yaml (+ `pip install outmem[semantic]`)"
+        )
+    try:
+        empty = store.semantic_index_is_empty()
+    except OutmemError:
+        raise
+    except Exception as exc:  # missing extra / db open / embedder probe error
+        raise OutmemError(f"semantic index unavailable: {exc}") from exc
+    if empty:
+        raise OutmemError(
+            "semantic index is empty — run `outmem reindex` to build it "
+            "before tuning with the semantic/hyde/hybrid strategies"
+        )
+
+
+def _semantic_pages(store: WikiStore, text: str, *, top_k: int, k: int) -> tuple[str, ...]:
+    """Embed ``text``, map the matched chunks to wiki page slugs (dedup to
+    best chunk per page, drop source chunks), and return the top ``k``."""
+    chunk_k = max(top_k, k) * 4  # over-fetch so dedup-to-pages still yields k
+    try:
+        matches = store.semantic_find_similar(text, top_k=chunk_k)
+    except OutmemError:
+        raise
+    except Exception as exc:  # embedder / query error
+        raise OutmemError(f"semantic retrieval failed: {exc}") from exc
+
+    prefix = f"{store.config.wiki_dir}/{PAGES_DIR}/"
+    slugs: list[str] = []
+    for match in matches:  # similarity-descending
+        rel = match.rel_path
+        if not rel.startswith(prefix):  # source chunk → no page slug
+            continue
+        slug = relpath_to_slug(Path(rel[len(prefix):]))
+        if slug not in slugs:
+            slugs.append(slug)
+        if len(slugs) >= k:
+            break
+    return tuple(slugs)
+
+
+_HYDE_SYSTEM_PROMPT = (
+    "Write a short, plausible passage (2-4 sentences) that directly answers "
+    "the question as if it were an excerpt from an internal wiki page. State "
+    "claims plainly; do not hedge, ask questions, or say you are unsure. It "
+    "need not be factually correct — it is a search probe, not a final answer."
+)
+
+
+def _hyde_document(model: Any, question: str) -> tuple[str | None, str | None]:
+    """Generate a hypothetical answer passage for ``question``.
+
+    Returns ``(text, note)``: ``text`` is the passage (or ``None`` on
+    failure, with a ``note`` explaining the fallback to the raw question).
+    Lazy ``pydantic_ai`` import so the core has no hard agent dependency."""
+    from pydantic_ai import Agent
+
+    agent_kwargs: dict[str, Any] = {
+        "model_settings": {**ANTHROPIC_CACHE_SETTINGS, "max_tokens": 512}
+    }
+    agent: Agent[None, str] = Agent(
+        model, system_prompt=_HYDE_SYSTEM_PROMPT, **agent_kwargs
+    )
+    try:
+        text = str(agent.run_sync(question).output).strip()
+    except Exception as exc:  # model error → fall back to the raw question
+        return None, f"hyde generation failed ({type(exc).__name__}), used raw question"
+    if not text:
+        return None, "hyde generation empty, used raw question"
+    return text, None
+
 
 # Tiny stopword set — enough to stop the keyword net from being dominated
 # by function words. Not linguistics; just the 80-20.

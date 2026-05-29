@@ -67,7 +67,14 @@ half of the metric. Shipped blocks:
 | `bm25` | SQLite FTS5 BM25 (IDF-weighted term ranking) | nothing (FTS5 is built into SQLite) |
 | `rerank` | wide keyword net → relevance-filter gate | a cheap model |
 | `semantic` | vector cosine similarity over the index | `semantic` + index |
-| `hybrid` | Reciprocal Rank Fusion of `lexical` + `semantic` | as `semantic` |
+| `hyde` | generate a hypothetical answer, then semantic-search on *it* | a model + `semantic` + index |
+| `hybrid` | Reciprocal Rank Fusion of 2+ atomic legs (the `fuse` knob) | depends on the legs |
+
+`hybrid` is composable: `fuse` names the legs, so the agent can try
+`["lexical","semantic"]` (the default), `["bm25","semantic"]`, or
+`["semantic","hyde"]` — the last "searches the question and a
+hypothetical answer together", fusing precision and recall. A leg's
+requirements apply (a `semantic`/`hyde` leg needs the index).
 
 To tune with `semantic` / `hybrid`: `pip install "outmem[semantic]"`, set
 `semantic.enabled: true`, then **build the index once with `outmem reindex`**

@@ -66,11 +66,11 @@ message.
 
 1. **Expose the semantic threshold** as a tunable knob — it trades recall
    against abstention, the key dial for the unanswerable class.
-2. **BM25 + semantic hybrid** — the current `hybrid` fuses `lexical` +
-   `semantic`; try fusing the (already-shipped) `bm25` block with
-   `semantic` instead, which often beats the frequency-rank lexical leg.
-3. **Query-formulation block** — NL question → search terms is currently
+2. **Query-formulation block** — NL question → search terms is currently
    a shared helper (`_keywords`); a smarter formulator is its own block.
+
+(Shipped: `bm25`, `hyde`, and a generalized `hybrid` whose `fuse` knob can
+combine any atomic legs — e.g. `["bm25","semantic"]`, `["semantic","hyde"]`.)
 
 ## Safety (non-negotiable)
 
