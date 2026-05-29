@@ -212,6 +212,21 @@ class TestBM25Block:
         r = build_retriever(store, RetrievalConfig(strategy="bm25"))
         assert r.name == "bm25"
 
+    def test_concurrent_scoring_matches_sequential(self, store: WikiStore) -> None:
+        # Regression: bm25 shares no sqlite connection across threads. A bank
+        # big enough to spin the 8-worker pool must score the SAME as mc=1
+        # (the bug returned 0.0 under concurrency via a cross-thread error).
+        bank = QuestionBank(
+            answerable=[Question(f"penicillin endocarditis {i}", ("abx:penicillin",))
+                        for i in range(12)]
+        )
+        r = build_retriever(store, RetrievalConfig(strategy="bm25"))
+        seq = evaluate(r, bank, k=3, max_concurrency=1)
+        par = evaluate(build_retriever(store, RetrievalConfig(strategy="bm25")),
+                       bank, k=3, max_concurrency=8)
+        assert seq.hit_at_k == par.hit_at_k
+        assert par.hit_at_k > 0.0  # actually retrieved under concurrency
+
     def test_bm25_in_strategies(self) -> None:
         # The optimizer agent can select it.
         assert RetrievalConfig.from_dict({"strategy": "bm25"}).strategy == "bm25"

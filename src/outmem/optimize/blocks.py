@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -200,25 +201,32 @@ class BM25Retriever:
     name = "bm25"
 
     def __init__(self, store: WikiStore) -> None:
-        self._con = _build_fts5_index(store)
+        # Build the index once into a plain in-memory list of (slug, body).
+        # The FTS5 table is built per-call on a thread-local connection,
+        # because evaluate() queries retrievers across a thread pool and a
+        # single sqlite3.Connection cannot be shared across threads.
+        self._rows = _read_page_rows(store)
+        self._local = threading.local()
+
+    def _conn(self) -> sqlite3.Connection:
+        con = getattr(self._local, "con", None)
+        if con is None:
+            con = _fts5_from_rows(self._rows)
+            self._local.con = con
+        return con
 
     def retrieve(self, question: str, *, k: int) -> RetrievalResult:
-        terms = _keywords(question).split("|")
-        terms = [t for t in terms if t]
+        terms = [t for t in _keywords(question).split("|") if t]
         if not terms:
             return RetrievalResult(())
         # FTS5 MATCH query: quote each term (so it can't be read as syntax)
         # and OR them. bm25() returns a score where MORE negative = better,
         # so ascending order is most-relevant-first.
         match = " OR ".join(f'"{t}"' for t in terms)
-        try:
-            rows = self._con.execute(
-                "SELECT slug FROM pages WHERE pages MATCH ? "
-                "ORDER BY bm25(pages) LIMIT ?",
-                (match, k),
-            ).fetchall()
-        except sqlite3.Error:
-            return RetrievalResult(())
+        rows = self._conn().execute(
+            "SELECT slug FROM pages WHERE pages MATCH ? ORDER BY bm25(pages) LIMIT ?",
+            (match, k),
+        ).fetchall()
         return RetrievalResult(tuple(r[0] for r in rows))
 
 
@@ -391,28 +399,34 @@ def _keywords(question: str, *, max_terms: int = 12) -> str:
     return "|".join(seen[:max_terms])
 
 
-def _build_fts5_index(store: WikiStore) -> sqlite3.Connection:
-    """In-memory FTS5 table of (slug, body) for every wiki page.
-
-    ``slug`` is UNINDEXED (stored, not searched) so MATCH/bm25 score only
-    the body. Raises :class:`OutmemError` if this SQLite build lacks FTS5.
-    """
-    con = sqlite3.connect(":memory:")
-    try:
-        con.execute(
-            "CREATE VIRTUAL TABLE pages USING fts5(slug UNINDEXED, body)"
-        )
-    except sqlite3.OperationalError as exc:  # FTS5 not compiled in
-        con.close()
-        raise OutmemError(
-            f"bm25 block needs SQLite FTS5, unavailable in this build: {exc}"
-        ) from exc
-    rows = []
+def _read_page_rows(store: WikiStore) -> list[tuple[str, str]]:
+    """``(slug, body)`` for every readable wiki page. Built once; the FTS5
+    table is created from it per thread (see :class:`BM25Retriever`)."""
+    rows: list[tuple[str, str]] = []
     for slug in store.list_slugs():
         try:
             rows.append((slug, store.read(slug).body))
         except OutmemError:
             continue  # skip an unreadable page rather than abort the index
+    return rows
+
+
+def _fts5_from_rows(rows: list[tuple[str, str]]) -> sqlite3.Connection:
+    """A fresh in-memory FTS5 table populated from ``rows``.
+
+    ``slug`` is UNINDEXED (stored, not searched) so MATCH/bm25 score only
+    the body. Raises :class:`OutmemError` if this SQLite build lacks FTS5.
+    One connection per caller thread — sqlite3 connections aren't sharable
+    across threads, and ``evaluate`` queries across a thread pool.
+    """
+    con = sqlite3.connect(":memory:")
+    try:
+        con.execute("CREATE VIRTUAL TABLE pages USING fts5(slug UNINDEXED, body)")
+    except sqlite3.OperationalError as exc:  # FTS5 not compiled in
+        con.close()
+        raise OutmemError(
+            f"bm25 block needs SQLite FTS5, unavailable in this build: {exc}"
+        ) from exc
     con.executemany("INSERT INTO pages (slug, body) VALUES (?, ?)", rows)
     con.commit()
     return con
