@@ -64,14 +64,12 @@ message.
 
 ## Ideas worth trying (highest-leverage first)
 
-1. **Hybrid fusion** — Reciprocal Rank Fusion of `lexical` + `semantic`
-   (both already exist as blocks). Frequently the best single strategy;
-   test whether it beats either alone, on multiple corpora.
-2. **BM25 block** — proper term weighting over the page corpus; often
-   beats the frequency-rank `lexical` baseline on jargon-heavy wikis.
-3. **Expose the semantic threshold** as a tunable knob — it trades recall
+1. **Expose the semantic threshold** as a tunable knob — it trades recall
    against abstention, the key dial for the unanswerable class.
-4. **Query-formulation block** — NL question → search terms is currently
+2. **BM25 + semantic hybrid** — the current `hybrid` fuses `lexical` +
+   `semantic`; try fusing the (already-shipped) `bm25` block with
+   `semantic` instead, which often beats the frequency-rank lexical leg.
+3. **Query-formulation block** — NL question → search terms is currently
    a shared helper (`_keywords`); a smarter formulator is its own block.
 
 ## Safety (non-negotiable)

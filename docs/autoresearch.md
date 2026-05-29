@@ -64,6 +64,7 @@ half of the metric. Shipped blocks:
 | block | how it matches | needs |
 | --- | --- | --- |
 | `lexical` | keyword ripgrep, pages ranked by hit frequency | nothing |
+| `bm25` | SQLite FTS5 BM25 (IDF-weighted term ranking) | nothing (FTS5 is built into SQLite) |
 | `rerank` | wide keyword net → relevance-filter gate | a cheap model |
 | `semantic` | vector cosine similarity over the index | `semantic` + index |
 | `hybrid` | Reciprocal Rank Fusion of `lexical` + `semantic` | as `semantic` |

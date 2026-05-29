@@ -2,8 +2,8 @@
 
 A :class:`Retriever` turns a natural-language question into a *ranked
 list of page slugs*. That single shape lets us compare heterogeneous
-strategies (keyword, keyword+rerank, semantic, future BM25/hybrid) on
-one metric, and lets a config describe a composition without code.
+strategies (keyword, BM25, keyword+rerank, semantic, hybrid) on one
+metric, and lets a config describe a composition without code.
 
 Two invariants the metric leans on:
 
@@ -22,6 +22,7 @@ shared helper.
 from __future__ import annotations
 
 import re
+import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -61,7 +62,7 @@ class Retriever(Protocol):
 
 # --- the (small, honest) search space ------------------------------------
 
-_STRATEGIES = ("lexical", "rerank", "semantic", "hybrid")
+_STRATEGIES = ("lexical", "bm25", "rerank", "semantic", "hybrid")
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,8 @@ def build_retriever(
     """
     if config.strategy == "lexical":
         return LexicalRetriever(store, case_insensitive=config.case_insensitive)
+    if config.strategy == "bm25":
+        return BM25Retriever(store)
     if config.strategy == "rerank":
         return RerankRetriever(
             store,
@@ -155,8 +158,9 @@ def build_retriever(
 class LexicalRetriever:
     """Keyword ripgrep over the wiki, slugs ranked by hit frequency.
 
-    The BM25-lite baseline: formulate keywords from the question, search,
-    rank pages by how many lines matched. No model call.
+    The cheapest baseline: formulate keywords from the question, search,
+    rank pages by how many lines matched. No model call, no index. (For
+    proper IDF-weighted term ranking, see :class:`BM25Retriever`.)
     """
 
     name = "lexical"
@@ -176,6 +180,46 @@ class LexicalRetriever:
         except OutmemError:
             return RetrievalResult(())
         return RetrievalResult(_rank_by_frequency(result.hits)[:k])
+
+
+class BM25Retriever:
+    """Proper BM25 ranking over page bodies via SQLite FTS5.
+
+    Builds an in-memory FTS5 table (slug + body) from every wiki page on
+    construction and ranks matches with SQLite's built-in ``bm25()``
+    function (IDF-weighted term scoring — better on jargon-heavy corpora
+    than the frequency-rank ``lexical`` baseline). No extra dependency:
+    FTS5 ships with standard SQLite; no embedding model, no API call, no
+    on-disk index. The table is ephemeral — rebuilt per retriever, which
+    is fine for a one-shot tuning run over a fixed corpus.
+
+    The NL question becomes an ``OR`` of its keyword terms (the same
+    extraction the lexical block uses), so a partial match still scores.
+    """
+
+    name = "bm25"
+
+    def __init__(self, store: WikiStore) -> None:
+        self._con = _build_fts5_index(store)
+
+    def retrieve(self, question: str, *, k: int) -> RetrievalResult:
+        terms = _keywords(question).split("|")
+        terms = [t for t in terms if t]
+        if not terms:
+            return RetrievalResult(())
+        # FTS5 MATCH query: quote each term (so it can't be read as syntax)
+        # and OR them. bm25() returns a score where MORE negative = better,
+        # so ascending order is most-relevant-first.
+        match = " OR ".join(f'"{t}"' for t in terms)
+        try:
+            rows = self._con.execute(
+                "SELECT slug FROM pages WHERE pages MATCH ? "
+                "ORDER BY bm25(pages) LIMIT ?",
+                (match, k),
+            ).fetchall()
+        except sqlite3.Error:
+            return RetrievalResult(())
+        return RetrievalResult(tuple(r[0] for r in rows))
 
 
 class RerankRetriever:
@@ -345,6 +389,33 @@ def _keywords(question: str, *, max_terms: int = 12) -> str:
         if len(tok) >= 3 and tok not in _STOP and tok not in seen:
             seen.append(tok)
     return "|".join(seen[:max_terms])
+
+
+def _build_fts5_index(store: WikiStore) -> sqlite3.Connection:
+    """In-memory FTS5 table of (slug, body) for every wiki page.
+
+    ``slug`` is UNINDEXED (stored, not searched) so MATCH/bm25 score only
+    the body. Raises :class:`OutmemError` if this SQLite build lacks FTS5.
+    """
+    con = sqlite3.connect(":memory:")
+    try:
+        con.execute(
+            "CREATE VIRTUAL TABLE pages USING fts5(slug UNINDEXED, body)"
+        )
+    except sqlite3.OperationalError as exc:  # FTS5 not compiled in
+        con.close()
+        raise OutmemError(
+            f"bm25 block needs SQLite FTS5, unavailable in this build: {exc}"
+        ) from exc
+    rows = []
+    for slug in store.list_slugs():
+        try:
+            rows.append((slug, store.read(slug).body))
+        except OutmemError:
+            continue  # skip an unreadable page rather than abort the index
+    con.executemany("INSERT INTO pages (slug, body) VALUES (?, ?)", rows)
+    con.commit()
+    return con
 
 
 def _as_bool(value: Any) -> bool:

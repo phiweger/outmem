@@ -29,6 +29,7 @@ from outmem.optimize import (
     optimize_retrieval,
 )
 from outmem.optimize.blocks import (
+    BM25Retriever,
     HybridRetriever,
     LexicalRetriever,
     RetrievalResult,
@@ -171,6 +172,34 @@ class TestRetrievalConfig:
         assert RetrievalConfig.from_dict({"case_insensitive": "false"}).case_insensitive is False
         assert RetrievalConfig.from_dict({"case_insensitive": "true"}).case_insensitive is True
         assert RetrievalConfig.from_dict({"case_insensitive": False}).case_insensitive is False
+
+
+class TestBM25Block:
+    def test_ranks_by_relevance(self, store: WikiStore) -> None:
+        # "penicillin" appears in the penicillin page (and is mentioned on
+        # ceftriaxone's) → the penicillin page should rank first.
+        out = BM25Retriever(store).retrieve("penicillin endocarditis", k=3)
+        assert out.slugs  # non-empty
+        assert out.slugs[0] == "abx:penicillin"
+
+    def test_respects_k(self, store: WikiStore) -> None:
+        out = BM25Retriever(store).retrieve("antibiotic", k=1)
+        assert len(out.slugs) <= 1
+
+    def test_empty_query_returns_nothing(self, store: WikiStore) -> None:
+        # Only stopwords → no terms → empty (abstain), no crash.
+        assert BM25Retriever(store).retrieve("what is the?", k=5).slugs == ()
+
+    def test_no_match_abstains(self, store: WikiStore) -> None:
+        assert BM25Retriever(store).retrieve("zzzznonexistent", k=5).slugs == ()
+
+    def test_build_retriever_bm25(self, store: WikiStore) -> None:
+        r = build_retriever(store, RetrievalConfig(strategy="bm25"))
+        assert r.name == "bm25"
+
+    def test_bm25_in_strategies(self) -> None:
+        # The optimizer agent can select it.
+        assert RetrievalConfig.from_dict({"strategy": "bm25"}).strategy == "bm25"
 
 
 # --- dataset ---------------------------------------------------------------
@@ -427,7 +456,7 @@ def test_optimize_survives_bad_strategy_from_agent(
         state["n"] += 1
         if state["n"] == 1:
             return ModelResponse(
-                parts=[ToolCallPart(tool_name="run_eval", args={"strategy": "bm25"})]
+                parts=[ToolCallPart(tool_name="run_eval", args={"strategy": "tfidf"})]
             )
         return ModelResponse(parts=[TextPart("done")])
 
@@ -439,7 +468,7 @@ def test_optimize_survives_bad_strategy_from_agent(
     assert result.trace == []
     assert result.best_config.strategy == "lexical"
     # …and the unavailable config is captured on result.log.
-    assert any("bm25" in line for line in result.log)
+    assert any("tfidf" in line for line in result.log)
 
 
 def _exploding_model() -> FunctionModel:

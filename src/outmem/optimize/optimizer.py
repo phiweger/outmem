@@ -155,9 +155,10 @@ def optimize_retrieval(
         result plus a sample of failing questions.
 
         Args:
-            strategy: "lexical" (keyword only), "rerank" (keyword net +
-                cheap-model relevance gate), "semantic" (vector
-                similarity), or "hybrid" (RRF of lexical + semantic).
+            strategy: "lexical" (keyword frequency rank), "bm25" (SQLite
+                FTS5 BM25 ranking — no model/index needed), "rerank"
+                (keyword net + cheap-model relevance gate), "semantic"
+                (vector similarity), or "hybrid" (RRF of lexical + semantic).
             case_insensitive: case-fold the keyword search.
             max_candidates: width of the keyword net before reranking.
             rerank_model_id: model id for the rerank block.
