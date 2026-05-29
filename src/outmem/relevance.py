@@ -84,6 +84,7 @@ class FilterOutcome:
     model: str
     fell_back: bool  # True ⇒ filter failed; kept == bounded lexical candidates
     usage: object | None  # pydantic_ai usage if available
+    error: str | None = None  # why it fell back (e.g. a content-filter refusal)
 
 
 @dataclass(frozen=True)
@@ -224,9 +225,9 @@ def relevance_filter(
             usage=usage,
         )
     except Exception as exc:  # any model/timeout/validation failure
+        reason = _brief_error(exc)
         log.warning(
-            "relevance filter failed (%s); falling back to lexical order",
-            _brief_error(exc),
+            "relevance filter failed (%s); falling back to lexical order", reason
         )
         return FilterOutcome(
             query=query,
@@ -235,6 +236,7 @@ def relevance_filter(
             model=model_name,
             fell_back=True,
             usage=None,
+            error=reason,
         )
 
 

@@ -19,6 +19,7 @@ are reported so you can see *why* it moved. No F1 until list-style
 from __future__ import annotations
 
 import random
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -45,6 +46,7 @@ class Scorecard:
     n_answerable: int
     n_unanswerable: int
     results: tuple[QuestionResult, ...]
+    notes: tuple[str, ...] = ()  # retriever diagnostics (e.g. rerank fallbacks), deduped
 
     @property
     def failures(self) -> tuple[QuestionResult, ...]:
@@ -85,27 +87,34 @@ def evaluate(
         (q, False) for q in bank.unanswerable
     ]
 
-    def _run(item: tuple[Question, bool]) -> QuestionResult:
+    def _run(item: tuple[Question, bool]) -> tuple[QuestionResult, str | None]:
         q, is_answerable = item
-        retrieved = retriever.retrieve(q.question, k=k).slugs
+        result = retriever.retrieve(q.question, k=k)
+        retrieved = result.slugs
         correct = (
             any(g in retrieved[:k] for g in q.gold_slugs)
             if is_answerable
             else len(retrieved) == 0
         )
-        return QuestionResult(
+        qr = QuestionResult(
             question=q.question,
             answerable=is_answerable,
             gold_slugs=q.gold_slugs if is_answerable else (),
             retrieved=retrieved,
             correct=correct,
         )
+        return qr, result.note
 
     if max_concurrency > 1 and len(items) > 1:
         with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
-            results = list(pool.map(_run, items))  # preserves input order
+            pairs = list(pool.map(_run, items))  # preserves input order
     else:
-        results = [_run(it) for it in items]
+        pairs = [_run(it) for it in items]
+
+    results = [qr for qr, _ in pairs]
+    # Dedupe retriever diagnostics with a count (e.g. "…refusal" x 30 questions).
+    note_counts = Counter(note for _, note in pairs if note)
+    notes = tuple(f"{n} (x{c})" if c > 1 else n for n, c in note_counts.items())
 
     n_ans = len(answerable)
     n_unans = len(bank.unanswerable)
@@ -120,4 +129,5 @@ def evaluate(
         n_answerable=n_ans,
         n_unanswerable=n_unans,
         results=tuple(results),
+        notes=notes,
     )

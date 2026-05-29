@@ -424,6 +424,51 @@ def test_optimize_survives_bad_strategy_from_agent(
     # real scored baseline rather than crashing.
     assert result.trace == []
     assert result.best_config.strategy == "lexical"
+    # …and the unavailable config is captured on result.log.
+    assert any("bm25" in line for line in result.log)
+
+
+def _exploding_model() -> FunctionModel:
+    def respond(messages: object, info: AgentInfo) -> ModelResponse:
+        raise RuntimeError("model is down")
+
+    return FunctionModel(respond)
+
+
+def test_evaluate_aggregates_retriever_notes(store: WikiStore) -> None:
+    class _Noting:
+        name = "noting"
+
+        def retrieve(self, question: str, *, k: int) -> RetrievalResult:
+            return RetrievalResult((), note="rerank fell back: refusal")
+
+    bank = QuestionBank(answerable=[Question(f"q{i}?", ("s",)) for i in range(4)])
+    card = evaluate(_Noting(), bank, max_concurrency=1)
+    assert card.notes == ("rerank fell back: refusal (x4)",)  # deduped + counted
+
+
+def test_optimize_log_records_rerank_fallback(
+    store: WikiStore, bank: QuestionBank
+) -> None:
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        if state["n"] == 1:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name="run_eval", args={"strategy": "rerank"})]
+            )
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store,
+        bank,
+        optimizer_model=FunctionModel(optimizer),
+        rerank_model=_exploding_model(),  # every per-question rerank call fails
+        k=3,
+        max_evals=3,
+    )
+    assert any("rerank" in line and "fell back" in line for line in result.log)
 
 
 def test_optimize_reports_epochs(store: WikiStore, bank: QuestionBank) -> None:

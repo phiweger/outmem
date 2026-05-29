@@ -150,7 +150,15 @@ result = optimize_retrieval(
 print(result.best_config, result.best_score)   # winning config + its full-bank score
 for cfg, score in result.trace:                 # every config tried (sampled scores)
     print(score, cfg)
+for line in result.log:                          # errors/fallbacks during the run
+    print(line)   # e.g. "[eval 7] rerank: rerank fell back to lexical: …refusal (x30)"
 ```
+
+`result.log` is the post-hoc record of anything that went wrong — a config
+whose rerank model refused (with the reason and how many questions),
+an unavailable strategy, etc. — so you don't have to scrape stderr. (At
+the per-call level, `relevance_filter`'s `FilterOutcome` carries `.error`
+plus the `.query`/`.candidates_considered` it was processing.)
 
 ### Cost, scale & logging
 

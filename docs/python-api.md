@@ -393,6 +393,7 @@ result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonne
 result.best_config   # winning strategy + knobs for this corpus
 result.best_score    # the metric it achieved (Hit@k blended with abstention)
 result.trace         # [(config_dict, score), ...] — every config tried
+result.log           # diagnostics: errors/fallbacks during the run (why + which eval)
 ```
 
 Entry-point signatures:

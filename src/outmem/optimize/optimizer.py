@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from outmem.config import (
@@ -59,6 +59,7 @@ class OptimizeResult:
     scorecard: Scorecard
     trace: list[tuple[dict[str, Any], float]]  # (config, score) in eval order
     notes: str  # the agent's closing rationale (advisory)
+    log: list[str] = field(default_factory=list)  # diagnostics (errors/fallbacks)
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,7 @@ def optimize_retrieval(
 
     trace: list[tuple[dict[str, Any], float]] = []
     best: dict[str, Any] = {"score": -1.0, "cfg": None, "card": None}
+    run_log: list[str] = []  # errors / fallbacks, surfaced on OptimizeResult.log
 
     def run_eval(
         strategy: str = DEFAULT_OPTIMIZE_STRATEGY,
@@ -190,10 +192,13 @@ def optimize_retrieval(
             )
         except OutmemError as exc:
             log.info("optimize: skipped strategy=%s (%s)", strategy, exc)
+            run_log.append(f"[eval attempt] strategy={strategy} unavailable: {exc}")
             return f"config unavailable: {exc}"
         trace.append((cfg.to_dict(), card.score))
         if card.score > best["score"]:
             best.update(score=card.score, cfg=cfg, card=card)
+        for note in card.notes:  # e.g. a rerank model that refused on N questions
+            run_log.append(f"[eval {len(trace)}] {cfg.strategy}: {note}")
         _report_eval(
             on_eval,
             EvalEvent(
@@ -231,7 +236,7 @@ def optimize_retrieval(
             build_retriever(store, cfg, model=rerank_model),
             bank, k=k, max_concurrency=eval_concurrency,
         )
-        return OptimizeResult(cfg, card.score, card, trace, notes)
+        return OptimizeResult(cfg, card.score, card, trace, notes, log=run_log)
 
     best_cfg: RetrievalConfig = best["cfg"]
     best_card: Scorecard = best["card"]
@@ -240,7 +245,7 @@ def optimize_retrieval(
             build_retriever(store, best_cfg, model=rerank_model),
             bank, k=k, max_concurrency=eval_concurrency,
         )
-    return OptimizeResult(best_cfg, best_card.score, best_card, trace, notes)
+    return OptimizeResult(best_cfg, best_card.score, best_card, trace, notes, log=run_log)
 
 
 def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:

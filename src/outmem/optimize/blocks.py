@@ -48,6 +48,7 @@ class RetrievalResult:
     """A retriever's answer: page slugs, most-relevant first. Empty == abstain."""
 
     slugs: tuple[str, ...]
+    note: str | None = None  # optional diagnostic, e.g. a rerank fallback reason
 
 
 @runtime_checkable
@@ -212,7 +213,8 @@ class RerankRetriever:
             max_candidates=self._max_candidates,
             case_insensitive=self._ci,
         )
-        return RetrievalResult(tuple(p.slug for p in outcome.kept)[:k])
+        note = f"rerank fell back to lexical: {outcome.error}" if outcome.fell_back else None
+        return RetrievalResult(tuple(p.slug for p in outcome.kept)[:k], note=note)
 
 
 class SemanticRetriever:

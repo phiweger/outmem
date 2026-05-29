@@ -107,6 +107,8 @@ class TestRelevanceFilter:
         # Lexical fallback keeps the candidate hits, in slug order, no reason.
         assert {p.slug for p in out.kept} >= {"abx:penicillin"}
         assert all(p.reason == "" for p in out.kept)
+        # The fallback records WHY (the brief reason) on the outcome.
+        assert out.error and "RuntimeError" in out.error
 
     def test_max_relevant_caps_kept(self, store: WikiStore) -> None:
         model = _model_returning(
