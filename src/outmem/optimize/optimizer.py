@@ -133,6 +133,7 @@ def optimize_retrieval(
     # instrument_pydantic_ai is process-global, so this one call traces the
     # optimizer agent AND the per-question rerank calls in the loop.
     from outmem._logfire import setup as _setup_logfire
+    from outmem._logfire import span as _span
 
     _setup_logfire(store.config.outmem.logfire)
 
@@ -198,10 +199,13 @@ def optimize_retrieval(
                 cfg_dict["fuse"] = fuse
             cfg = RetrievalConfig.from_dict(cfg_dict)
             retriever = build_retriever(store, cfg, model=rerank_model)
-            card = evaluate(
-                retriever, bank, k=k,
-                max_concurrency=eval_concurrency, sample=eval_sample,
-            )
+            # One span per eval nests this config's per-question retrieval
+            # calls under it in the trace.
+            with _span(f"eval {len(trace) + 1}: {cfg.strategy}", **cfg.to_dict()):
+                card = evaluate(
+                    retriever, bank, k=k,
+                    max_concurrency=eval_concurrency, sample=eval_sample,
+                )
         except OutmemError as exc:
             log.info("optimize: skipped strategy=%s (%s)", strategy, exc)
             run_log.append(f"[eval attempt] strategy={strategy} unavailable: {exc}")
@@ -239,7 +243,10 @@ def optimize_retrieval(
         system_prompt=_OPTIMIZER_SYSTEM_PROMPT,
         **agent_kwargs,
     )
-    run = agent.run_sync(_initial_prompt(bank, k, max_evals))
+    # One parent span nests the optimizer's own turns and every per-eval
+    # span (and their per-question children) under a single run in the trace.
+    with _span("optimize_retrieval", max_evals=max_evals, k=k):
+        run = agent.run_sync(_initial_prompt(bank, k, max_evals))
     notes = str(run.output)
 
     if best["cfg"] is None:  # agent never produced a scorable config

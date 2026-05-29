@@ -27,6 +27,16 @@ def test_setup_noop_when_disabled() -> None:
     assert setup(LogfireSettings(enabled=False)) is False
 
 
+def test_span_is_noop_when_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """span() must be a harmless no-op when logfire was never configured —
+    the core (generate_bank / optimize) calls it unconditionally."""
+    import outmem._logfire as lf
+
+    monkeypatch.setattr(lf, "_configured", False)
+    with lf.span("grouping", a=1, b="x"):
+        pass  # no raise, no logfire import required
+
+
 def test_setup_raises_friendly_error_when_dep_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
 
 from outmem.config import LOGFIRE_SERVICE_NAME, LogfireSettings
 from outmem.exceptions import OutmemError
@@ -76,3 +79,28 @@ def _quiet_export_noise() -> None:
     # Logfire's exporter logs "Failed to export span batch" per attempt;
     # ERROR-floor it so transient/repeated export failures stay quiet.
     logging.getLogger("logfire").setLevel(logging.ERROR)
+
+
+@contextmanager
+def span(name: str, **attributes: object) -> Iterator[None]:
+    """A parent span for grouping nested work, or a no-op.
+
+    Yields a Logfire span when logfire is installed AND already configured
+    (i.e. ``setup`` ran with ``logfire.enabled``); otherwise a plain no-op,
+    so the core never hard-depends on the optional extra. Used to nest the
+    many per-page / per-eval ``agent run`` spans under one parent in the
+    trace instead of leaving them flat.
+    """
+    if not _configured:
+        yield
+        return
+    try:
+        import logfire
+    except ImportError:
+        yield
+        return
+    # logfire.span's typed signature doesn't accept arbitrary **kwargs as
+    # attributes; call via an untyped alias so mypy doesn't narrow them.
+    _span: Any = logfire.span
+    with _span(name, **attributes):
+        yield

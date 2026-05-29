@@ -107,6 +107,7 @@ def generate_bank(
     # Reuse outmem's Logfire wiring (no-op unless logfire.enabled is set) so
     # the generation model calls are traced like the rest of outmem.
     from outmem._logfire import setup as _setup_logfire
+    from outmem._logfire import span as _span
 
     _setup_logfire(store.config.outmem.logfire)
 
@@ -121,12 +122,14 @@ def generate_bank(
             continue
         pages.append((slug, page.title, page.body, _first_source(page.frontmatter)))
 
-    # Generate for all pages concurrently — the slow, I/O-bound part.
-    generated = (
-        asyncio.run(_generate_pages(model, pages, per_page, max_concurrency, on_progress))
-        if pages
-        else []
-    )
+    # Generate for all pages concurrently — the slow, I/O-bound part. One
+    # parent span nests the per-page "agent run" children in the trace.
+    with _span("generate_bank", pages=len(pages), per_page=per_page):
+        generated = (
+            asyncio.run(_generate_pages(model, pages, per_page, max_concurrency, on_progress))
+            if pages
+            else []
+        )
     answerable = [
         Question(question=q, gold_slugs=(slug,), source=source)
         for slug, source, questions in generated

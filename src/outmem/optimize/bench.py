@@ -18,6 +18,7 @@ are reported so you can see *why* it moved. No F1 until list-style
 
 from __future__ import annotations
 
+import contextvars
 import math
 import random
 import time
@@ -118,8 +119,17 @@ def evaluate(
         return qr, result.note
 
     if max_concurrency > 1 and len(items) > 1:
+        # Carry the current context (incl. the active OTEL/logfire span) into
+        # each worker so per-question retrieval spans nest under the caller's
+        # eval span instead of appearing as flat roots. contextvars is stdlib,
+        # so this adds no otel/logfire dependency.
+        ctx = contextvars.copy_context()
+
+        def _run_in_ctx(item: tuple[Question, bool]) -> tuple[QuestionResult, str | None]:
+            return ctx.copy().run(_run, item)
+
         with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
-            pairs = list(pool.map(_run, items))  # preserves input order
+            pairs = list(pool.map(_run_in_ctx, items))  # preserves input order
     else:
         pairs = [_run(it) for it in items]
 
