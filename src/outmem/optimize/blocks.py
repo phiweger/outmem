@@ -21,7 +21,6 @@ shared helper.
 
 from __future__ import annotations
 
-import contextlib
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -278,10 +277,10 @@ class HybridRetriever:
     surfaces strongest. Often the best single strategy: keyword precision
     plus semantic recall.
 
-    Degrades gracefully: if the semantic block is unavailable
-    (``semantic.enabled`` off / no index), fusion proceeds with the
-    lexical list alone rather than failing — so ``hybrid`` is always
-    runnable (it just collapses toward ``lexical``).
+    Requires the semantic block to be available (``semantic.enabled`` +
+    a built index); otherwise :meth:`retrieve` raises :class:`OutmemError`
+    so the optimizer marks the config unavailable rather than scoring a
+    lexical-only result under a misleading ``hybrid`` label.
     """
 
     name = "hybrid"
@@ -300,13 +299,13 @@ class HybridRetriever:
 
     def retrieve(self, question: str, *, k: int) -> RetrievalResult:
         depth = max(k, 10)  # fuse a little deeper than the cutoff
-        lists: list[tuple[str, ...]] = [
-            self._lexical.retrieve(question, k=depth).slugs
-        ]
-        # Semantic unavailable (disabled / no index) → lexical-only fusion.
-        with contextlib.suppress(OutmemError):
-            lists.append(self._semantic.retrieve(question, k=depth).slugs)
-        return RetrievalResult(_reciprocal_rank_fusion(lists, self._rrf_k)[:k])
+        # Semantic must be available — let its OutmemError propagate so the
+        # optimizer skips hybrid rather than scoring it as lexical-only.
+        semantic = self._semantic.retrieve(question, k=depth).slugs
+        lexical = self._lexical.retrieve(question, k=depth).slugs
+        return RetrievalResult(
+            _reciprocal_rank_fusion([lexical, semantic], self._rrf_k)[:k]
+        )
 
 
 # --- shared helpers --------------------------------------------------------

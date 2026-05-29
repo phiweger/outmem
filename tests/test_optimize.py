@@ -343,10 +343,11 @@ class TestHybridBlock:
         # ceftriaxone (semantic-only) is still pulled in.
         assert "abx:ceftriaxone" in fused
 
-    def test_degrades_to_lexical_when_semantic_off(self, store: WikiStore) -> None:
-        # Fresh wiki: semantic disabled. Hybrid must still run (lexical-only).
-        out = HybridRetriever(store).retrieve("penicillin endocarditis", k=3)
-        assert "abx:penicillin" in out.slugs
+    def test_raises_when_semantic_off(self, store: WikiStore) -> None:
+        # Fresh wiki: semantic disabled. Hybrid must RAISE (not silently run
+        # lexical-only under a "hybrid" label), so the optimizer skips it.
+        with pytest.raises(OutmemError):
+            HybridRetriever(store).retrieve("penicillin endocarditis", k=3)
 
     def test_build_retriever_hybrid(self, store: WikiStore) -> None:
         r = build_retriever(store, RetrievalConfig(strategy="hybrid", rrf_k=30))
