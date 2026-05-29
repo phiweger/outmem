@@ -169,8 +169,16 @@ outmem reindex --path wiki/pages/foo.md           # specific files
 
 `reindex` embeds files concurrently (the network bottleneck; writes stay
 serial) and prints a `reindex: done/total files` progress counter to
-stderr. `--path` reindexes one repo-relative *file*; `--root` selects the
-wiki (after the subcommand).
+stderr, then a summary like:
+
+```
+reindex: 12 re-embedded, 334 unchanged, 0 removed, 47 chunks added, 18234 embed tokens
+```
+
+The embedding-token count is the spend you can multiply by your provider's
+$/M-tokens to get cost. When Logfire is enabled, the same numbers land on
+an `outmem.reindex` span. `--path` reindexes one repo-relative *file*;
+`--root` selects the wiki (after the subcommand).
 
 Set `semantic.enabled: true` in `config.yaml` first. Detailed
 behaviour: [features.md](features.md#semantic-index).

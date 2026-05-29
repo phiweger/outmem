@@ -2,8 +2,8 @@
 
 A :class:`Retriever` turns a natural-language question into a *ranked
 list of page slugs*. That single shape lets us compare heterogeneous
-strategies (keyword, BM25, keyword+rerank, semantic, hybrid) on one
-metric, and lets a config describe a composition without code.
+strategies (keyword, BM25, keyword+rerank, semantic, hyde, hybrid) on
+one metric, and lets a config describe a composition without code.
 
 Two invariants the metric leans on:
 

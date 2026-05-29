@@ -43,8 +43,12 @@ def _status(msg: str) -> None:
 
 
 def _resolve_root(args: argparse.Namespace) -> Path:
-    if args.root:
-        return Path(args.root).expanduser()
+    # ``--root`` uses argparse.SUPPRESS default (so nested subparsers don't
+    # clobber outer-level values), which means it's ABSENT from args rather
+    # than None when unset — use getattr to handle both forms cleanly.
+    root = getattr(args, "root", None)
+    if root:
+        return Path(root).expanduser()
     env = os.environ.get("OUTMEM_PATH")
     if env:
         return Path(env).expanduser()
@@ -732,15 +736,22 @@ def build_parser() -> argparse.ArgumentParser:
     # --root lives on a shared parent attached to every subcommand, so it
     # goes AFTER the subcommand (`outmem reindex --root X`) — what users
     # intuitively type. $OUTMEM_PATH covers the env/scripted case.
+    # SUPPRESS the default so that an inner subparser (e.g. `hook install`)
+    # without --root doesn't clobber the value set at the outer level
+    # (`outmem hook --root X install`) — both positions must work.
     root_parent = argparse.ArgumentParser(add_help=False)
     root_parent.add_argument(
         "--root",
+        default=argparse.SUPPRESS,
         help="Wiki root (defaults to $OUTMEM_PATH or the current directory).",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="Scaffold a new wiki at PATH.", parents=[root_parent])
+    # `init` takes a positional PATH and doesn't use --root (it CREATES the
+    # wiki at PATH rather than opening an existing one) — so it's the lone
+    # subcommand that doesn't inherit root_parent.
+    p_init = sub.add_parser("init", help="Scaffold a new wiki at PATH.")
     p_init.add_argument("path")
     p_init.set_defaults(func=cmd_init)
 
@@ -902,6 +913,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook_install = hook_sub.add_parser(
         "install",
         help="Drop a pre-commit hook at .git/hooks/pre-commit.",
+        parents=[root_parent],
     )
     p_hook_install.add_argument(
         "--force",
@@ -913,6 +925,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook_uninstall = hook_sub.add_parser(
         "uninstall",
         help="Remove the outmem pre-commit hook.",
+        parents=[root_parent],
     )
     p_hook_uninstall.add_argument(
         "--force",
@@ -1031,6 +1044,7 @@ def build_parser() -> argparse.ArgumentParser:
         "after manual edits (Obsidian, vim) that add / rename / "
         "delete pages or change titles / tags. No-op when the index "
         "is already in sync.",
+        parents=[root_parent],
     )
     p_index_rebuild.add_argument(
         "--no-commit",

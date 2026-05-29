@@ -85,9 +85,10 @@ def evaluate(
     ``p95_latency_ms``, and ``latency_ms`` on each :class:`QuestionResult``)
     so a faster strategy can be preferred among configs that score alike.
 
-    All shipped blocks are thread-safe under the pool (``semantic`` opens
-    its store with ``check_same_thread=False``; ``bm25`` uses a per-thread
-    FTS5 connection), so the default concurrency is safe across strategies.
+    All shipped blocks are thread-safe under the pool (``semantic``
+    serialises access to its shared sqlite connection on a per-instance
+    lock; ``bm25`` uses a per-thread FTS5 connection), so the default
+    concurrency is safe across strategies.
     """
     answerable = bank.answerable
     if sample is not None and sample < len(answerable):

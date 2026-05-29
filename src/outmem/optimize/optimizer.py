@@ -113,14 +113,18 @@ def optimize_retrieval(
     config's ``rerank_model`` string. ``max_evals`` soft-caps how many
     configs the agent may score (the "turn budget").
 
-    **Cost control.** A ``rerank`` / ``hybrid`` eval makes one model call
-    per bank question, so cost ≈ ``bank_size * rerank_evals`` (plus the
-    optimizer's own turns). Two knobs bound it: ``eval_concurrency``
-    (default 8) runs each eval's per-question calls in parallel, and
-    ``eval_sample`` caps the answerable questions scored *per eval* to a
-    fixed seeded subset — the winner is then re-scored on the full bank
-    so the reported score is honest. See ``docs/autoresearch.md`` for the
-    full run + logging recipe.
+    **Cost control.** ``rerank`` and ``hyde`` evals (and any ``hybrid``
+    that fuses one of those) make one model call per bank question, so
+    cost ≈ ``bank_size * (rerank + hyde) evals`` (plus the optimizer's
+    own turns). Pure ``lexical`` / ``bm25`` / ``semantic`` / ``hybrid[
+    lexical+semantic]`` evals are free of LLM cost; semantic query
+    embeddings are cached per text, so repeated questions across evals
+    re-embed at most once. Two knobs bound the expensive evals:
+    ``eval_concurrency`` (default 8) runs each eval's per-question calls
+    in parallel, and ``eval_sample`` caps the answerable questions scored
+    *per eval* to a fixed seeded subset — the winner is then re-scored on
+    the full bank so the reported score is honest. See
+    ``docs/autoresearch.md`` for the full run + logging recipe.
 
     ``on_eval(EvalEvent)`` fires once per scored eval — an epoch-style
     progress hook carrying the config just tried, its metrics, and the

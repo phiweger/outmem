@@ -39,6 +39,7 @@ from outmem.config import (
     DEFAULT_AGENT_NAME,
     DEFAULT_BRANCH,
     DEFAULT_REMOTE,
+    DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
     OutmemConfig,
     load_dotenv_if_present,
     load_yaml_config,
@@ -759,7 +760,7 @@ class WikiStore:
         self,
         *,
         force: bool = False,
-        max_concurrency: int = 8,
+        max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
         """Walk every indexable file, sync the index, return a summary.

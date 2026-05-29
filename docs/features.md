@@ -211,8 +211,9 @@ print(result.best_config, result.best_score)   # then write it into config.yaml
 
 This is the **config-space** loop: it picks among shipped, tested blocks
 and writes no code. The **code-space** loop — an agent that writes *new*
-blocks (BM25, hybrid fusion), gated by tests + the benchmark across
-multiple corpora, opening a PR — is a maintainer activity, documented in
+blocks (e.g. a learned query-formulation block, a smarter reranker),
+gated by tests + the benchmark across multiple corpora, opening a PR —
+is a maintainer activity, documented in
 [`improve.md`](../improve.md) with a stub workflow at
 `.github/workflows/autoresearch.yml`.
 
@@ -300,6 +301,19 @@ setup_logfire(store)   # honours store.config.outmem.logfire
 returns `True` when instrumentation was activated and `False` when the
 config has `logfire.enabled: false`, and raises `OutmemError` when the
 config opts in but the `logfire` package isn't installed.
+
+**Reindex cost.** `outmem reindex` (and `WikiStore.semantic_reindex_all`)
+emit an `outmem.reindex` parent span with `files`, `force`, `reindexed`,
+`chunks_added`, and **`embed_tokens`** attributes — that's where the
+embedding spend lands in the Logfire UI. The CLI summary line also
+reports the token count (`reindex: 12 re-embedded, …, 18234 embed tokens`).
+
+**Terminal output.** outmem calls `logfire.configure(console=False)` so
+spans don't echo to your terminal (outmem prints its own progress; the
+console exporter just floods stdout during optimize loops). Spans still
+go to the UI. To re-enable terminal spans, call `logfire.configure(...)`
+yourself with `console=...` *before* importing/triggering outmem's
+setup — the first `configure` wins.
 
 ## Dashboard
 

@@ -46,6 +46,7 @@ returns ``ReindexResult(skipped=True)``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import struct
 import threading
@@ -56,8 +57,11 @@ from typing import Any, Literal
 
 from outmem._sqlite import connect as _sqlite_connect
 from outmem._time import format_iso_z, utc_now
+from outmem.config import DEFAULT_SEMANTIC_REINDEX_CONCURRENCY
 from outmem.exceptions import OutmemError
 from outmem.semantic.chunker import Chunk, chunk_text, hash_text
+
+log = logging.getLogger(__name__)
 
 DEFAULT_DB_FILENAME = ".vectors.db"
 SCHEMA_VERSION = "1"
@@ -154,7 +158,10 @@ class VectorStore:
         return cls(db_path=db_path, connection=con, embedder=embedder)
 
     def close(self) -> None:
-        self.con.close()
+        # Acquire the lock so we don't pull the connection out from under a
+        # concurrent reader mid-query (every other public method takes it).
+        with self._lock:
+            self.con.close()
 
     # ------------------------------------------------------------------
     # Schema
@@ -307,33 +314,27 @@ class VectorStore:
         single shared connection means this MUST stay serial across files
         — interleaving open transactions corrupts the index."""
         with self._lock:
-            return self._commit_locked(rel_path, content_hash, kind, chunks, vectors)
-
-    def _commit_locked(
-        self, rel_path: str, content_hash: str, kind: Literal["wiki", "source"],
-        chunks: list[Chunk], vectors: list[list[float]],
-    ) -> ReindexResult:
-        cur = self.con.cursor()
-        try:
-            removed = self._delete_file_locked(cur, rel_path)
-            added = 0
-            if chunks:
-                self._insert_chunks(cur, rel_path=rel_path, chunks=chunks, vectors=vectors)
-                added = len(chunks)
-            cur.execute(
-                "INSERT OR REPLACE INTO files "
-                "(rel_path, content_hash, indexed_at, chunks_count, kind) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (rel_path, content_hash, _now_iso(), added, kind),
+            cur = self.con.cursor()
+            try:
+                removed = self._delete_file_locked(cur, rel_path)
+                added = 0
+                if chunks:
+                    self._insert_chunks(cur, rel_path=rel_path, chunks=chunks, vectors=vectors)
+                    added = len(chunks)
+                cur.execute(
+                    "INSERT OR REPLACE INTO files "
+                    "(rel_path, content_hash, indexed_at, chunks_count, kind) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (rel_path, content_hash, _now_iso(), added, kind),
+                )
+                self.con.commit()
+            except Exception:
+                self.con.rollback()
+                raise
+            return ReindexResult(
+                rel_path=rel_path, skipped=False, chunks_removed=removed,
+                chunks_added=added, embeddings_called=len(chunks),
             )
-            self.con.commit()
-        except Exception:
-            self.con.rollback()
-            raise
-        return ReindexResult(
-            rel_path=rel_path, skipped=False, chunks_removed=removed,
-            chunks_added=added, embeddings_called=len(chunks),
-        )
 
     def reindex_files(
         self,
@@ -342,7 +343,7 @@ class VectorStore:
         chunk_size: int = 2000,
         chunk_max: int = 8000,
         overlap_paragraphs: int = 1,
-        max_concurrency: int = 8,
+        max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> list[ReindexResult]:
         """Re-index a batch of ``(rel_path, body, kind)`` files.
@@ -374,12 +375,24 @@ class VectorStore:
 
         if prepared:
             vectors_by_path = asyncio.run(self._embed_batch(prepared, max_concurrency))
-            # Phase 3 — serial writes.
+            # Phase 3 — serial writes. Per-file embed failures (from phase 2)
+            # arrive as exceptions in vectors_by_path; record an error result
+            # and skip the commit so other files still land.
             for rel_path, content_hash, kind, chunks in prepared:
-                results.append(
-                    self._commit_file(rel_path, content_hash, kind, chunks,
-                                      vectors_by_path[rel_path])
-                )
+                vectors = vectors_by_path[rel_path]
+                if isinstance(vectors, BaseException):
+                    log.warning(
+                        "reindex: embed failed for %s (%s); skipping commit",
+                        rel_path, vectors,
+                    )
+                    results.append(ReindexResult(
+                        rel_path, skipped=True, chunks_removed=0,
+                        chunks_added=0, embeddings_called=0,
+                    ))
+                else:
+                    results.append(
+                        self._commit_file(rel_path, content_hash, kind, chunks, vectors)
+                    )
                 done += 1
                 if on_progress:
                     on_progress(done, total)
@@ -389,20 +402,28 @@ class VectorStore:
         self,
         prepared: list[tuple[str, str, Literal["wiki", "source"], list[Chunk]]],
         max_concurrency: int,
-    ) -> dict[str, list[list[float]]]:
+    ) -> dict[str, list[list[float]] | BaseException]:
         """Embed every prepared file's chunks concurrently (≤ ``max_concurrency``
-        in flight), keyed by rel_path. No DB access — pure network."""
+        in flight), keyed by rel_path. No DB access — pure network.
+
+        Per-file errors are CAUGHT and returned as the value (instead of the
+        vectors), so one transient 429/timeout doesn't abort the batch and
+        discard work already done by other files. Callers inspect the value
+        type to distinguish success from failure."""
         sem = asyncio.Semaphore(max(1, max_concurrency))
-        out: dict[str, list[list[float]]] = {}
+        out: dict[str, list[list[float]] | BaseException] = {}
 
         async def _one(rel_path: str, chunks: list[Chunk]) -> None:
             if not chunks:
                 out[rel_path] = []
                 return
             async with sem:
-                out[rel_path] = await self.embedder.embed_documents_async(
-                    [c.text for c in chunks]
-                )
+                try:
+                    out[rel_path] = await self.embedder.embed_documents_async(
+                        [c.text for c in chunks]
+                    )
+                except BaseException as exc:
+                    out[rel_path] = exc
 
         await asyncio.gather(*(_one(rp, ch) for rp, _, _, ch in prepared))
         return out

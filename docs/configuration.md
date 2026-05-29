@@ -135,7 +135,7 @@ Set `remove_stale_lock: false` to disable.
 
 | Var | Effect |
 |---|---|
-| `OUTMEM_PATH` | Default wiki root (overridden by `--root` on the CLI). |
+| `OUTMEM_PATH` | Default wiki root (overridden by `--root` on the CLI, passed *after* the subcommand — e.g. `outmem reindex --root /srv/wiki`). |
 | `OUTMEM_MODEL` | Model id for `outmem ask` / `build_agent`. Overrides `config.yaml`. |
 | `OUTMEM_AGENT_NAME` | Override the agent's commit `user.name`. |
 | `OUTMEM_AGENT_EMAIL` | Override the agent's commit `user.email`. |

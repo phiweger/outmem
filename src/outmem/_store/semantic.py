@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from outmem.config import SEMANTIC_DISABLED_HELP
+from outmem.config import DEFAULT_SEMANTIC_REINDEX_CONCURRENCY, SEMANTIC_DISABLED_HELP
 from outmem.exceptions import OutmemError
 from outmem.frontmatter import parse_wiki_page
 from outmem.index import RESERVED_WIKI_FILES, editorial_pages
@@ -141,7 +141,7 @@ def reindex_all(
     store: WikiStore,
     *,
     force: bool = False,
-    max_concurrency: int = 8,
+    max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Resync the whole index with disk. Embeds files concurrently (the

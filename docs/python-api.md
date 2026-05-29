@@ -381,9 +381,14 @@ from outmem import WikiStore
 from outmem.optimize import (
     RetrievalConfig,     # a point in the search space (strategy + knobs)
     build_retriever,     # RetrievalConfig -> a live Retriever
+    Retriever,           # protocol for custom blocks (improve.md uses this)
+    RetrievalResult,     # what a Retriever returns: ranked slugs + optional note
     Question, QuestionBank,
     generate_bank,       # provenance-labelled bank from the wiki (LLM)
+    harvest_unanswerable,  # pull gap-log questions for the unanswerable half
     evaluate,            # score a retriever -> Scorecard
+    Scorecard,           # the metric scalar + sub-rates + per-Q results
+    QuestionResult,      # per-question row inside Scorecard.results
     optimize_retrieval,  # agent-driven config search -> OptimizeResult
     EvalEvent,           # per-eval progress event (the on_eval hook payload)
 )
@@ -407,7 +412,7 @@ Entry-point signatures:
 
 - `generate_bank(store, *, model, per_page=2, slugs=None, max_pages=None, include_unanswerable=True, max_concurrency=8, on_progress=None) -> QuestionBank`
 - `optimize_retrieval(store, bank, *, optimizer_model, rerank_model=None, k=5, eval_concurrency=8, eval_sample=None, max_evals=12, on_eval=None) -> OptimizeResult`
-- `evaluate(retriever, bank, *, k=5, max_concurrency=8, sample=None) -> Scorecard` — `.score`, `.hit_at_k`, `.abstention`, `.failures`, `.mean_latency_ms`, `.p95_latency_ms`
+- `evaluate(retriever, bank, *, k=5, max_concurrency=8, sample=None) -> Scorecard` — `.score`, `.hit_at_k`, `.abstention`, `.failures`, `.mean_latency_ms`, `.p95_latency_ms`; each entry in `.results` is a `QuestionResult` with `.latency_ms` for per-question wall-clock.
 
 Progress prints to stderr by default: a page counter for `generate_bank`,
 and one epoch line per eval for `optimize_retrieval`

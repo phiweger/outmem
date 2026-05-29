@@ -76,7 +76,8 @@ half of the metric. Shipped blocks:
 hypothetical answer together", fusing precision and recall. A leg's
 requirements apply (a `semantic`/`hyde` leg needs the index).
 
-To tune with `semantic` / `hybrid`: `pip install "outmem[semantic]"`, set
+To tune with `semantic` / `hyde` / `hybrid` (any block or fuse-leg that
+hits the vector index): `pip install "outmem[semantic]"`, set
 `semantic.enabled: true`, then **build the index once with `outmem reindex`**
 — it is not built on the fly. If the index is missing/empty the optimizer
 skips those strategies with a clear "run `outmem reindex`" in `result.log`,
@@ -125,10 +126,11 @@ single page and outmem feeds the top-k to an LLM regardless of internal
 order; F1 only earns its place once multi-page (list) questions exist.
 
 The scorecard also records **per-search wall-clock** (`mean_latency_ms` /
-`p95_latency_ms`), shown in each epoch line as `…ms/search`. It's not part
-of the score, but it lets you prefer a faster strategy among configs that
-score alike — e.g. `bm25` (in-memory FTS5, sub-millisecond) vs `rerank`
-(a model call per search).
+`p95_latency_ms`), shown in each epoch line as `…ms/search`, plus
+`latency_ms` on each `QuestionResult` if you want per-question times.
+Latency isn't part of the score, but it lets you prefer a faster strategy
+among configs that score alike — e.g. `bm25` (in-memory FTS5, sub-
+millisecond) vs `rerank` (a model call per search).
 
 ### The optimizer is an agent, not a grid sweep
 

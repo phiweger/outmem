@@ -44,6 +44,10 @@ class EmbedderHandle:
     # guarded because retrieval runs across a thread pool.
     _query_cache: dict[str, list[float]] = field(default_factory=dict, repr=False)
     _query_lock: Any = field(default_factory=threading.Lock, repr=False)
+    # Per-key locks for in-flight first-time embeds (prevents thundering
+    # herd: 8 concurrent first-time misses on the same text share one
+    # embed call). Entries are evicted once the value lands in the cache.
+    _query_pending: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed a batch of documents (synchronous wrapper).
@@ -72,20 +76,36 @@ class EmbedderHandle:
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query string (sync wrapper), cached by text.
 
-        Cache hit → no network call, no event-loop spin. This is what keeps
-        the optimizer fast: it scores many configs against the same bank, so
-        each distinct question is embedded once, not once per eval."""
+        Cache hit → no network call, no event-loop spin. Concurrent first-
+        time misses on the SAME text share one embed call via a per-key
+        lock (prevents a thundering-herd Nx over-bill on the first eval).
+        """
+        # Fast path: already cached → no lock contention on the hot path.
         with self._query_lock:
             hit = self._query_cache.get(text)
-        if hit is not None:
-            return hit
-        vec = asyncio.run(self.embed_query_async(text))
-        with self._query_lock:
-            self._query_cache[text] = vec
-        return vec
+            if hit is not None:
+                return hit
+            # Get-or-create a per-text lock so 8 workers asking the same
+            # question wait on each other, not the global cache lock.
+            key_lock = self._query_pending.setdefault(text, threading.Lock())
+        with key_lock:
+            # Re-check under the per-key lock: the first arrival writes,
+            # everyone else now hits the cache.
+            with self._query_lock:
+                hit = self._query_cache.get(text)
+            if hit is not None:
+                return hit
+            vec = asyncio.run(self.embed_query_async(text))
+            with self._query_lock:
+                self._query_cache[text] = vec
+                # Drop the per-key lock — keeping per-text locks around
+                # forever would leak one Lock per distinct query.
+                self._query_pending.pop(text, None)
+            return vec
 
     async def embed_query_async(self, text: str) -> list[float]:
         result = await self.embedder.embed_query(text)
+        self._accrue(result)  # queries are billed too — count them
         return list(result.embeddings[0])
 
 
