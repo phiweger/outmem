@@ -563,8 +563,8 @@ def starter_yaml(
         "# Spans are labeled service_name=outmem so they're easy to\n"
         "# filter when other tools publish to the same project.\n"
         "logfire:\n"
-        "  project: null      # any non-null string opts in; use your\n"
-        "                     # project name for self-documentation.\n"
+        "  enabled: false     # true + a $LOGFIRE_TOKEN in the env sends traces;\n"
+        "                     # the token (not this file) picks the project.\n"
     )
 
 

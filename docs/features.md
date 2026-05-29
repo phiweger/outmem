@@ -268,10 +268,10 @@ Either disable the flag for CI runs, or wire a custom `Reviewer`.
 
 ## Logfire instrumentation
 
-Off by default. Set `logfire.project: <name>` in `config.yaml` to
-opt in. Install `pip install "outmem[logfire]"` and set
-`$LOGFIRE_TOKEN` (the token determines which project the data lands
-in; the config field is an opt-in marker plus self-documentation).
+Off by default. Set `logfire.enabled: true` in `config.yaml` to opt in.
+Install `pip install "outmem[logfire]"` and set `$LOGFIRE_TOKEN` — the
+token alone determines which project the data lands in (the deprecated
+`logfire.project: <name>` still opts you in, for back-compat).
 
 Spans are tagged `service_name=outmem` so they're filterable when
 other services publish to the same project. PydanticAI is
@@ -292,7 +292,7 @@ setup_logfire(store)   # honours store.config.outmem.logfire
 
 `setup_logfire` is idempotent process-wide (later calls are no-ops),
 returns `True` when instrumentation was activated and `False` when the
-config has `logfire.project: null`, and raises `OutmemError` when the
+config has `logfire.enabled: false`, and raises `OutmemError` when the
 config opts in but the `logfire` package isn't installed.
 
 ## Dashboard

@@ -919,7 +919,7 @@ def build_consult_wiki(
     from pydantic_ai import Agent
 
     store = WikiStore.open(wiki_path, read_only=True)
-    # Library entry point: honour `logfire.project` from config.yaml the
+    # Library entry point: honour `logfire.enabled` from config.yaml the
     # same way the CLI's `_open_store` does. Idempotent process-wide.
     from outmem._logfire import setup as _setup_logfire
     _setup_logfire(store.config.outmem.logfire)

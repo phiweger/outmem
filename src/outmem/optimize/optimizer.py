@@ -129,7 +129,7 @@ def optimize_retrieval(
     (hit@5=0.550 abstain=0.800) best=0.710``; wire it to your own display
     or a logger if you like.
     """
-    # Reuse outmem's Logfire wiring (no-op unless logfire.project is set);
+    # Reuse outmem's Logfire wiring (no-op unless logfire.enabled is set);
     # instrument_pydantic_ai is process-global, so this one call traces the
     # optimizer agent AND the per-question rerank calls in the loop.
     from outmem._logfire import setup as _setup_logfire

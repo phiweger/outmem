@@ -308,7 +308,7 @@ fail loudly rather than silently writing.
 ## Logfire from library entry points
 
 The CLI auto-configures Pydantic Logfire from the wiki's
-`config.yaml` (`logfire.project: <name>`). The library does the same —
+`config.yaml` (`logfire.enabled: true`). The library does the same —
 `ask_sync` and `build_consult_wiki` both call the setup helper
 internally, so library callers get instrumentation without extra
 wiring.
@@ -324,7 +324,7 @@ setup_logfire(store)   # respects store.config.outmem.logfire
 ```
 
 `setup_logfire(store)` returns `True` when instrumentation activated,
-`False` when `logfire.project` is null. It's idempotent process-wide,
+`False` when `logfire.enabled` is false. It's idempotent process-wide,
 so calling from multiple entry points in the same process is safe.
 
 ## Standalone agent runtime

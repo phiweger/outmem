@@ -68,10 +68,11 @@ def _open_store(args: argparse.Namespace) -> WikiStore:
     store = WikiStore.open(_resolve_root(args), agent_identity=_agent_identity())
     # Opt-in observability — short-circuit before importing logfire so
     # disabled wikis don't pay the import cost on every CLI invocation.
-    if store.config.outmem.logfire.project is not None:
+    lf = store.config.outmem.logfire
+    if lf.enabled or lf.project is not None:  # project is the deprecated opt-in
         from outmem._logfire import setup as setup_logfire
 
-        setup_logfire(store.config.outmem.logfire)
+        setup_logfire(lf)
     return store
 
 

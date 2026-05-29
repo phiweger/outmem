@@ -140,7 +140,7 @@ Set `remove_stale_lock: false` to disable.
 | `OUTMEM_AGENT_NAME` | Override the agent's commit `user.name`. |
 | `OUTMEM_AGENT_EMAIL` | Override the agent's commit `user.email`. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, … | Provider keys consumed by PydanticAI. Loaded from `.env` if present. |
-| `LOGFIRE_TOKEN` | Routes Logfire data to the project the token belongs to (when `logfire.project` is set). |
+| `LOGFIRE_TOKEN` | Routes Logfire data to the project the token belongs to (when `logfire.enabled` is true). |
 
 `OUTMEM_AGENT_NAME` and `OUTMEM_AGENT_EMAIL` both have to be set to
 take effect — setting one without the other falls back to the defaults.
