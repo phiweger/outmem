@@ -37,9 +37,9 @@ def setup_logfire(target: WikiStore | LogfireSettings) -> bool:
     points in the same process is safe).
 
     Returns ``True`` if instrumentation was activated, ``False`` when
-    ``logfire.project`` is null / absent. Raises :class:`OutmemError`
-    when ``project`` is set but the ``logfire`` package isn't
-    installed — the user asked for instrumentation, so the failure
+    Logfire is disabled (``logfire.enabled`` false). Raises
+    :class:`OutmemError` when it's enabled but the ``logfire`` package
+    isn't installed — the user asked for instrumentation, so the failure
     surfaces rather than being silently swallowed.
 
     Args:

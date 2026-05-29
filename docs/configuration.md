@@ -109,7 +109,7 @@ approval:
 
 # Optional — Pydantic Logfire instrumentation. See features.md.
 logfire:
-  project: null                            # any non-null string opts in
+  enabled: false                          # true + LOGFIRE_TOKEN in env → traces
 ```
 
 ## Sample `.env`
