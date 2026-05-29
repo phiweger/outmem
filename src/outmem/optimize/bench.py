@@ -19,6 +19,7 @@ are reported so you can see *why* it moved. No F1 until list-style
 from __future__ import annotations
 
 import random
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ class QuestionResult:
     gold_slugs: tuple[str, ...]
     retrieved: tuple[str, ...]
     correct: bool  # answerable: gold in top-k; unanswerable: retrieved empty
+    latency_ms: float = 0.0  # wall-clock of this single retrieve() call
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ class Scorecard:
     n_unanswerable: int
     results: tuple[QuestionResult, ...]
     notes: tuple[str, ...] = ()  # retriever diagnostics (e.g. rerank fallbacks), deduped
+    mean_latency_ms: float = 0.0  # mean per-search wall-clock
+    p95_latency_ms: float = 0.0  # 95th-percentile per-search wall-clock
 
     @property
     def failures(self) -> tuple[QuestionResult, ...]:
@@ -75,6 +79,10 @@ def evaluate(
     scored whole. Use it to bound per-eval cost while tuning, then
     re-score the winner on the full bank (``sample=None``).
 
+    The scorecard also reports per-search wall-clock (``mean_latency_ms`` /
+    ``p95_latency_ms``, and ``latency_ms`` on each :class:`QuestionResult``)
+    so a faster strategy can be preferred among configs that score alike.
+
     Note: the ``semantic`` / ``hybrid`` blocks hold a SQLite connection;
     if you hit a cross-thread SQLite error, score those with
     ``max_concurrency=1`` (``lexical`` / ``rerank`` are thread-safe).
@@ -89,7 +97,9 @@ def evaluate(
 
     def _run(item: tuple[Question, bool]) -> tuple[QuestionResult, str | None]:
         q, is_answerable = item
+        t0 = time.perf_counter()
         result = retriever.retrieve(q.question, k=k)
+        latency_ms = (time.perf_counter() - t0) * 1000.0
         retrieved = result.slugs
         correct = (
             any(g in retrieved[:k] for g in q.gold_slugs)
@@ -102,6 +112,7 @@ def evaluate(
             gold_slugs=q.gold_slugs if is_answerable else (),
             retrieved=retrieved,
             correct=correct,
+            latency_ms=latency_ms,
         )
         return qr, result.note
 
@@ -121,6 +132,7 @@ def evaluate(
     total = n_ans + n_unans
     answerable_hits = sum(r.correct for r in results if r.answerable)
     abstained = sum(r.correct for r in results if not r.answerable)
+    mean_latency, p95_latency = _latency_stats([r.latency_ms for r in results])
     return Scorecard(
         score=(answerable_hits + abstained) / total if total else 0.0,
         hit_at_k=answerable_hits / n_ans if n_ans else 0.0,
@@ -130,4 +142,21 @@ def evaluate(
         n_unanswerable=n_unans,
         results=tuple(results),
         notes=notes,
+        mean_latency_ms=mean_latency,
+        p95_latency_ms=p95_latency,
     )
+
+
+def _latency_stats(latencies: list[float]) -> tuple[float, float]:
+    """(mean, p95) of per-search latencies in ms; (0, 0) if empty.
+
+    Note: under concurrency these are per-call wall times measured inside
+    worker threads — a fair latency-per-search signal, not a measure of
+    total throughput (which the concurrency hides)."""
+    if not latencies:
+        return 0.0, 0.0
+    mean = sum(latencies) / len(latencies)
+    ordered = sorted(latencies)
+    # nearest-rank p95 (clamped to the last index)
+    idx = min(len(ordered) - 1, round(0.95 * (len(ordered) - 1)))
+    return mean, ordered[idx]

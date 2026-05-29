@@ -266,7 +266,7 @@ def _format_epoch(event: EvalEvent) -> str:
     return (
         f"[eval {event.index}/{event.max_evals}] {event.config.strategy} "
         f"score={c.score:.3f} (hit@{c.k}={c.hit_at_k:.3f} abstain={c.abstention:.3f}) "
-        f"best={event.best_score:.3f}{star}"
+        f"{c.mean_latency_ms:.0f}ms/search best={event.best_score:.3f}{star}"
     )
 
 
@@ -288,7 +288,9 @@ def _format_card(
 ) -> str:
     lines = [
         f"score={card.score:.3f}  hit@{card.k}={card.hit_at_k:.3f}  "
-        f"abstain={card.abstention:.3f}  (evals left: {remaining})",
+        f"abstain={card.abstention:.3f}  "
+        f"latency={card.mean_latency_ms:.0f}ms/search (p95 {card.p95_latency_ms:.0f}ms)  "
+        f"(evals left: {remaining})",
         f"config: {cfg.to_dict()}",
     ]
     failures = card.failures

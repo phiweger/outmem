@@ -116,6 +116,12 @@ see *why* it moved. We use Hit@k (not F1) because gold is usually a
 single page and outmem feeds the top-k to an LLM regardless of internal
 order; F1 only earns its place once multi-page (list) questions exist.
 
+The scorecard also records **per-search wall-clock** (`mean_latency_ms` /
+`p95_latency_ms`), shown in each epoch line as `…ms/search`. It's not part
+of the score, but it lets you prefer a faster strategy among configs that
+score alike — e.g. `bm25` (in-memory FTS5, sub-millisecond) vs `rerank`
+(a model call per search).
+
 ### The optimizer is an agent, not a grid sweep
 
 `optimize_retrieval(store, bank, optimizer_model=...)` gives an agent two

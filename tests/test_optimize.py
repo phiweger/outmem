@@ -147,6 +147,21 @@ class TestLexicalAndMetric:
             par.abstention,
         )
 
+    def test_latency_recorded(self, store: WikiStore, bank: QuestionBank) -> None:
+        card = evaluate(LexicalRetriever(store), bank, k=3, max_concurrency=1)
+        # Per-search and aggregate latency are populated and non-negative.
+        assert all(r.latency_ms >= 0.0 for r in card.results)
+        assert card.mean_latency_ms >= 0.0
+        assert card.p95_latency_ms >= card.mean_latency_ms or len(card.results) <= 1
+
+    def test_latency_stats_helper(self) -> None:
+        from outmem.optimize.bench import _latency_stats
+
+        assert _latency_stats([]) == (0.0, 0.0)
+        mean, p95 = _latency_stats([10.0, 20.0, 30.0, 40.0])
+        assert mean == 25.0
+        assert p95 == 40.0  # nearest-rank p95 of 4 samples → the max
+
 
 class TestRetrievalConfig:
     def test_round_trip(self) -> None:
