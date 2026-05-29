@@ -722,18 +722,23 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="outmem", description="Agentic RAG memory CLI.")
     parser.add_argument("--version", action="version", version=f"outmem {__version__}")
-    parser.add_argument(
-        "--root",
-        help="Wiki root (defaults to $OUTMEM_PATH or the current directory).",
-    )
+    # --root works in BOTH positions: `outmem --root X cmd` (global, here)
+    # and `outmem reindex --root X` (via root_parent on every subparser —
+    # what users intuitively type). The parent copy uses a SUPPRESS default
+    # so that, when omitted after the subcommand, it does NOT overwrite a
+    # value supplied in the global position.
+    _root_help = "Wiki root (defaults to $OUTMEM_PATH or the current directory)."
+    parser.add_argument("--root", default=None, help=_root_help)
+    root_parent = argparse.ArgumentParser(add_help=False)
+    root_parent.add_argument("--root", default=argparse.SUPPRESS, help=_root_help)
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="Scaffold a new wiki at PATH.")
+    p_init = sub.add_parser("init", help="Scaffold a new wiki at PATH.", parents=[root_parent])
     p_init.add_argument("path")
     p_init.set_defaults(func=cmd_init)
 
-    p_read = sub.add_parser("read", help="Print a wiki page.")
+    p_read = sub.add_parser("read", help="Print a wiki page.", parents=[root_parent])
     p_read.add_argument("slug")
     p_read.add_argument(
         "--body-only",
@@ -742,7 +747,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_read.set_defaults(func=cmd_read)
 
-    p_search = sub.add_parser("search", help="Search the wiki.")
+    p_search = sub.add_parser("search", help="Search the wiki.", parents=[root_parent])
     p_search.add_argument("pattern")
     p_search.add_argument(
         "--scope",
@@ -754,14 +759,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--max-hits", type=int, default=None)
     p_search.set_defaults(func=cmd_search)
 
-    p_history = sub.add_parser("history", help="Per-page commit history.")
+    p_history = sub.add_parser("history", help="Per-page commit history.", parents=[root_parent])
     p_history.add_argument("slug")
     p_history.set_defaults(func=cmd_history)
 
     p_evolution = sub.add_parser(
         "evolution",
-        help="git log -p --follow across slugs (EXPANSION pattern).",
-    )
+        help="git log -p --follow across slugs (EXPANSION pattern).", parents=[root_parent])
     p_evolution.add_argument("slugs", nargs="+")
     p_evolution.add_argument(
         "--no-log",
@@ -770,7 +774,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_evolution.set_defaults(func=cmd_evolution)
 
-    p_write = sub.add_parser("write", help="Create a wiki page (body on stdin).")
+    p_write = sub.add_parser(
+        "write", help="Create a wiki page (body on stdin).", parents=[root_parent]
+    )
     p_write.add_argument("slug")
     p_write.add_argument("--title", required=True)
     p_write.add_argument(
@@ -789,42 +795,45 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_extend = sub.add_parser(
         "extend",
-        help="Replace body of an existing page (body on stdin).",
-    )
+        help="Replace body of an existing page (body on stdin).", parents=[root_parent])
     p_extend.add_argument("slug")
     p_extend.set_defaults(func=cmd_extend)
 
-    p_log = sub.add_parser("log", help="Append a log entry (content on stdin).")
+    p_log = sub.add_parser(
+        "log", help="Append a log entry (content on stdin).", parents=[root_parent]
+    )
     p_log.add_argument("topic")
     p_log.set_defaults(func=cmd_log)
 
-    p_pull = sub.add_parser("pull", help="git pull --rebase from the remote.")
+    p_pull = sub.add_parser(
+        "pull", help="git pull --rebase from the remote.", parents=[root_parent]
+    )
     p_pull.set_defaults(func=cmd_pull)
 
-    p_push = sub.add_parser("push", help="git push to the remote.")
+    p_push = sub.add_parser("push", help="git push to the remote.", parents=[root_parent])
     p_push.set_defaults(func=cmd_push)
 
     p_steering = sub.add_parser(
         "steering",
-        help="Phase-1 steering signal: human commits since last run.",
-    )
+        help="Phase-1 steering signal: human commits since last run.", parents=[root_parent])
     p_steering.set_defaults(func=cmd_steering)
 
     p_record = sub.add_parser(
         "record-run",
-        help="Record a successful agent run (timestamp + HEAD).",
-    )
+        help="Record a successful agent run (timestamp + HEAD).", parents=[root_parent])
     p_record.set_defaults(func=cmd_record_run)
 
     p_lint = sub.add_parser(
         "lint",
         help="Run static checks over the wiki (orphans, broken links, drift).",
+        parents=[root_parent],
     )
     p_lint.set_defaults(func=cmd_lint)
 
     p_similar = sub.add_parser(
         "similar",
         help="Find semantically similar wiki / source chunks (requires outmem[semantic]).",
+        parents=[root_parent],
     )
     p_similar.add_argument(
         "text",
@@ -859,8 +868,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_reindex = sub.add_parser(
         "reindex",
-        help="Resync the semantic vector DB with disk.",
-    )
+        help="Resync the semantic vector DB with disk.", parents=[root_parent])
     p_reindex.add_argument(
         "--force",
         action="store_true",
@@ -882,8 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_hook = sub.add_parser(
         "hook",
-        help="Install / uninstall the outmem git pre-commit hook.",
-    )
+        help="Install / uninstall the outmem git pre-commit hook.", parents=[root_parent])
     hook_sub = p_hook.add_subparsers(dest="hook_command", required=True)
 
     p_hook_install = hook_sub.add_parser(
@@ -910,8 +917,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ingest = sub.add_parser(
         "ingest",
-        help="Register a source file and run the agent to extract from it.",
-    )
+        help="Register a source file and run the agent to extract from it.", parents=[root_parent])
     p_ingest.add_argument("source", help="Path to the source file.")
     p_ingest.add_argument(
         "--into",
@@ -952,6 +958,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_import = sub.add_parser(
         "import",
         help="Bulk-import an existing markdown vault (Obsidian, etc.) into wiki/.",
+        parents=[root_parent],
     )
     p_import.add_argument(
         "source",
@@ -968,8 +975,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ask = sub.add_parser(
         "ask",
-        help="Ask the agent a question (requires outmem[agent]).",
-    )
+        help="Ask the agent a question (requires outmem[agent]).", parents=[root_parent])
     p_ask.add_argument("query", nargs="?", default=None, help="Question text.")
     p_ask.add_argument("--stdin", action="store_true", help="Read query from stdin.")
     p_ask.add_argument(
@@ -996,6 +1002,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dashboard = sub.add_parser(
         "dashboard",
         help="Start the read-only FastAPI dashboard (requires outmem[dashboard]).",
+        parents=[root_parent],
     )
     p_dashboard.add_argument("--host", default="127.0.0.1")
     p_dashboard.add_argument("--port", type=int, default=8765)
@@ -1009,8 +1016,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_index = sub.add_parser(
         "index",
-        help="Operate on wiki/index.md (currently: rebuild).",
-    )
+        help="Operate on wiki/index.md (currently: rebuild).", parents=[root_parent])
     index_sub = p_index.add_subparsers(dest="index_command", required=True)
 
     p_index_rebuild = index_sub.add_parser(
