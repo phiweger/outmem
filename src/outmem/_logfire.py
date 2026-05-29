@@ -19,8 +19,13 @@ to install it.
 
 from __future__ import annotations
 
+import logging
+import warnings
+
 from outmem.config import LOGFIRE_SERVICE_NAME, LogfireSettings
 from outmem.exceptions import OutmemError
+
+log = logging.getLogger(__name__)
 
 _configured = False
 
@@ -48,5 +53,26 @@ def setup(settings: LogfireSettings) -> bool:
         send_to_logfire="if-token-present",
     )
     logfire.instrument_pydantic_ai()
+    _quiet_export_noise()
     _configured = True
     return True
+
+
+def _quiet_export_noise() -> None:
+    """Keep a misconfigured token from flooding the console.
+
+    A rejected token makes Logfire emit a ``UserWarning`` per span plus a
+    repeated ``Failed to export span batch ... 401`` from its exporter. We
+    can't validate the token at configure-time (Logfire checks it lazily on
+    the background export thread), so instead we cap the spam: collapse the
+    repeated warning to one, and raise Logfire's own logger to ERROR so the
+    per-batch export failures don't carpet stdout. Genuine errors still log;
+    routine 401/connection retries don't.
+    """
+    # The token-rejected UserWarning is identical every span — show it once.
+    warnings.filterwarnings(
+        "once", message=".*Logfire API returned status code.*", category=UserWarning
+    )
+    # Logfire's exporter logs "Failed to export span batch" per attempt;
+    # ERROR-floor it so transient/repeated export failures stay quiet.
+    logging.getLogger("logfire").setLevel(logging.ERROR)
