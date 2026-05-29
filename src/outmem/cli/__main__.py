@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from outmem import __version__
+from outmem._progress import report_progress
 from outmem.config import SEMANTIC_DISABLED_HELP
 from outmem.exceptions import OutmemError
 from outmem.store import AgentIdentity, WikiStore
@@ -269,7 +270,12 @@ def cmd_reindex(args: argparse.Namespace) -> int:
                 print(f"{r.rel_path}  {state}")
             return 0
 
-        summary = store.semantic_reindex_all(force=args.force)
+        summary = store.semantic_reindex_all(
+            force=args.force,
+            on_progress=lambda done, total: report_progress(
+                None, done, total, label="reindex", unit="files"
+            ),
+        )
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 1
@@ -722,15 +728,14 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="outmem", description="Agentic RAG memory CLI.")
     parser.add_argument("--version", action="version", version=f"outmem {__version__}")
-    # --root works in BOTH positions: `outmem --root X cmd` (global, here)
-    # and `outmem reindex --root X` (via root_parent on every subparser —
-    # what users intuitively type). The parent copy uses a SUPPRESS default
-    # so that, when omitted after the subcommand, it does NOT overwrite a
-    # value supplied in the global position.
-    _root_help = "Wiki root (defaults to $OUTMEM_PATH or the current directory)."
-    parser.add_argument("--root", default=None, help=_root_help)
+    # --root lives on a shared parent attached to every subcommand, so it
+    # goes AFTER the subcommand (`outmem reindex --root X`) — what users
+    # intuitively type. $OUTMEM_PATH covers the env/scripted case.
     root_parent = argparse.ArgumentParser(add_help=False)
-    root_parent.add_argument("--root", default=argparse.SUPPRESS, help=_root_help)
+    root_parent.add_argument(
+        "--root",
+        help="Wiki root (defaults to $OUTMEM_PATH or the current directory).",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 

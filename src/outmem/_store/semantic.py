@@ -7,7 +7,7 @@ the ``WikiStore.semantic_*`` methods, which forward here.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -68,7 +68,18 @@ def vector_store_or_open(store: WikiStore) -> VectorStore:
         from outmem.semantic import VectorStore, build_embedder
 
         settings = store.config.outmem.semantic
-        embedder = build_embedder(settings.embedding_model)
+        try:
+            embedder = build_embedder(settings.embedding_model)
+        except OutmemError:
+            raise
+        except Exception as exc:
+            # Surface a clean message instead of a raw provider traceback —
+            # the usual cause is a missing API key for the embedding model.
+            raise OutmemError(
+                f"could not initialise the embedding model "
+                f"{settings.embedding_model!r}: {exc}. Check the provider API "
+                f"key (e.g. OPENAI_API_KEY) is set in your environment / .env."
+            ) from exc
         store._vector_store = VectorStore.open(db_path(store), embedder=embedder)
         return store._vector_store
 
@@ -126,26 +137,45 @@ def remove_path(store: WikiStore, rel_path: str) -> int:
     return vs.remove_file(rel_path)
 
 
-def reindex_all(store: WikiStore, *, force: bool = False) -> dict[str, Any]:
+def reindex_all(
+    store: WikiStore,
+    *,
+    force: bool = False,
+    max_concurrency: int = 8,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """Resync the whole index with disk. Embeds files concurrently (the
+    network bottleneck), at most ``max_concurrency`` in flight; writes stay
+    serial. ``on_progress(done, total)`` fires as each file completes."""
     if not enabled(store):
         raise OutmemError(SEMANTIC_DISABLED_HELP)
     vs = vector_store_or_open(store)
 
     on_disk = indexable_files_on_disk(store)
-    reindexed = 0
-    skipped = 0
-    added_chunks = 0
+    # Load bodies (skipping non-text/reserved files). force=True drops the
+    # existing entry first so reindex_files re-embeds even on a hash match.
+    batch: list[tuple[str, str, WikiContentKind]] = []
     for rel_path in on_disk:
         if force:
             vs.remove_file(rel_path)
-        result = reindex_path(store, rel_path)
-        if result is None:
+        loaded = load_for_index(store, rel_path)
+        if loaded is None:
             continue
-        if result.skipped:
-            skipped += 1
-        else:
-            reindexed += 1
-            added_chunks += result.chunks_added
+        body, kind = loaded
+        batch.append((rel_path, body, kind))
+
+    settings = store.config.outmem.semantic
+    results = vs.reindex_files(
+        batch,
+        chunk_size=settings.chunk_size,
+        chunk_max=settings.chunk_max,
+        overlap_paragraphs=settings.overlap_paragraphs,
+        max_concurrency=max_concurrency,
+        on_progress=on_progress,
+    )
+    reindexed = sum(1 for r in results if not r.skipped)
+    skipped = sum(1 for r in results if r.skipped)
+    added_chunks = sum(r.chunks_added for r in results)
 
     removed = 0
     on_disk_set = set(on_disk)

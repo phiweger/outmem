@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -755,9 +755,20 @@ class WikiStore:
         """Drop all chunks + vectors for ``rel_path``. Returns count removed."""
         return _semantic.remove_path(self, rel_path)
 
-    def semantic_reindex_all(self, *, force: bool = False) -> dict[str, Any]:
-        """Walk every indexable file, sync the index, return a summary."""
-        return _semantic.reindex_all(self, force=force)
+    def semantic_reindex_all(
+        self,
+        *,
+        force: bool = False,
+        max_concurrency: int = 8,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, Any]:
+        """Walk every indexable file, sync the index, return a summary.
+
+        Embeds files concurrently (≤ ``max_concurrency`` in flight);
+        ``on_progress(done, total)`` fires per file."""
+        return _semantic.reindex_all(
+            self, force=force, max_concurrency=max_concurrency, on_progress=on_progress
+        )
 
     def _maybe_reindex_commit_paths(self, paths: Sequence[str]) -> str | None:
         """Reindex any indexable file in ``paths`` and return the DB rel-path.

@@ -175,7 +175,7 @@ def test_cli_lint_clean_wiki_exit_0(tmp_path: Path, capsys: pytest.CaptureFixtur
     store.write_page("alpha", title="A", body="See [[beta]].")
     store.write_page("beta", title="B", body="See [[alpha]].")
 
-    rc = main(["--root", str(store.root), "lint"])
+    rc = main(["lint", "--root", str(store.root)])
     assert rc == 0
     assert "no issues" in capsys.readouterr().out.lower()
 
@@ -187,7 +187,7 @@ def test_cli_lint_warnings_exit_1(tmp_path: Path, capsys: pytest.CaptureFixture[
     store.write_page("orphan", title="Lonely", body="no links here")
     store.write_page("hub", title="Hub", body="no outbound either")
 
-    rc = main(["--root", str(store.root), "lint"])
+    rc = main(["lint", "--root", str(store.root)])
     # Warning-only -> exit 1
     assert rc == 1
 
@@ -198,7 +198,7 @@ def test_cli_lint_errors_exit_2(tmp_path: Path, capsys: pytest.CaptureFixture[st
     store = WikiStore.init(tmp_path / "w")
     store.write_page("alpha", title="A", body="See [[nonexistent]].")
 
-    rc = main(["--root", str(store.root), "lint"])
+    rc = main(["lint", "--root", str(store.root)])
     # Error present -> exit 2
     assert rc == 2
 

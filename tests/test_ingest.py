@@ -252,9 +252,9 @@ def test_cli_ingest_register_only(tmp_path: Path, capsys: pytest.CaptureFixture[
 
     rc = main(
         [
+            "ingest",
             "--root",
             str(store.root),
-            "ingest",
             str(src),
             "--into",
             "veterinary",
@@ -314,9 +314,9 @@ def test_cli_ingest_with_agent(
 
     rc = main(
         [
+            "ingest",
             "--root",
             str(store.root),
-            "ingest",
             str(src),
             "--prompt",
             "extract dosages for cats",

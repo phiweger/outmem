@@ -1,7 +1,8 @@
 # CLI reference
 
 `outmem --help` lists subcommands. `outmem <cmd> --help` shows options
-for each. Defaults: wiki root from `$OUTMEM_PATH` (or `--root`),
+for each. Defaults: wiki root from `$OUTMEM_PATH` (or `--root`, passed
+*after* the subcommand — e.g. `outmem reindex --root /srv/wiki`),
 agent identity from `$OUTMEM_AGENT_NAME` + `$OUTMEM_AGENT_EMAIL` (or
 the defaults `outmem agent <agent@host>`).
 
@@ -165,6 +166,11 @@ outmem reindex                                    # walk wiki + sources, skip-if
 outmem reindex --force                            # rebuild from scratch
 outmem reindex --path wiki/pages/foo.md           # specific files
 ```
+
+`reindex` embeds files concurrently (the network bottleneck; writes stay
+serial) and prints a `reindex: done/total files` progress counter to
+stderr. `--path` reindexes one repo-relative *file*; `--root` selects the
+wiki (after the subcommand).
 
 Set `semantic.enabled: true` in `config.yaml` first. Detailed
 behaviour: [features.md](features.md#semantic-index).

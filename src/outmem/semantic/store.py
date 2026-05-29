@@ -45,9 +45,10 @@ returns ``ReindexResult(skipped=True)``.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import struct
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -260,43 +261,47 @@ class VectorStore:
         committed by the next caller and silently merge half-written
         state across files.
         """
-        content_hash = hash_text(body)
-        cur = self.con.cursor()
+        prepared = self._prepare(rel_path, body, chunk_size, chunk_max, overlap_paragraphs)
+        if prepared is None:  # content_hash matched → nothing to do
+            return ReindexResult(rel_path, skipped=True, chunks_removed=0,
+                                 chunks_added=0, embeddings_called=0)
+        content_hash, chunks = prepared
+        # Embed BEFORE any DB writes — if this raises, no transaction is
+        # open and the index is unchanged.
+        vectors = self.embedder.embed_documents([c.text for c in chunks]) if chunks else []
+        return self._commit_file(rel_path, content_hash, kind, chunks, vectors)
 
-        existing = cur.execute(
+    def _prepare(
+        self, rel_path: str, body: str, chunk_size: int, chunk_max: int,
+        overlap_paragraphs: int,
+    ) -> tuple[str, list[Chunk]] | None:
+        """Hash-check + chunk. Returns ``(content_hash, chunks)`` to embed,
+        or ``None`` when the stored hash matches (skip). Read-only on the DB."""
+        content_hash = hash_text(body)
+        existing = self.con.execute(
             "SELECT content_hash FROM files WHERE rel_path = ?", (rel_path,)
         ).fetchone()
         if existing is not None and existing["content_hash"] == content_hash:
-            return ReindexResult(
-                rel_path=rel_path,
-                skipped=True,
-                chunks_removed=0,
-                chunks_added=0,
-                embeddings_called=0,
-            )
-
+            return None
         chunks = chunk_text(
-            body,
-            chunk_size=chunk_size,
-            chunk_max=chunk_max,
+            body, chunk_size=chunk_size, chunk_max=chunk_max,
             overlap_paragraphs=overlap_paragraphs,
         )
+        return content_hash, chunks
 
-        # Embed BEFORE any DB writes — if this raises, no transaction
-        # is open and the index is unchanged.
-        vectors: list[list[float]] = []
-        embeddings_called = 0
-        if chunks:
-            vectors = self.embedder.embed_documents([c.text for c in chunks])
-            embeddings_called = len(chunks)
-
+    def _commit_file(
+        self, rel_path: str, content_hash: str, kind: Literal["wiki", "source"],
+        chunks: list[Chunk], vectors: list[list[float]],
+    ) -> ReindexResult:
+        """Serial transactional write of one file's chunks+vectors. The
+        single shared connection means this MUST stay serial across files
+        — interleaving open transactions corrupts the index."""
+        cur = self.con.cursor()
         try:
             removed = self._delete_file_locked(cur, rel_path)
             added = 0
             if chunks:
-                self._insert_chunks(
-                    cur, rel_path=rel_path, chunks=chunks, vectors=vectors
-                )
+                self._insert_chunks(cur, rel_path=rel_path, chunks=chunks, vectors=vectors)
                 added = len(chunks)
             cur.execute(
                 "INSERT OR REPLACE INTO files "
@@ -308,14 +313,82 @@ class VectorStore:
         except Exception:
             self.con.rollback()
             raise
-
         return ReindexResult(
-            rel_path=rel_path,
-            skipped=False,
-            chunks_removed=removed,
-            chunks_added=added,
-            embeddings_called=embeddings_called,
+            rel_path=rel_path, skipped=False, chunks_removed=removed,
+            chunks_added=added, embeddings_called=len(chunks),
         )
+
+    def reindex_files(
+        self,
+        files: list[tuple[str, str, Literal["wiki", "source"]]],
+        *,
+        chunk_size: int = 2000,
+        chunk_max: int = 8000,
+        overlap_paragraphs: int = 1,
+        max_concurrency: int = 8,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[ReindexResult]:
+        """Re-index a batch of ``(rel_path, body, kind)`` files.
+
+        Three phases: serial hash-check + chunk (read-only), then EMBED in
+        parallel (the network bottleneck — at most ``max_concurrency`` in
+        flight), then SERIAL transactional writes (the single shared sqlite
+        connection forbids concurrent writers). ``on_progress(done, total)``
+        fires as each file's write completes. Skipped (hash-match) files do
+        no embedding and commit nothing.
+        """
+        total = len(files)
+        # Phase 1 — prepare (serial, read-only): drop hash-matches up front
+        # so we never embed unchanged files.
+        prepared: list[tuple[str, str, Literal["wiki", "source"], list[Chunk]]] = []
+        results: list[ReindexResult] = []
+        done = 0
+        for rel_path, body, kind in files:
+            p = self._prepare(rel_path, body, chunk_size, chunk_max, overlap_paragraphs)
+            if p is None:
+                results.append(ReindexResult(rel_path, skipped=True, chunks_removed=0,
+                                             chunks_added=0, embeddings_called=0))
+                done += 1
+                if on_progress:
+                    on_progress(done, total)
+            else:
+                content_hash, chunks = p
+                prepared.append((rel_path, content_hash, kind, chunks))
+
+        if prepared:
+            vectors_by_path = asyncio.run(self._embed_batch(prepared, max_concurrency))
+            # Phase 3 — serial writes.
+            for rel_path, content_hash, kind, chunks in prepared:
+                results.append(
+                    self._commit_file(rel_path, content_hash, kind, chunks,
+                                      vectors_by_path[rel_path])
+                )
+                done += 1
+                if on_progress:
+                    on_progress(done, total)
+        return results
+
+    async def _embed_batch(
+        self,
+        prepared: list[tuple[str, str, Literal["wiki", "source"], list[Chunk]]],
+        max_concurrency: int,
+    ) -> dict[str, list[list[float]]]:
+        """Embed every prepared file's chunks concurrently (≤ ``max_concurrency``
+        in flight), keyed by rel_path. No DB access — pure network."""
+        sem = asyncio.Semaphore(max(1, max_concurrency))
+        out: dict[str, list[list[float]]] = {}
+
+        async def _one(rel_path: str, chunks: list[Chunk]) -> None:
+            if not chunks:
+                out[rel_path] = []
+                return
+            async with sem:
+                out[rel_path] = await self.embedder.embed_documents_async(
+                    [c.text for c in chunks]
+                )
+
+        await asyncio.gather(*(_one(rp, ch) for rp, _, _, ch in prepared))
+        return out
 
     def remove_file(self, rel_path: str) -> int:
         """Drop every chunk + vector for ``rel_path``. Returns count removed."""

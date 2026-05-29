@@ -370,9 +370,9 @@ def test_cli_ask_writes_response_to_stdout(
     monkeypatch.setattr("sys.stdin", io.StringIO("what?"))
     rc = main(
         [
+            "ask",
             "--root",
             str(seeded.root),
-            "ask",
             "--stdin",
             "--no-push",
             "--no-record",
@@ -391,7 +391,7 @@ def test_cli_ask_empty_query_rejected(
     from outmem.cli.__main__ import main
 
     monkeypatch.setattr("sys.stdin", io.StringIO("   "))
-    rc = main(["--root", str(seeded.root), "ask", "--stdin"])
+    rc = main(["ask", "--root", str(seeded.root), "--stdin"])
     assert rc == 2
     assert "empty" in capsys.readouterr().err
 

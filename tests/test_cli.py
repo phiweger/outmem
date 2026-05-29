@@ -48,12 +48,12 @@ def test_write_then_read(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO("alpha body content\n"))
-    rc = main(["--root", str(cli_root), "write", "alpha", "--title", "Alpha"])
+    rc = main(["write", "--root", str(cli_root), "alpha", "--title", "Alpha"])
     assert rc == 0
     sha = capsys.readouterr().out.strip()
     assert len(sha) == 40
 
-    rc = main(["--root", str(cli_root), "read", "alpha"])
+    rc = main(["read", "--root", str(cli_root), "alpha"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "title: Alpha" in out
@@ -66,10 +66,10 @@ def test_read_body_only(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO("just the body\n"))
-    main(["--root", str(cli_root), "write", "alpha", "--title", "Alpha"])
+    main(["write", "--root", str(cli_root), "alpha", "--title", "Alpha"])
     capsys.readouterr()
 
-    rc = main(["--root", str(cli_root), "read", "alpha", "--body-only"])
+    rc = main(["read", "--root", str(cli_root), "alpha", "--body-only"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "title" not in out
@@ -82,10 +82,10 @@ def test_search_returns_matches(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO("the unique-token-xyz lives here\n"))
-    main(["--root", str(cli_root), "write", "alpha", "--title", "Alpha"])
+    main(["write", "--root", str(cli_root), "alpha", "--title", "Alpha"])
     capsys.readouterr()
 
-    rc = main(["--root", str(cli_root), "search", "unique-token-xyz"])
+    rc = main(["search", "--root", str(cli_root), "unique-token-xyz"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "alpha.md" in out
@@ -96,7 +96,7 @@ def test_search_no_match_returns_1(
     cli_root: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    rc = main(["--root", str(cli_root), "search", "nothing-here-token"])
+    rc = main(["search", "--root", str(cli_root), "nothing-here-token"])
     assert rc == 1
 
 
@@ -106,7 +106,7 @@ def test_write_empty_body_rejected(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO("   \n"))
-    rc = main(["--root", str(cli_root), "write", "alpha", "--title", "X"])
+    rc = main(["write", "--root", str(cli_root), "alpha", "--title", "X"])
     assert rc == 2
     assert "empty body" in capsys.readouterr().err
 
@@ -117,11 +117,11 @@ def test_extend_after_write(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO("v1\n"))
-    main(["--root", str(cli_root), "write", "alpha", "--title", "Alpha"])
+    main(["write", "--root", str(cli_root), "alpha", "--title", "Alpha"])
     capsys.readouterr()
 
     monkeypatch.setattr("sys.stdin", io.StringIO("v2 different\n"))
-    rc = main(["--root", str(cli_root), "extend", "alpha"])
+    rc = main(["extend", "--root", str(cli_root), "alpha"])
     assert rc == 0
 
 
@@ -131,7 +131,7 @@ def test_log_appends_entry(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO("- saw a thing\n"))
-    rc = main(["--root", str(cli_root), "log", "pricing"])
+    rc = main(["log", "--root", str(cli_root), "pricing"])
     assert rc == 0
     log_files = list((cli_root / "log").glob("*.md"))
     assert len(log_files) == 1
@@ -144,12 +144,12 @@ def test_history_after_two_commits(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO("v1\n"))
-    main(["--root", str(cli_root), "write", "alpha", "--title", "Alpha"])
+    main(["write", "--root", str(cli_root), "alpha", "--title", "Alpha"])
     monkeypatch.setattr("sys.stdin", io.StringIO("v2\n"))
-    main(["--root", str(cli_root), "extend", "alpha"])
+    main(["extend", "--root", str(cli_root), "alpha"])
     capsys.readouterr()
 
-    rc = main(["--root", str(cli_root), "history", "alpha"])
+    rc = main(["history", "--root", str(cli_root), "alpha"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "extend: alpha" in out
@@ -157,7 +157,7 @@ def test_history_after_two_commits(
 
 
 def test_steering_excludes_agent(populated_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    rc = main(["--root", str(populated_repo), "steering"])
+    rc = main(["steering", "--root", str(populated_repo)])
     assert rc == 0
     out = capsys.readouterr().out
     assert "agent@host" not in out
@@ -170,10 +170,10 @@ def test_record_run(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr("sys.stdin", io.StringIO("body\n"))
-    main(["--root", str(cli_root), "write", "alpha", "--title", "A"])
+    main(["write", "--root", str(cli_root), "alpha", "--title", "A"])
     capsys.readouterr()
 
-    rc = main(["--root", str(cli_root), "record-run"])
+    rc = main(["record-run", "--root", str(cli_root)])
     assert rc == 0
     out = capsys.readouterr().out
     assert "recorded run" in out
@@ -198,7 +198,7 @@ def test_outmem_agent_identity_env_var(
     monkeypatch.setenv("OUTMEM_AGENT_NAME", "CustomAgent")
     monkeypatch.setenv("OUTMEM_AGENT_EMAIL", "custom@elsewhere")
     monkeypatch.setattr("sys.stdin", io.StringIO("body\n"))
-    rc = main(["--root", str(cli_root), "write", "alpha", "--title", "A"])
+    rc = main(["write", "--root", str(cli_root), "alpha", "--title", "A"])
     assert rc == 0
     log = subprocess.run(
         ["git", "log", "-1", "--pretty=format:%an <%ae>"],

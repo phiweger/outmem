@@ -147,6 +147,45 @@ def test_vector_store_survives_cross_thread_use(tmp_path: Path) -> None:
     assert results and isinstance(results[0], list)
 
 
+class TestVectorStoreReindexBatch:
+    def _files(self, n: int) -> list[tuple[str, str, str]]:
+        return [
+            (f"wiki/pages/p{i}.md", f"penicillin dosing endocarditis page {i} uniq{i}", "wiki")
+            for i in range(n)
+        ]
+
+    def test_batch_matches_per_file(self, tmp_path: Path) -> None:
+        # The parallel-embed batch path must produce the SAME index as
+        # per-file reindex (same chunk counts, same files indexed).
+        files = self._files(6)
+        a = VectorStore.open(tmp_path / "a.db", embedder=make_handle())
+        for rel, body, kind in files:
+            a.reindex_file(rel, body=body, kind=kind)  # type: ignore[arg-type]
+        b = VectorStore.open(tmp_path / "b.db", embedder=make_handle())
+        b.reindex_files(files)  # type: ignore[arg-type]
+        assert {f[0] for f in a.list_indexed_files()} == {f[0] for f in b.list_indexed_files()}
+        assert len(b.list_indexed_files()) == 6
+
+    def test_concurrency_matches_serial(self, tmp_path: Path) -> None:
+        files = self._files(8)
+        seq = VectorStore.open(tmp_path / "s.db", embedder=make_handle())
+        seq_res = seq.reindex_files(files, max_concurrency=1)  # type: ignore[arg-type]
+        par = VectorStore.open(tmp_path / "p.db", embedder=make_handle())
+        par_res = par.reindex_files(files, max_concurrency=8)  # type: ignore[arg-type]
+        assert [r.chunks_added for r in seq_res] == [r.chunks_added for r in par_res]
+        assert sum(r.chunks_added for r in par_res) > 0  # actually embedded
+
+    def test_progress_and_skip(self, tmp_path: Path) -> None:
+        files = self._files(4)
+        vs = VectorStore.open(tmp_path / "v.db", embedder=make_handle())
+        ticks: list[tuple[int, int]] = []
+        vs.reindex_files(files, on_progress=lambda d, t: ticks.append((d, t)))  # type: ignore[arg-type]
+        assert ticks[-1] == (4, 4)
+        # Idempotent: a second pass re-embeds nothing (all hash-skip).
+        res2 = vs.reindex_files(files)  # type: ignore[arg-type]
+        assert all(r.skipped for r in res2)
+
+
 class TestVectorStoreReindex:
     def test_reindex_creates_chunks(self, vstore: VectorStore) -> None:
         body = "first paragraph.\n\nsecond paragraph.\n\nthird paragraph."
@@ -520,7 +559,10 @@ def wiki_with_pages(wiki_with_semantic: WikiStore) -> WikiStore:
 
 
 def _run_cli(args: Sequence[str], *, store: WikiStore) -> tuple[int, str, str]:
-    """Invoke the CLI through ``main`` with ``--root <store>``."""
+    """Invoke the CLI through ``main`` with ``--root <store>``.
+
+    ``--root`` goes AFTER the subcommand (`outmem <cmd> --root <root> ...`),
+    which is where the shared parent parser accepts it."""
     from outmem.cli.__main__ import main
 
     out_buf: list[str] = []
@@ -529,11 +571,12 @@ def _run_cli(args: Sequence[str], *, store: WikiStore) -> tuple[int, str, str]:
     import io
     import sys
 
+    cmd, *rest = args
     real_stdout, real_stderr = sys.stdout, sys.stderr
     sys.stdout = io.StringIO()
     sys.stderr = io.StringIO()
     try:
-        rc = main(["--root", str(store.root), *args])
+        rc = main([cmd, "--root", str(store.root), *rest])
         out_buf.append(sys.stdout.getvalue())
         err_buf.append(sys.stderr.getvalue())
     finally:
