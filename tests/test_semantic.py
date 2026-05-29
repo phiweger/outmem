@@ -147,6 +147,38 @@ def test_vector_store_survives_cross_thread_use(tmp_path: Path) -> None:
     assert results and isinstance(results[0], list)
 
 
+def test_vector_store_concurrent_reads_dont_corrupt_rows(tmp_path: Path) -> None:
+    """Regression: 8 worker threads doing concurrent find_similar /
+    list_indexed_files on a SHARED connection raced the cursor's
+    row_factory state — rows came back as plain tuples instead of dict-
+    like rows, and the very next ``r["rel_path"]`` raised IndexError.
+    Symptom in the optimizer: semantic / hybrid stalled across evals
+    with ``semantic index unavailable: tuple index out of range``.
+
+    The fix is a per-instance Lock around every connection touch."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    vs = VectorStore.open(tmp_path / ".vectors.db", embedder=make_handle())
+    for i in range(8):
+        vs.reindex_file(f"wiki/pages/p{i}.md", body=f"penicillin {i}", kind="wiki")
+
+    errors: list[BaseException] = []
+
+    def hammer(_i: int) -> None:
+        try:
+            for _ in range(20):
+                vs.find_similar("penicillin", top_k=3)
+                rows = vs.list_indexed_files()
+                # Force the dict-row access that previously raised IndexError.
+                assert all(r[0].startswith("wiki/pages/") for r in rows)
+        except BaseException as e:
+            errors.append(e)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(hammer, range(8)))
+    assert not errors, f"concurrent reads corrupted rows: {errors[:1]}"
+
+
 class TestVectorStoreReindexBatch:
     def _files(self, n: int) -> list[tuple[str, str, str]]:
         return [

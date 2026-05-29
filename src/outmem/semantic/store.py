@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import struct
+import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,6 +103,14 @@ class VectorStore:
         self.db_path = db_path
         self.con = connection
         self.embedder = embedder
+        # Serialize every connection touch. The connection is shared across
+        # worker threads (evaluate runs retrievers in a ThreadPoolExecutor;
+        # the optimizer drives many concurrent semantic queries). sqlite3
+        # allows check_same_thread=False, but the caller must serialize
+        # access — cursors are not concurrent-safe and racing reads have
+        # been observed to corrupt row-factory state (rows come back as
+        # plain tuples → IndexError on dict-style access).
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -278,9 +287,10 @@ class VectorStore:
         """Hash-check + chunk. Returns ``(content_hash, chunks)`` to embed,
         or ``None`` when the stored hash matches (skip). Read-only on the DB."""
         content_hash = hash_text(body)
-        existing = self.con.execute(
-            "SELECT content_hash FROM files WHERE rel_path = ?", (rel_path,)
-        ).fetchone()
+        with self._lock:
+            existing = self.con.execute(
+                "SELECT content_hash FROM files WHERE rel_path = ?", (rel_path,)
+            ).fetchone()
         if existing is not None and existing["content_hash"] == content_hash:
             return None
         chunks = chunk_text(
@@ -296,6 +306,13 @@ class VectorStore:
         """Serial transactional write of one file's chunks+vectors. The
         single shared connection means this MUST stay serial across files
         — interleaving open transactions corrupts the index."""
+        with self._lock:
+            return self._commit_locked(rel_path, content_hash, kind, chunks, vectors)
+
+    def _commit_locked(
+        self, rel_path: str, content_hash: str, kind: Literal["wiki", "source"],
+        chunks: list[Chunk], vectors: list[list[float]],
+    ) -> ReindexResult:
         cur = self.con.cursor()
         try:
             removed = self._delete_file_locked(cur, rel_path)
@@ -392,15 +409,16 @@ class VectorStore:
 
     def remove_file(self, rel_path: str) -> int:
         """Drop every chunk + vector for ``rel_path``. Returns count removed."""
-        cur = self.con.cursor()
-        try:
-            removed = self._delete_file_locked(cur, rel_path)
-            cur.execute("DELETE FROM files WHERE rel_path = ?", (rel_path,))
-            self.con.commit()
-        except Exception:
-            self.con.rollback()
-            raise
-        return removed
+        with self._lock:
+            cur = self.con.cursor()
+            try:
+                removed = self._delete_file_locked(cur, rel_path)
+                cur.execute("DELETE FROM files WHERE rel_path = ?", (rel_path,))
+                self.con.commit()
+            except Exception:
+                self.con.rollback()
+                raise
+            return removed
 
     def find_similar(
         self,
@@ -419,25 +437,28 @@ class VectorStore:
         """
         if not text.strip():
             return []
+        # Embed OUTSIDE the lock — embed_query may take a network round-trip;
+        # holding the DB lock across it would serialize the whole batch.
         vector = self.embedder.embed_query(text)
-        cur = self.con.cursor()
-        # vec0 KNN returns rowid + distance; join to chunks for content.
-        rows = cur.execute(
-            "SELECT chunks_vec.rowid AS id, chunks_vec.distance AS distance, "
-            "chunks.rel_path, chunks.chunk_index, chunks.content, "
-            "chunks.start_char, chunks.end_char "
-            "FROM chunks_vec "
-            "JOIN chunks ON chunks.id = chunks_vec.rowid "
-            "WHERE chunks_vec.embedding MATCH ? AND k = ? "
-            "ORDER BY chunks_vec.distance",
-            # Over-fetch by 3x so post-filtering (exclude_rel_path,
-            # threshold) still leaves us with up to top_k results when
-            # the excluded page or low-similarity rows dominate the
-            # head. Pathological case: the excluded page has >2*top_k
-            # near-identical chunks — we'd return fewer than top_k,
-            # which the caller can detect by checking len(matches).
-            (_pack(vector), top_k * 3),
-        ).fetchall()
+        with self._lock:
+            cur = self.con.cursor()
+            # vec0 KNN returns rowid + distance; join to chunks for content.
+            rows = cur.execute(
+                "SELECT chunks_vec.rowid AS id, chunks_vec.distance AS distance, "
+                "chunks.rel_path, chunks.chunk_index, chunks.content, "
+                "chunks.start_char, chunks.end_char "
+                "FROM chunks_vec "
+                "JOIN chunks ON chunks.id = chunks_vec.rowid "
+                "WHERE chunks_vec.embedding MATCH ? AND k = ? "
+                "ORDER BY chunks_vec.distance",
+                # Over-fetch by 3x so post-filtering (exclude_rel_path,
+                # threshold) still leaves us with up to top_k results when
+                # the excluded page or low-similarity rows dominate the
+                # head. Pathological case: the excluded page has >2*top_k
+                # near-identical chunks — we'd return fewer than top_k,
+                # which the caller can detect by checking len(matches).
+                (_pack(vector), top_k * 3),
+            ).fetchall()
 
         out: list[Match] = []
         for row in rows:
@@ -462,11 +483,12 @@ class VectorStore:
 
     def list_indexed_files(self) -> list[tuple[str, str, str]]:
         """Return ``[(rel_path, content_hash, kind)]`` for every indexed file."""
-        cur = self.con.cursor()
-        rows = cur.execute(
-            "SELECT rel_path, content_hash, kind FROM files ORDER BY rel_path"
-        ).fetchall()
-        return [(r["rel_path"], r["content_hash"], r["kind"]) for r in rows]
+        with self._lock:
+            cur = self.con.cursor()
+            rows = cur.execute(
+                "SELECT rel_path, content_hash, kind FROM files ORDER BY rel_path"
+            ).fetchall()
+            return [(r["rel_path"], r["content_hash"], r["kind"]) for r in rows]
 
     # ------------------------------------------------------------------
     # Internals

@@ -17,6 +17,7 @@ $0.02/M tokens). Any model id PydanticAI accepts works.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,6 +37,13 @@ class EmbedderHandle:
     # (embeddings bill on input tokens; output is always 0). Lets reindex
     # report cost without re-instrumenting every call site.
     total_tokens: int = field(default=0)
+    # Query-embedding cache. The optimizer re-asks the SAME bank questions
+    # on every eval (semantic, hybrid, every config), so without this each
+    # question hits the network dozens of times — the real cause of the
+    # "semantic/hybrid stalls" behaviour. Keyed by exact query string;
+    # guarded because retrieval runs across a thread pool.
+    _query_cache: dict[str, list[float]] = field(default_factory=dict, repr=False)
+    _query_lock: Any = field(default_factory=threading.Lock, repr=False)
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed a batch of documents (synchronous wrapper).
@@ -62,8 +70,19 @@ class EmbedderHandle:
             self.total_tokens += tokens
 
     def embed_query(self, text: str) -> list[float]:
-        """Embed a single query string (sync wrapper)."""
-        return asyncio.run(self.embed_query_async(text))
+        """Embed a single query string (sync wrapper), cached by text.
+
+        Cache hit → no network call, no event-loop spin. This is what keeps
+        the optimizer fast: it scores many configs against the same bank, so
+        each distinct question is embedded once, not once per eval."""
+        with self._query_lock:
+            hit = self._query_cache.get(text)
+        if hit is not None:
+            return hit
+        vec = asyncio.run(self.embed_query_async(text))
+        with self._query_lock:
+            self._query_cache[text] = vec
+        return vec
 
     async def embed_query_async(self, text: str) -> list[float]:
         result = await self.embedder.embed_query(text)
