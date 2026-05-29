@@ -270,8 +270,7 @@ Either disable the flag for CI runs, or wire a custom `Reviewer`.
 
 Off by default. Set `logfire.enabled: true` in `config.yaml` to opt in.
 Install `pip install "outmem[logfire]"` and set `$LOGFIRE_TOKEN` — the
-token alone determines which project the data lands in (the deprecated
-`logfire.project: <name>` still opts you in, for back-compat).
+token alone determines which project the data lands in.
 
 Spans are tagged `service_name=outmem` so they're filterable when
 other services publish to the same project. PydanticAI is

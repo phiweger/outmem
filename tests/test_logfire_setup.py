@@ -23,15 +23,15 @@ from outmem.config import LogfireSettings
 from outmem.exceptions import OutmemError
 
 
-def test_setup_noop_when_project_unset() -> None:
-    assert setup(LogfireSettings(project=None)) is False
+def test_setup_noop_when_disabled() -> None:
+    assert setup(LogfireSettings(enabled=False)) is False
 
 
 def test_setup_raises_friendly_error_when_dep_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If project is set but the logfire package isn't importable, point
-    the user at the install command rather than a bare ImportError."""
+    """If enabled but the logfire package isn't importable, point the user
+    at the install command rather than a bare ImportError."""
     import outmem._logfire as logfire_setup
 
     monkeypatch.setattr(logfire_setup, "_configured", False)
@@ -41,7 +41,7 @@ def test_setup_raises_friendly_error_when_dep_missing(
     importlib.invalidate_caches()
 
     with pytest.raises(OutmemError, match="outmem\\[logfire\\]"):
-        setup(LogfireSettings(project="my-project"))
+        setup(LogfireSettings(enabled=True))
 
 
 # ---------------------------------------------------------------------------
@@ -58,12 +58,12 @@ def test_setup_logfire_is_exported() -> None:
 
 def test_setup_logfire_accepts_store(tmp_path: Path) -> None:
     store = WikiStore.init(tmp_path / "w")
-    # Default config has project=None → no-op, returns False.
+    # Default config has enabled=False → no-op, returns False.
     assert setup_logfire(store) is False
 
 
 def test_setup_logfire_accepts_settings() -> None:
-    assert setup_logfire(LogfireSettings(project=None)) is False
+    assert setup_logfire(LogfireSettings(enabled=False)) is False
 
 
 def test_ask_invokes_setup_logfire(
@@ -83,9 +83,8 @@ def test_ask_invokes_setup_logfire(
     monkeypatch.setattr("outmem._logfire.setup", fake_setup)
 
     store = WikiStore.init(tmp_path / "w")
-    # Inject a non-default project so we can verify the right settings
-    # object is forwarded.
-    store.config.outmem.logfire.project = "test-project"
+    # Enable so we can verify the right settings object is forwarded.
+    store.config.outmem.logfire.enabled = True
 
     # We don't need a real run — even an early error would prove the
     # setup call happened first. Easier: import ask, call it with a
@@ -99,7 +98,7 @@ def test_ask_invokes_setup_logfire(
     with contextlib.suppress(Exception):
         ask_sync(store, query="hi", model=TestModel(call_tools=[]), push=False, pull=False)
 
-    assert any(s.project == "test-project" for s in calls)
+    assert any(s.enabled for s in calls)
 
 
 def test_build_consult_wiki_invokes_setup_logfire(
@@ -117,9 +116,9 @@ def test_build_consult_wiki_invokes_setup_logfire(
 
     seed = WikiStore.init(tmp_path / "w")
     seed.write_page("p", title="T", body="b")
-    # Edit config.yaml so the re-opened (read-only) store picks the project up.
+    # Edit config.yaml so the re-opened (read-only) store picks it up.
     (seed.root / "config.yaml").write_text(
-        "logfire:\n  project: ro-test-project\n",
+        "logfire:\n  enabled: true\n",
         encoding="utf-8",
     )
     seed.close()
@@ -129,4 +128,4 @@ def test_build_consult_wiki_invokes_setup_logfire(
     from outmem.adapters.pydantic_ai import build_consult_wiki
 
     build_consult_wiki(seed.root, model=TestModel())
-    assert any(s.project == "ro-test-project" for s in calls)
+    assert any(s.enabled for s in calls)

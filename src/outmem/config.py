@@ -84,7 +84,6 @@ DEFAULT_OPTIMIZE_MAX_FAILURES_SHOWN = 6     # failing questions shown per eval
 DEFAULT_OPTIMIZE_UNANSWERABLE_LIMIT = 20    # gap-log questions harvested
 
 DEFAULT_LOGFIRE_ENABLED = False
-DEFAULT_LOGFIRE_PROJECT: str | None = None
 LOGFIRE_SERVICE_NAME = "outmem"
 
 # Anthropic prompt-caching keys for ``model_settings`` (pydantic_ai passes
@@ -223,14 +222,9 @@ class LogfireSettings:
 
         logfire:
           enabled: true     # + a LOGFIRE_TOKEN in the environment to send
-
-    ``project`` is **deprecated** — it never affected routing (the token
-    does) — but still accepted: any non-null value opts in, so older
-    config.yaml files keep working.
     """
 
     enabled: bool = DEFAULT_LOGFIRE_ENABLED
-    project: str | None = DEFAULT_LOGFIRE_PROJECT  # deprecated; back-compat opt-in
 
 
 @dataclass
@@ -483,12 +477,10 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
         config.approval.required_for_writes = approval_block["required_for_writes"]
 
     logfire_block = data.get("logfire")
-    if isinstance(logfire_block, dict):
-        if isinstance(logfire_block.get("enabled"), bool):
-            config.logfire.enabled = logfire_block["enabled"]
-        project = logfire_block.get("project")  # deprecated; back-compat opt-in
-        if project is None or isinstance(project, str):
-            config.logfire.project = project
+    if isinstance(logfire_block, dict) and isinstance(
+        logfire_block.get("enabled"), bool
+    ):
+        config.logfire.enabled = logfire_block["enabled"]
 
     return config
 

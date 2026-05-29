@@ -1,9 +1,9 @@
 """Optional Pydantic Logfire wiring.
 
 :func:`setup` is a CLI-side hook — call it once per invocation with the
-config's :class:`LogfireSettings`. When disabled (``enabled`` false and
-no deprecated ``project``), this is a no-op and the ``logfire`` dep
-doesn't have to be installed. When enabled, we configure Logfire with
+config's :class:`LogfireSettings`. When disabled (``enabled`` false),
+this is a no-op and the ``logfire`` dep doesn't have to be installed.
+When enabled, we configure Logfire with
 ``service_name="outmem"`` (so traces are tagged distinctly from other
 services publishing to the same project) and instrument pydantic_ai.
 
@@ -26,12 +26,11 @@ _configured = False
 
 
 def setup(settings: LogfireSettings) -> bool:
-    """Configure Logfire if ``settings.enabled`` (or the deprecated
-    ``project``) is set. Returns ``True`` when instrumentation was
-    activated, ``False`` when disabled."""
+    """Configure Logfire if ``settings.enabled``. Returns ``True`` when
+    instrumentation was activated, ``False`` when disabled."""
     global _configured
 
-    if not settings.enabled and settings.project is None:
+    if not settings.enabled:
         return False
     if _configured:
         return True
