@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -32,6 +32,10 @@ class EmbedderHandle:
     embedder: Any  # pydantic_ai.Embedder, kept untyped so import is lazy
     model_name: str
     dimensions: int
+    # Running total of input tokens billed across this handle's lifetime
+    # (embeddings bill on input tokens; output is always 0). Lets reindex
+    # report cost without re-instrumenting every call site.
+    total_tokens: int = field(default=0)
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed a batch of documents (synchronous wrapper).
@@ -46,7 +50,16 @@ class EmbedderHandle:
         if not texts:
             return []
         result = await self.embedder.embed_documents(list(texts))
+        self._accrue(result)
         return [list(vec) for vec in result.embeddings]
+
+    def _accrue(self, result: Any) -> None:
+        """Add this call's billed input tokens to the running total.
+        Best-effort — stub embedders and older results may lack usage."""
+        usage = getattr(result, "usage", None)
+        tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+        if isinstance(tokens, int):
+            self.total_tokens += tokens
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query string (sync wrapper)."""

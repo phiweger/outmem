@@ -283,7 +283,8 @@ def cmd_reindex(args: argparse.Namespace) -> int:
         f"reindex: {summary['reindexed']} re-embedded, "
         f"{summary['skipped']} unchanged, "
         f"{summary['removed']} removed, "
-        f"{summary['chunks_added']} chunks added"
+        f"{summary['chunks_added']} chunks added, "
+        f"{summary.get('embed_tokens', 0)} embed tokens"
     )
     return 0
 

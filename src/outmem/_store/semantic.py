@@ -165,17 +165,28 @@ def reindex_all(
         batch.append((rel_path, body, kind))
 
     settings = store.config.outmem.semantic
-    results = vs.reindex_files(
-        batch,
-        chunk_size=settings.chunk_size,
-        chunk_max=settings.chunk_max,
-        overlap_paragraphs=settings.overlap_paragraphs,
-        max_concurrency=max_concurrency,
-        on_progress=on_progress,
-    )
-    reindexed = sum(1 for r in results if not r.skipped)
+    tokens_before = getattr(vs.embedder, "total_tokens", 0)
+    # One parent span so reindex shows up in the Logfire UI with its cost
+    # (embeddings aren't agent calls, so instrument_pydantic_ai doesn't
+    # cover them — we record the billed input tokens explicitly).
+    from outmem._logfire import span as _span
+
+    with _span("outmem.reindex", files=len(batch), force=force) as sp:
+        results = vs.reindex_files(
+            batch,
+            chunk_size=settings.chunk_size,
+            chunk_max=settings.chunk_max,
+            overlap_paragraphs=settings.overlap_paragraphs,
+            max_concurrency=max_concurrency,
+            on_progress=on_progress,
+        )
+        embed_tokens = getattr(vs.embedder, "total_tokens", 0) - tokens_before
+        reindexed = sum(1 for r in results if not r.skipped)
+        added_chunks = sum(r.chunks_added for r in results)
+        sp.set_attribute("reindexed", reindexed)
+        sp.set_attribute("chunks_added", added_chunks)
+        sp.set_attribute("embed_tokens", embed_tokens)
     skipped = sum(1 for r in results if r.skipped)
-    added_chunks = sum(r.chunks_added for r in results)
 
     removed = 0
     on_disk_set = set(on_disk)
@@ -189,6 +200,7 @@ def reindex_all(
         "skipped": skipped,
         "removed": removed,
         "chunks_added": added_chunks,
+        "embed_tokens": embed_tokens,
     }
 
 

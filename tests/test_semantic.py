@@ -185,6 +185,18 @@ class TestVectorStoreReindexBatch:
         res2 = vs.reindex_files(files)  # type: ignore[arg-type]
         assert all(r.skipped for r in res2)
 
+    def test_embedder_accrues_tokens(self, tmp_path: Path) -> None:
+        # The handle tracks billed input tokens across calls; a hash-skip
+        # rerun adds none (nothing re-embedded).
+        h = make_handle()
+        assert h.total_tokens == 0
+        vs = VectorStore.open(tmp_path / "v.db", embedder=h)
+        vs.reindex_files(self._files(4))  # type: ignore[arg-type]
+        first = h.total_tokens
+        assert first > 0
+        vs.reindex_files(self._files(4))  # type: ignore[arg-type]  # all skip
+        assert h.total_tokens == first  # no new tokens on hash-skip
+
 
 class TestVectorStoreReindex:
     def test_reindex_creates_chunks(self, vstore: VectorStore) -> None:

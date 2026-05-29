@@ -85,26 +85,35 @@ def _quiet_export_noise() -> None:
     logging.getLogger("logfire").setLevel(logging.ERROR)
 
 
+class _NoopSpan:
+    """Stand-in yielded when Logfire is off, so callers can always call
+    ``.set_attribute(...)`` without guarding on whether tracing is live."""
+
+    def set_attribute(self, key: str, value: object) -> None:
+        pass
+
+
 @contextmanager
-def span(name: str, **attributes: object) -> Iterator[None]:
+def span(name: str, **attributes: object) -> Iterator[Any]:
     """A parent span for grouping nested work, or a no-op.
 
     Yields a Logfire span when logfire is installed AND already configured
-    (i.e. ``setup`` ran with ``logfire.enabled``); otherwise a plain no-op,
-    so the core never hard-depends on the optional extra. Used to nest the
-    many per-page / per-eval ``agent run`` spans under one parent in the
-    trace instead of leaving them flat.
+    (i.e. ``setup`` ran with ``logfire.enabled``); otherwise a
+    :class:`_NoopSpan`, so the core never hard-depends on the optional
+    extra. Used to nest the many per-page / per-eval ``agent run`` spans
+    under one parent, and to attach metrics known only after the work
+    (e.g. embedding tokens) via ``yielded.set_attribute(...)``.
     """
     if not _configured:
-        yield
+        yield _NoopSpan()
         return
     try:
         import logfire
     except ImportError:
-        yield
+        yield _NoopSpan()
         return
     # logfire.span's typed signature doesn't accept arbitrary **kwargs as
     # attributes; call via an untyped alias so mypy doesn't narrow them.
     _span: Any = logfire.span
-    with _span(name, **attributes):
-        yield
+    with _span(name, **attributes) as s:
+        yield s

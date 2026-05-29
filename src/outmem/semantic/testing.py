@@ -31,11 +31,20 @@ DEFAULT_DIMENSIONS = 64
 
 
 @dataclass
+class _StubUsage:
+    """Minimal stand-in for ``pydantic_ai.usage.RequestUsage`` — just the
+    one field outmem reads for embedding cost."""
+
+    input_tokens: int = 0
+
+
+@dataclass
 class _StubResult:
     """Shape-compatible with :class:`pydantic_ai.embeddings.EmbeddingResult`."""
 
     embeddings: list[list[float]]
     model_name: str
+    usage: _StubUsage | None = None
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
@@ -60,9 +69,13 @@ class BagOfWordsEmbeddingModel:
         self.model_name = "test:bag-of-words"
 
     async def embed_documents(self, texts: list[str]) -> _StubResult:
+        # Fake a token count (~1 per whitespace word) so cost-tracking
+        # paths are exercisable in tests without a real provider.
+        tokens = sum(len(t.split()) for t in texts)
         return _StubResult(
             embeddings=[self._embed(t) for t in texts],
             model_name=self.model_name,
+            usage=_StubUsage(input_tokens=tokens),
         )
 
     async def embed_query(self, text: str) -> _StubResult:
