@@ -68,7 +68,14 @@ class BagOfWordsEmbeddingModel:
         self.dimensions = dimensions
         self.model_name = "test:bag-of-words"
 
-    async def embed_documents(self, texts: list[str]) -> _StubResult:
+    async def embed(
+        self,
+        inputs: str | list[str],
+        *,
+        input_type: str = "document",  # pydantic_ai's EmbeddingModel.embed signature
+        settings: object | None = None,
+    ) -> _StubResult:
+        texts = [inputs] if isinstance(inputs, str) else list(inputs)
         # Fake a token count (~1 per whitespace word) so cost-tracking
         # paths are exercisable in tests without a real provider.
         tokens = sum(len(t.split()) for t in texts)
@@ -77,9 +84,6 @@ class BagOfWordsEmbeddingModel:
             model_name=self.model_name,
             usage=_StubUsage(input_tokens=tokens),
         )
-
-    async def embed_query(self, text: str) -> _StubResult:
-        return _StubResult(embeddings=[self._embed(text)], model_name=self.model_name)
 
     def _embed(self, text: str) -> list[float]:
         vec = [0.0] * self.dimensions
@@ -109,16 +113,17 @@ class OnesEmbeddingModel:
         self.dimensions = dimensions
         self.model_name = "test:ones"
 
-    async def embed_documents(self, texts: list[str]) -> _StubResult:
+    async def embed(
+        self,
+        inputs: str | list[str],
+        *,
+        input_type: str = "document",
+        settings: object | None = None,
+    ) -> _StubResult:
+        texts = [inputs] if isinstance(inputs, str) else list(inputs)
         vec = [1.0] * self.dimensions
         return _StubResult(
             embeddings=[list(vec) for _ in texts],
-            model_name=self.model_name,
-        )
-
-    async def embed_query(self, text: str) -> _StubResult:
-        return _StubResult(
-            embeddings=[[1.0] * self.dimensions],
             model_name=self.model_name,
         )
 

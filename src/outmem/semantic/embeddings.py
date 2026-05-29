@@ -61,7 +61,11 @@ class EmbedderHandle:
     async def embed_documents_async(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
-        result = await self.embedder.embed_documents(list(texts))
+        # Call the EmbeddingModel.embed() interface (NOT Embedder.embed_documents)
+        # — only embed() goes through InstrumentedEmbeddingModel and so emits a
+        # Logfire span with model/tokens. Embedder.embed_documents falls through
+        # __getattr__ to the bare model and bypasses instrumentation entirely.
+        result = await self.embedder.embed(list(texts), input_type="document")
         self._accrue(result)
         return [list(vec) for vec in result.embeddings]
 
@@ -104,7 +108,9 @@ class EmbedderHandle:
             return vec
 
     async def embed_query_async(self, text: str) -> list[float]:
-        result = await self.embedder.embed_query(text)
+        # See embed_documents_async — the EmbeddingModel.embed() entry point
+        # is the one that's instrumented.
+        result = await self.embedder.embed(text, input_type="query")
         self._accrue(result)  # queries are billed too — count them
         return list(result.embeddings[0])
 
@@ -140,32 +146,37 @@ def build_embedder(model: str | Any = "openai:text-embedding-3-small") -> Embedd
             ) from exc
         return builder()
 
+    # Use the EmbeddingModel directly (not the Embedder convenience wrapper)
+    # because the InstrumentedEmbeddingModel wrapper only intercepts embed();
+    # Embedder.embed_query/embed_documents fall through __getattr__ to the
+    # bare model and bypass instrumentation. EmbedderHandle therefore calls
+    # `embedder.embed(...)` exclusively.
     from pydantic_ai import Embedder
 
-    embedder = Embedder(model)
-    embedder = _maybe_instrument(embedder)
-    probe = asyncio.run(embedder.embed_query("probe"))
+    embedding_model = Embedder(model)._model
+    embedding_model = _maybe_instrument(embedding_model)
+    probe = asyncio.run(embedding_model.embed("probe", input_type="query"))
     dimensions = len(probe.embeddings[0])
     model_name = probe.model_name
-    return EmbedderHandle(embedder=embedder, model_name=model_name, dimensions=dimensions)
+    return EmbedderHandle(
+        embedder=embedding_model, model_name=model_name, dimensions=dimensions
+    )
 
 
-def _maybe_instrument(embedder: Any) -> Any:
-    """Wrap ``embedder`` with pydantic_ai's :class:`InstrumentedEmbeddingModel`
-    so every embed call emits a Logfire span (model, prompt, usage / tokens)
-    — the embeddings analogue of ``logfire.instrument_pydantic_ai`` which
-    only covers agent/chat. Best-effort: returns the bare embedder if
-    pydantic_ai is too old to expose the wrapper, so reindex never breaks
-    on an unsupported install.
+def _maybe_instrument(embedding_model: Any) -> Any:
+    """Wrap ``embedding_model`` with pydantic_ai's
+    :class:`InstrumentedEmbeddingModel` so every ``embed()`` call emits a
+    Logfire span (model, prompt count, ``gen_ai.usage.input_tokens``) — the
+    embeddings analogue of ``logfire.instrument_pydantic_ai`` which only
+    covers agent/chat. Best-effort: returns the bare model if pydantic_ai
+    is too old to expose the wrapper, so reindex never breaks on an
+    unsupported install.
     """
     try:
         from pydantic_ai.embeddings import instrument_embedding_model
     except ImportError:
-        return embedder
+        return embedding_model
     try:
-        # `instrument=True` lets logfire's default settings cover the spans
-        # (model, prompt count, usage) — matching how the rest of pydantic_ai
-        # gets traced via instrument_pydantic_ai.
-        return instrument_embedding_model(embedder, True)
-    except Exception:  # any wrapping failure → fall back to bare embedder
-        return embedder
+        return instrument_embedding_model(embedding_model, True)
+    except Exception:  # any wrapping failure → fall back to bare model
+        return embedding_model

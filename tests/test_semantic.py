@@ -366,15 +366,19 @@ class TestVectorStoreTransactionSafety:
 
         fail_on_call = {"count": 0}
         underlying = _BagOfWordsEmbeddingModel(dimensions=64)
-        real_embed_documents = underlying.embed_documents
+        real_embed = underlying.embed
 
-        async def flaky_embed_documents(texts: list[str]):  # type: ignore[no-untyped-def]
-            fail_on_call["count"] += 1
-            if fail_on_call["count"] == 2:
-                raise RuntimeError("simulated network failure")
-            return await real_embed_documents(texts)
+        async def flaky_embed(inputs, *, input_type="document", settings=None):  # type: ignore[no-untyped-def]
+            # Count only document (re-index) embeds; query embeds for
+            # find_similar between reindexes shouldn't trip the simulated
+            # failure (we're testing reindex transaction safety, not query).
+            if input_type == "document":
+                fail_on_call["count"] += 1
+                if fail_on_call["count"] == 2:
+                    raise RuntimeError("simulated network failure")
+            return await real_embed(inputs, input_type=input_type, settings=settings)
 
-        underlying.embed_documents = flaky_embed_documents  # type: ignore[method-assign]
+        underlying.embed = flaky_embed  # type: ignore[method-assign]
         handle = EmbedderHandle(
             embedder=underlying,
             model_name=underlying.model_name,
@@ -395,7 +399,7 @@ class TestVectorStoreTransactionSafety:
             vs.reindex_file("wiki/pages/b.md", body="beta would-be content.", kind="wiki")
 
         # Reset the embedder so the next call works.
-        underlying.embed_documents = real_embed_documents  # type: ignore[method-assign]
+        underlying.embed = real_embed  # type: ignore[method-assign]
 
         # Reindexing A again must NOT accidentally commit B's partial
         # deletes from the prior failure. A's pre-existing chunks
