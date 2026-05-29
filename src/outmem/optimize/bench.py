@@ -83,9 +83,9 @@ def evaluate(
     ``p95_latency_ms``, and ``latency_ms`` on each :class:`QuestionResult``)
     so a faster strategy can be preferred among configs that score alike.
 
-    Note: the ``semantic`` / ``hybrid`` blocks hold a SQLite connection;
-    if you hit a cross-thread SQLite error, score those with
-    ``max_concurrency=1`` (``lexical`` / ``rerank`` are thread-safe).
+    All shipped blocks are thread-safe under the pool (``semantic`` opens
+    its store with ``check_same_thread=False``; ``bm25`` uses a per-thread
+    FTS5 connection), so the default concurrency is safe across strategies.
     """
     answerable = bank.answerable
     if sample is not None and sample < len(answerable):

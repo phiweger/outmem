@@ -34,9 +34,11 @@ def enabled(store: WikiStore) -> bool:
 def index_is_empty(store: WikiStore) -> bool:
     """True if the semantic index has no indexed files yet.
 
-    Cheap metadata read (no embedder call). Used to fail loud when
-    ``semantic.enabled`` is true but ``outmem reindex`` was never run —
-    otherwise queries return nothing and look like a useless retriever.
+    Used to fail loud when ``semantic.enabled`` is true but ``outmem
+    reindex`` was never run — otherwise queries return nothing and look
+    like a useless retriever. Opens the vector store, so the first call
+    pays the one-time ``build_embedder`` probe (a tiny embed request to
+    detect dimensions); the handle is then cached on the store.
     """
     return len(vector_store_or_open(store).list_indexed_files()) == 0
 

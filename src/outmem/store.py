@@ -716,7 +716,8 @@ class WikiStore:
 
     def semantic_index_is_empty(self) -> bool:
         """True if semantic is enabled but the index has no files yet
-        (i.e. ``outmem reindex`` hasn't run). Cheap metadata read."""
+        (i.e. ``outmem reindex`` hasn't run). Opens the vector store, so
+        the first call pays the one-time embedder dimension probe."""
         return _semantic.index_is_empty(self)
 
     def semantic_find_similar(
