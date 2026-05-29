@@ -270,6 +270,16 @@ class TestSemanticBlock:
         with pytest.raises(OutmemError):
             retriever.retrieve("anything", k=3)
 
+    def test_enabled_but_empty_index_fails_loud(
+        self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Enabled but never reindexed → a clear "run outmem reindex" error,
+        # not a silent empty result that looks like a useless retriever.
+        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_index_is_empty", lambda: True)
+        with pytest.raises(OutmemError, match="reindex"):
+            SemanticRetriever(store).retrieve("anything", k=3)
+
     def test_chunk_to_slug_mapping(
         self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -288,6 +298,7 @@ class TestSemanticBlock:
             ]
 
         monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
         monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
         result = SemanticRetriever(store, top_k=8).retrieve("penicillin", k=5)
@@ -310,6 +321,7 @@ class TestSemanticBlock:
             ]
 
         monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
         monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
         assert len(SemanticRetriever(store).retrieve("x", k=2).slugs) == 2
@@ -335,6 +347,7 @@ class TestHybridBlock:
             ]
 
         monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
         monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
         fused = HybridRetriever(store).retrieve("penicillin", k=5).slugs

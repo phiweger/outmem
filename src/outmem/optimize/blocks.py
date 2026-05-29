@@ -242,8 +242,21 @@ class SemanticRetriever:
     def retrieve(self, question: str, *, k: int) -> RetrievalResult:
         if not self._store.semantic_enabled():
             raise OutmemError(
-                "semantic block needs `semantic.enabled: true` + a built "
-                "index (outmem[semantic]); run `outmem reindex`"
+                "semantic retrieval needs `semantic.enabled: true` in "
+                "config.yaml (+ `pip install outmem[semantic]`)"
+            )
+        # Enabled but never indexed → fail loud rather than silently return
+        # nothing (which would look like a useless retriever, not a setup gap).
+        try:
+            empty = self._store.semantic_index_is_empty()
+        except OutmemError:
+            raise
+        except Exception as exc:  # missing extra / db open error
+            raise OutmemError(f"semantic index unavailable: {exc}") from exc
+        if empty:
+            raise OutmemError(
+                "semantic index is empty — run `outmem reindex` to build it "
+                "before tuning with the semantic/hybrid strategies"
             )
         # Chunks → pages: over-fetch chunks so dedup-to-pages still yields k.
         chunk_k = max(self._top_k, k) * 4
@@ -251,7 +264,7 @@ class SemanticRetriever:
             matches = self._store.semantic_find_similar(question, top_k=chunk_k)
         except OutmemError:
             raise
-        except Exception as exc:  # missing extra / embedder / db error
+        except Exception as exc:  # embedder / query error
             raise OutmemError(f"semantic retrieval failed: {exc}") from exc
 
         prefix = f"{self._store.config.wiki_dir}/{PAGES_DIR}/"

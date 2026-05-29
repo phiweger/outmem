@@ -31,6 +31,16 @@ def enabled(store: WikiStore) -> bool:
     return store.config.outmem.semantic.enabled
 
 
+def index_is_empty(store: WikiStore) -> bool:
+    """True if the semantic index has no indexed files yet.
+
+    Cheap metadata read (no embedder call). Used to fail loud when
+    ``semantic.enabled`` is true but ``outmem reindex`` was never run —
+    otherwise queries return nothing and look like a useless retriever.
+    """
+    return len(vector_store_or_open(store).list_indexed_files()) == 0
+
+
 def db_path(store: WikiStore) -> Path:
     return store.root / store.config.outmem.semantic.db_filename
 

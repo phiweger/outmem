@@ -68,6 +68,12 @@ half of the metric. Shipped blocks:
 | `semantic` | vector cosine similarity over the index | `semantic` + index |
 | `hybrid` | Reciprocal Rank Fusion of `lexical` + `semantic` | as `semantic` |
 
+To tune with `semantic` / `hybrid`: `pip install "outmem[semantic]"`, set
+`semantic.enabled: true`, then **build the index once with `outmem reindex`**
+— it is not built on the fly. If the index is missing/empty the optimizer
+skips those strategies with a clear "run `outmem reindex`" in `result.log`,
+rather than scoring an empty (useless-looking) retriever.
+
 A `RetrievalConfig` names a block and its knobs; `build_retriever(store,
 config)` composes it. The set is small and honest — adding `bm25` or a
 smarter fusion is the *code-space* loop's job.

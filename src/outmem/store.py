@@ -714,6 +714,11 @@ class WikiStore:
         """Whether ``semantic.enabled: true`` is set in ``config.yaml``."""
         return _semantic.enabled(self)
 
+    def semantic_index_is_empty(self) -> bool:
+        """True if semantic is enabled but the index has no files yet
+        (i.e. ``outmem reindex`` hasn't run). Cheap metadata read."""
+        return _semantic.index_is_empty(self)
+
     def semantic_find_similar(
         self,
         text: str,
