@@ -54,6 +54,10 @@ def setup(settings: LogfireSettings) -> bool:
     logfire.configure(
         service_name=LOGFIRE_SERVICE_NAME,
         send_to_logfire="if-token-present",
+        # Don't echo every span to the local terminal — spans still go to
+        # the Logfire UI. outmem prints its own progress; the console
+        # exporter just floods stdout (dozens of "agent run" lines).
+        console=False,
     )
     logfire.instrument_pydantic_ai()
     _quiet_export_noise()

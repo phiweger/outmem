@@ -411,7 +411,8 @@ Entry-point signatures:
 
 Progress prints to stderr by default: a page counter for `generate_bank`,
 and one epoch line per eval for `optimize_retrieval`
-(`[eval 3/12] hybrid score=0.71 (hit@5=0.66 abstain=0.80) 4ms/search best=0.71 *`).
+(`[eval 3/12] hybrid[bm25+semantic] score=0.71 (hit@5=0.66 abstain=0.80) 4ms/search best=0.71 *`) —
+the bracketed part names which blocks the trial used.
 Pass `on_progress(done, total)` / `on_eval(EvalEvent)` to redirect.
 
 The bank is plain JSON (`QuestionBank.save` / `.load`), so a team with

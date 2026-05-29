@@ -147,8 +147,9 @@ worse than it measured.
 
 Progress prints to **stderr** as it runs — a live page counter for
 `generate_bank`, one epoch line per eval for `optimize_retrieval`
-(`[eval 3/12] rerank score=0.620 (hit@5=0.550 abstain=0.800) best=0.710 *`,
-`*` marks a new best). No logging setup required.
+(`[eval 3/12] hybrid[bm25+semantic] score=0.620 (hit@5=0.550 abstain=0.800) 4ms/search best=0.710 *`,
+where the bracketed part names the blocks used and `*` marks a new best).
+No logging setup required.
 
 ```python
 from outmem import WikiStore

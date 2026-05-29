@@ -278,11 +278,30 @@ def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:
     )
 
 
+def _describe_config(cfg: RetrievalConfig) -> str:
+    """Compact, human-readable label of which blocks a trial actually used,
+    so the epoch line shows e.g. `hybrid[bm25+semantic]` or `rerank(haiku)`
+    rather than a bare strategy name."""
+    if cfg.strategy == "hybrid":
+        return f"hybrid[{'+'.join(cfg.fuse)}]"
+    if cfg.strategy == "rerank":
+        return f"rerank({_short_model(cfg.rerank_model)})"
+    if cfg.strategy == "hyde":
+        return f"hyde({_short_model(cfg.hyde_model)})"
+    return cfg.strategy
+
+
+def _short_model(model_id: str) -> str:
+    """`anthropic:claude-haiku-4-5` → `haiku`-ish: last path segment, deprefixed."""
+    tail = model_id.split(":")[-1]
+    return tail.replace("claude-", "")
+
+
 def _format_epoch(event: EvalEvent) -> str:
     c = event.scorecard
     star = " *" if c.score >= event.best_score else ""  # this eval is (tied) best
     return (
-        f"[eval {event.index}/{event.max_evals}] {event.config.strategy} "
+        f"[eval {event.index}/{event.max_evals}] {_describe_config(event.config)} "
         f"score={c.score:.3f} (hit@{c.k}={c.hit_at_k:.3f} abstain={c.abstention:.3f}) "
         f"{c.mean_latency_ms:.0f}ms/search best={event.best_score:.3f}{star}"
     )
