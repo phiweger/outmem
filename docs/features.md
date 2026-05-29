@@ -282,7 +282,11 @@ token alone determines which project the data lands in.
 
 Spans are tagged `service_name=outmem` so they're filterable when
 other services publish to the same project. PydanticAI is
-auto-instrumented (LLM calls, tool calls, tokens, latencies).
+auto-instrumented (LLM calls, tool calls, tokens, latencies). Embedding
+calls are also wrapped via `instrument_embedding_model`, so each
+`embed_query` / `embed_documents` emits a span with the model, prompt
+count, and per-call token usage — you see per-call cost (not just the
+rolled-up `outmem.reindex` summary).
 
 The CLI's `outmem ask`, the library `outmem.agent.ask_sync(store, ...)`,
 and the read-only `build_consult_wiki(path)` factory all auto-call the

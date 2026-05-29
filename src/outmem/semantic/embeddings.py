@@ -143,7 +143,29 @@ def build_embedder(model: str | Any = "openai:text-embedding-3-small") -> Embedd
     from pydantic_ai import Embedder
 
     embedder = Embedder(model)
+    embedder = _maybe_instrument(embedder)
     probe = asyncio.run(embedder.embed_query("probe"))
     dimensions = len(probe.embeddings[0])
     model_name = probe.model_name
     return EmbedderHandle(embedder=embedder, model_name=model_name, dimensions=dimensions)
+
+
+def _maybe_instrument(embedder: Any) -> Any:
+    """Wrap ``embedder`` with pydantic_ai's :class:`InstrumentedEmbeddingModel`
+    so every embed call emits a Logfire span (model, prompt, usage / tokens)
+    — the embeddings analogue of ``logfire.instrument_pydantic_ai`` which
+    only covers agent/chat. Best-effort: returns the bare embedder if
+    pydantic_ai is too old to expose the wrapper, so reindex never breaks
+    on an unsupported install.
+    """
+    try:
+        from pydantic_ai.embeddings import instrument_embedding_model
+    except ImportError:
+        return embedder
+    try:
+        # `instrument=True` lets logfire's default settings cover the spans
+        # (model, prompt count, usage) — matching how the rest of pydantic_ai
+        # gets traced via instrument_pydantic_ai.
+        return instrument_embedding_model(embedder, True)
+    except Exception:  # any wrapping failure → fall back to bare embedder
+        return embedder
