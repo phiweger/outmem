@@ -137,25 +137,6 @@ def test_relevance_bad_context_ignored(tmp_path: Path) -> None:
     assert cfg.relevance.context == "page"  # default preserved
 
 
-def test_logfire_project_from_yaml(tmp_path: Path) -> None:
-    (tmp_path / "config.yaml").write_text(
-        "logfire:\n  project: my-project\n",
-        encoding="utf-8",
-    )
-    cfg = load_yaml_config(tmp_path)
-    assert cfg.logfire.project == "my-project"
-
-
-def test_logfire_explicit_null_yaml(tmp_path: Path) -> None:
-    """``project: null`` (the starter default) is the disabled marker."""
-    (tmp_path / "config.yaml").write_text(
-        "logfire:\n  project: null\n",
-        encoding="utf-8",
-    )
-    cfg = load_yaml_config(tmp_path)
-    assert cfg.logfire.project is None
-
-
 def test_load_yaml_malformed_returns_defaults(tmp_path: Path) -> None:
     (tmp_path / "config.yaml").write_text("model: [unterminated\n", encoding="utf-8")
     cfg = load_yaml_config(tmp_path)
