@@ -96,7 +96,11 @@ def search(
 
     resolved_paths = _resolve_search_paths(root, paths)
 
-    args = ["rg", "--json"]
+    # --sort path forces a stable file order across runs. Without it
+    # ripgrep parallelises the walk and returns hits in thread-scheduling
+    # order — so identical inputs yielded different rankings across calls,
+    # which broke optimizer score reproducibility for lexical/hybrid.
+    args = ["rg", "--json", "--sort", "path"]
     if case_insensitive:
         args.append("-i")
     if fixed_strings:
