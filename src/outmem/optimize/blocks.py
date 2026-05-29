@@ -156,6 +156,13 @@ def build_retriever(
     config are used.
     """
     if config.strategy == "hybrid":
+        # Enforce ≥2 legs here too, not just in from_dict — a directly
+        # constructed RetrievalConfig(strategy="hybrid", fuse=()) would
+        # otherwise build a zero-leg hybrid that silently abstains.
+        if len(config.fuse) < 2:
+            raise OutmemError(
+                f"hybrid needs ≥2 fuse legs, got {list(config.fuse)}"
+            )
         legs = [_atomic_retriever(store, leg, config, model=model) for leg in config.fuse]
         return HybridRetriever(legs, rrf_k=config.rrf_k)
     return _atomic_retriever(store, config.strategy, config, model=model)

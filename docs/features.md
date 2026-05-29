@@ -166,10 +166,17 @@ config that's best on *your* wiki.
 "nothing relevant" (a deliberate abstention):
 
 * `lexical` — keyword ripgrep, pages ranked by hit frequency (no model).
+* `bm25` — SQLite FTS5 BM25 (IDF-weighted term ranking); no model, no
+  index, no extra dependency. Often beats `lexical` on jargon-heavy text.
 * `rerank` — wide keyword net → the relevance filter as a gate.
 * `semantic` — vector similarity over the semantic index; recall for
   paraphrases that share no keywords (needs `semantic.enabled` + a
   built index).
+* `hyde` — generate a hypothetical answer to the question, then
+  semantic-search on *that* (needs a model + the index).
+* `hybrid` — Reciprocal Rank Fusion of 2+ atomic legs, named by the
+  `fuse` knob (default `["lexical","semantic"]`; also e.g.
+  `["bm25","semantic"]` or `["semantic","hyde"]`).
 
 **The benchmark.** A `QuestionBank` is questions with known gold
 page(s). Generate one from the wiki — a model writes natural questions
@@ -193,7 +200,7 @@ eval costs one model call per bank question, bound it with `eval_sample`
 
 ```python
 from outmem import WikiStore
-from outmem.optimize import generate_bank, optimize_retrieval
+from outmem.optimize import generate_bank, optimize_retrieval, QuestionBank
 
 store = WikiStore.open("/srv/wiki")
 bank = generate_bank(store, model="anthropic:claude-haiku-4-5")

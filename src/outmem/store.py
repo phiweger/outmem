@@ -17,6 +17,7 @@ exactly once and returns the new HEAD SHA — and the runtime sequences
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -251,6 +252,10 @@ class WikiStore:
         # Lazily-opened resources holding sqlite connections.
         self._vector_store: VectorStore | None = None
         self._source_registry: SourceRegistry | None = None
+        # Guards lazy VectorStore open — the optimize tool queries
+        # concurrently across a thread pool, so the check-then-open must be
+        # atomic or 8 threads each build an embedder + orphan 7 connections.
+        self._vector_store_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Construction

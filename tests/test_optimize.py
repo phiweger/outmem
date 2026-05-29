@@ -159,7 +159,11 @@ class TestLexicalAndMetric:
         assert _latency_stats([]) == (0.0, 0.0)
         mean, p95 = _latency_stats([10.0, 20.0, 30.0, 40.0])
         assert mean == 25.0
-        assert p95 == 40.0  # nearest-rank p95 of 4 samples → the max
+        assert p95 == 40.0  # ceil(0.95*4)=4 → rank 4 → the max
+        # n=1 / n=2 must not IndexError, and p95 is deterministic (no
+        # banker's-rounding drift): ceil(0.95*20)=19 → rank 19 → 190.
+        assert _latency_stats([5.0])[1] == 5.0
+        assert _latency_stats([float(i) for i in range(10, 201, 10)])[1] == 190.0
 
 
 class TestRetrievalConfig:
@@ -450,6 +454,14 @@ class TestHybridBlock:
         with pytest.raises(OutmemError):
             RetrievalConfig.from_dict({"fuse": ["lexical"]})
 
+    def test_build_retriever_guards_direct_short_fuse(self, store: WikiStore) -> None:
+        # A directly-constructed (from_dict-bypassing) zero/one-leg hybrid
+        # must still be rejected by build_retriever, not silently abstain.
+        with pytest.raises(OutmemError):
+            build_retriever(store, RetrievalConfig(strategy="hybrid", fuse=()))
+        with pytest.raises(OutmemError):
+            build_retriever(store, RetrievalConfig(strategy="hybrid", fuse=("lexical",)))
+
 
 class TestHydeBlock:
     def _store_with_fake_semantic(
@@ -538,6 +550,34 @@ def test_optimize_returns_best_seen(store: WikiStore, bank: QuestionBank) -> Non
     direct = evaluate(build_retriever(store, result.best_config), bank, k=3)
     assert result.best_score == direct.score
     assert "best" in result.notes.lower()
+
+
+def test_optimize_run_eval_accepts_hyde_model_id(
+    store: WikiStore, bank: QuestionBank
+) -> None:
+    """The agent can set the hyde generation model via run_eval — the
+    param must exist on the tool and flow into the config (regression: it
+    was missing, so hyde_model was unreachable from the agent surface)."""
+    seen: list[dict[str, Any]] = []
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        if not seen:
+            # lexical so no model is actually needed; we only assert the
+            # tool accepts hyde_model_id without error.
+            seen.append({"called": True})
+            return ModelResponse(
+                parts=[ToolCallPart(
+                    tool_name="run_eval",
+                    args={"strategy": "lexical", "hyde_model_id": "anthropic:claude-haiku-4-5"},
+                )]
+            )
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store, bank, optimizer_model=FunctionModel(optimizer), k=3, max_evals=5
+    )
+    # The eval ran (hyde_model_id was accepted, not rejected as unknown kwarg).
+    assert len(result.trace) == 1
 
 
 def test_optimize_falls_back_when_agent_never_evals(

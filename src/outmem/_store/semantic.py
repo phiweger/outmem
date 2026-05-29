@@ -58,13 +58,19 @@ def vector_store_or_open(store: WikiStore) -> VectorStore:
         raise OutmemError(SEMANTIC_DISABLED_HELP)
     if store._vector_store is not None:
         return store._vector_store
-    # Lazy import so the optional extra is only required when used.
-    from outmem.semantic import VectorStore, build_embedder
+    # Double-checked lock: concurrent callers (the optimize thread pool)
+    # must not each build an embedder + open a connection, orphaning all
+    # but the last. The probe/open happens once.
+    with store._vector_store_lock:
+        if store._vector_store is not None:
+            return store._vector_store
+        # Lazy import so the optional extra is only required when used.
+        from outmem.semantic import VectorStore, build_embedder
 
-    settings = store.config.outmem.semantic
-    embedder = build_embedder(settings.embedding_model)
-    store._vector_store = VectorStore.open(db_path(store), embedder=embedder)
-    return store._vector_store
+        settings = store.config.outmem.semantic
+        embedder = build_embedder(settings.embedding_model)
+        store._vector_store = VectorStore.open(db_path(store), embedder=embedder)
+        return store._vector_store
 
 
 def find_similar(

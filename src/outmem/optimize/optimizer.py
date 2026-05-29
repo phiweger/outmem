@@ -150,6 +150,7 @@ def optimize_retrieval(
         max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT,
         semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
         rrf_k: int = DEFAULT_OPTIMIZE_RRF_K,
+        hyde_model_id: str = DEFAULT_RELEVANCE_MODEL,
         fuse: list[str] | None = None,
     ) -> str:
         """Score one retrieval config on the benchmark and report the
@@ -168,6 +169,8 @@ def optimize_retrieval(
             max_relevant: cap on pages the rerank block keeps.
             semantic_top_k: neighbours for the semantic / hyde / hybrid blocks.
             rrf_k: Reciprocal Rank Fusion constant for the hybrid block.
+            hyde_model_id: model id the hyde block uses to generate the
+                hypothetical answer.
             fuse: for strategy="hybrid", the 2+ atomic legs to fuse, e.g.
                 ["lexical","semantic"], ["bm25","semantic"], or
                 ["semantic","hyde"]. Ignored for non-hybrid strategies.
@@ -189,6 +192,7 @@ def optimize_retrieval(
                 "max_relevant": max_relevant,
                 "semantic_top_k": semantic_top_k,
                 "rrf_k": rrf_k,
+                "hyde_model": hyde_model_id,
             }
             if fuse is not None:
                 cfg_dict["fuse"] = fuse

@@ -371,6 +371,52 @@ def wiki_with_semantic(
     return WikiStore.open(root)
 
 
+def test_vector_store_open_is_single_under_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the lazy open is now lock-guarded. 8 threads hitting a
+    cold store must build the embedder + open the connection exactly ONCE
+    (not 8 times, orphaning 7 connections + paying 8 probe calls)."""
+    import threading
+
+    from outmem._store import semantic as sem
+
+    root = tmp_path / "w"
+    store = WikiStore.init(root)
+    yaml_path = root / "config.yaml"
+    yaml_path.write_text(
+        yaml_path.read_text().replace(
+            "semantic:\n  enabled: false", "semantic:\n  enabled: true"
+        ),
+        encoding="utf-8",
+    )
+    store.close()
+    store = WikiStore.open(root)
+
+    builds = []
+    monkeypatch.setattr(
+        "outmem.semantic.build_embedder",
+        lambda _model: builds.append(1) or make_handle(),
+    )
+
+    barrier = threading.Barrier(8)
+    handles: list[object] = []
+
+    def worker() -> None:
+        barrier.wait()  # maximise the race window
+        handles.append(sem.vector_store_or_open(store))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(builds) == 1  # embedder built once despite 8 racing threads
+    assert all(h is handles[0] for h in handles)  # all got the same store
+    store.close()
+
+
 class TestWikiStoreSemanticIntegration:
     def test_write_page_indexes_and_stages_db(self, wiki_with_semantic: WikiStore) -> None:
         store = wiki_with_semantic

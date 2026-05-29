@@ -385,6 +385,7 @@ from outmem.optimize import (
     generate_bank,       # provenance-labelled bank from the wiki (LLM)
     evaluate,            # score a retriever -> Scorecard
     optimize_retrieval,  # agent-driven config search -> OptimizeResult
+    EvalEvent,           # per-eval progress event (the on_eval hook payload)
 )
 
 store = WikiStore.open("/srv/wiki")
@@ -396,11 +397,22 @@ result.trace         # [(config_dict, score), ...] — every config tried
 result.log           # diagnostics: errors/fallbacks during the run (why + which eval)
 ```
 
+`RetrievalConfig` carries `strategy` (`lexical`/`bm25`/`rerank`/`semantic`/
+`hyde`/`hybrid`) plus knobs: `max_candidates`, `max_relevant`,
+`semantic_top_k`, `rrf_k`, `rerank_model`, `hyde_model`, and `fuse` — the
+2+ atomic legs the `hybrid` strategy RRF-fuses (default
+`("lexical","semantic")`; see [autoresearch.md](autoresearch.md) for leg combos).
+
 Entry-point signatures:
 
-- `generate_bank(store, *, model, per_page=2, slugs=None, max_pages=None, include_unanswerable=True) -> QuestionBank`
-- `optimize_retrieval(store, bank, *, optimizer_model, rerank_model=None, k=5, max_evals=12) -> OptimizeResult`
-- `evaluate(retriever, bank, *, k=5) -> Scorecard` — `.score`, `.hit_at_k`, `.abstention`, `.failures`
+- `generate_bank(store, *, model, per_page=2, slugs=None, max_pages=None, include_unanswerable=True, max_concurrency=8, on_progress=None) -> QuestionBank`
+- `optimize_retrieval(store, bank, *, optimizer_model, rerank_model=None, k=5, eval_concurrency=8, eval_sample=None, max_evals=12, on_eval=None) -> OptimizeResult`
+- `evaluate(retriever, bank, *, k=5, max_concurrency=8, sample=None) -> Scorecard` — `.score`, `.hit_at_k`, `.abstention`, `.failures`, `.mean_latency_ms`, `.p95_latency_ms`
+
+Progress prints to stderr by default: a page counter for `generate_bank`,
+and one epoch line per eval for `optimize_retrieval`
+(`[eval 3/12] hybrid score=0.71 (hit@5=0.66 abstain=0.80) 4ms/search best=0.71 *`).
+Pass `on_progress(done, total)` / `on_eval(EvalEvent)` to redirect.
 
 The bank is plain JSON (`QuestionBank.save` / `.load`), so a team with
 sensitive content can hand-author it and never send a page to a model.

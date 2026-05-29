@@ -82,9 +82,10 @@ To tune with `semantic` / `hybrid`: `pip install "outmem[semantic]"`, set
 skips those strategies with a clear "run `outmem reindex`" in `result.log`,
 rather than scoring an empty (useless-looking) retriever.
 
-A `RetrievalConfig` names a block and its knobs; `build_retriever(store,
-config)` composes it. The set is small and honest — adding `bm25` or a
-smarter fusion is the *code-space* loop's job.
+A `RetrievalConfig` names a block (and, for `hybrid`, the `fuse` legs)
+plus its knobs; `build_retriever(store, config)` composes it. Adding a
+*new* strategy outmem doesn't have yet (e.g. a learned query-formulation
+block) is the *code-space* loop's job.
 
 ### Test-set generation (and the hand-author escape hatch)
 
@@ -235,7 +236,8 @@ uses (`pip install 'outmem[logfire]'`). No extra setup in your script.
 Loop 1 only ever *picks among shipped, tested blocks*. It cannot invent
 a strategy outmem doesn't already have. The **code-space** loop — the
 true autoresearch analogue, where an agent edits
-`src/outmem/optimize/blocks.py` to add e.g. a BM25 block, runs the tests
+`src/outmem/optimize/blocks.py` to add a brand-new strategy (e.g. a
+learned query-formulation block), runs the tests
 + benchmark, keeps the change only if the score improves, and opens a PR
 — is **documented but not implemented**:
 

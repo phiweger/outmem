@@ -18,6 +18,7 @@ are reported so you can see *why* it moved. No F1 until list-style
 
 from __future__ import annotations
 
+import math
 import random
 import time
 from collections import Counter
@@ -157,6 +158,8 @@ def _latency_stats(latencies: list[float]) -> tuple[float, float]:
         return 0.0, 0.0
     mean = sum(latencies) / len(latencies)
     ordered = sorted(latencies)
-    # nearest-rank p95 (clamped to the last index)
-    idx = min(len(ordered) - 1, round(0.95 * (len(ordered) - 1)))
+    # nearest-rank p95: smallest rank covering ≥95% of samples (ceil, not
+    # round — round's banker's tie-break drifts the rank inconsistently).
+    rank = math.ceil(0.95 * len(ordered))  # 1-based
+    idx = min(len(ordered), rank) - 1
     return mean, ordered[idx]
