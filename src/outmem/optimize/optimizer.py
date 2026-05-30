@@ -22,6 +22,7 @@ here.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from collections.abc import Callable
@@ -91,7 +92,10 @@ _OPTIMIZER_SYSTEM_PROMPT = (
     "~0.69) — keep going to see whether a cheaper/faster strategy ties it, "
     "or whether a different family actually wins on a tighter sample. "
     "Stop early only when several distinct strategies have plateaued at "
-    "similar scores, or when the budget is spent."
+    "similar scores, or when the budget is spent.\n\n"
+    "Calling `run_eval` with a config you've already tried is a no-op — it "
+    "returns the prior score without consuming an eval slot — so vary at "
+    "least one parameter each turn."
 )
 
 _MODEL_SETTINGS: dict[str, Any] = {
@@ -153,6 +157,11 @@ def optimize_retrieval(
     trace: list[tuple[dict[str, Any], float]] = []
     best: dict[str, Any] = {"score": -1.0, "cfg": None, "card": None}
     run_log: list[str] = []  # errors / fallbacks, surfaced on OptimizeResult.log
+    # Dedupe cache: an agent can wander into the same (strategy, params) twice
+    # across 12 turns. Returning the cached scorecard without burning an eval
+    # slot keeps the budget for genuinely new configs and stops the trace
+    # filling up with `semantic / semantic / semantic` lines.
+    seen: dict[str, tuple[RetrievalConfig, Scorecard]] = {}
 
     def run_eval(
         strategy: str = DEFAULT_OPTIMIZE_STRATEGY,
@@ -209,6 +218,15 @@ def optimize_retrieval(
             if fuse is not None:
                 cfg_dict["fuse"] = fuse
             cfg = RetrievalConfig.from_dict(cfg_dict)
+            fingerprint = _config_fingerprint(cfg)
+            if fingerprint in seen:
+                prior_card = seen[fingerprint][1]
+                return (
+                    f"already evaluated this exact config on eval "
+                    f"{_index_of(trace, fingerprint) + 1} "
+                    f"(score={prior_card.score:.3f}); pick a different one. "
+                    "Evals left unchanged."
+                )
             retriever = build_retriever(store, cfg, model=rerank_model)
             # One span per eval nests this config's per-question retrieval
             # calls under it in the trace.
@@ -222,6 +240,7 @@ def optimize_retrieval(
             run_log.append(f"[eval attempt] strategy={strategy} unavailable: {exc}")
             return f"config unavailable: {exc}"
         trace.append((cfg.to_dict(), card.score))
+        seen[fingerprint] = (cfg, card)
         if card.score > best["score"]:
             best.update(score=card.score, cfg=cfg, card=card)
         for note in card.notes:  # e.g. a rerank model that refused on N questions
@@ -278,6 +297,23 @@ def optimize_retrieval(
             bank, k=k, max_concurrency=eval_concurrency,
         )
     return OptimizeResult(best_cfg, best_card.score, best_card, trace, notes, log=run_log)
+
+
+def _config_fingerprint(cfg: RetrievalConfig) -> str:
+    """Stable string key for an evaluated config — sorted JSON of `to_dict()`
+    so the dedupe cache treats equivalent dicts as the same entry."""
+    return json.dumps(cfg.to_dict(), sort_keys=True, default=str)
+
+
+def _index_of(
+    trace: list[tuple[dict[str, Any], float]], fingerprint: str
+) -> int:
+    """0-based index in `trace` of the first config matching `fingerprint`.
+    Caller bumps it by 1 for the human-facing "eval N" label."""
+    for i, (cfg_dict, _) in enumerate(trace):
+        if json.dumps(cfg_dict, sort_keys=True, default=str) == fingerprint:
+            return i
+    return -1
 
 
 def _emit_metric_context(store: WikiStore, k: int) -> None:

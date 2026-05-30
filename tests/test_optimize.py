@@ -674,10 +674,19 @@ def test_optimize_reports_epochs(store: WikiStore, bank: QuestionBank) -> None:
 
     def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
         state["n"] += 1
-        if state["n"] <= 2:  # two scored evals, then finish
-            return ModelResponse(
-                parts=[ToolCallPart(tool_name="run_eval", args={"strategy": "lexical"})]
-            )
+        # Two distinct configs so neither is a dedupe no-op — the harness's
+        # cache short-circuits identical evals, which would (correctly) drop
+        # the second on_eval below if we sent the same config twice.
+        if state["n"] == 1:
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="run_eval",
+                args={"strategy": "lexical", "case_insensitive": True},
+            )])
+        if state["n"] == 2:
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="run_eval",
+                args={"strategy": "lexical", "case_insensitive": False},
+            )])
         return ModelResponse(parts=[TextPart("done")])
 
     optimize_retrieval(
@@ -693,6 +702,34 @@ def test_optimize_reports_epochs(store: WikiStore, bank: QuestionBank) -> None:
     assert events[1].best_score >= events[0].best_score  # best is non-decreasing
     assert events[-1].config.strategy == "lexical"
     assert 0.0 <= events[-1].scorecard.score <= 1.0
+
+
+def test_optimize_dedupes_repeat_configs(store: WikiStore, bank: QuestionBank) -> None:
+    """run_eval called with an already-tried config returns the cached
+    scorecard, does NOT consume an eval slot, and does NOT fire on_eval —
+    so the agent can't burn its 12-turn budget asking for the same thing."""
+    events: list[EvalEvent] = []
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        # Same config, twice in a row — second call should be a no-op.
+        if state["n"] <= 2:
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="run_eval",
+                args={"strategy": "lexical", "case_insensitive": True},
+            )])
+        return ModelResponse(parts=[TextPart("done")])
+
+    optimize_retrieval(
+        store,
+        bank,
+        optimizer_model=FunctionModel(optimizer),
+        k=3,
+        max_evals=5,
+        on_eval=events.append,
+    )
+    assert [e.index for e in events] == [1]  # only the first call scored
 
 
 def test_optimize_eval_sample_rescores_winner_on_full_bank(
