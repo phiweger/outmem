@@ -22,7 +22,6 @@ from collections.abc import Coroutine, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # A single, persistent background loop for every sync->async hop in this
 # module. Why this exists: provider clients (OpenAI's httpx-based AsyncOpenAI,
 # Voyage, Cohere, …) cache TCP connections + pool state that's bound to the

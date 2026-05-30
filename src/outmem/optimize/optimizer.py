@@ -249,6 +249,7 @@ def optimize_retrieval(
     )
     # One parent span nests the optimizer's own turns and every per-eval
     # span (and their per-question children) under a single run in the trace.
+    _emit_metric_context(store, k)
     with _span("optimize_retrieval", max_evals=max_evals, k=k):
         run = agent.run_sync(_initial_prompt(bank, k, max_evals))
     notes = str(run.output)
@@ -269,6 +270,26 @@ def optimize_retrieval(
             bank, k=k, max_concurrency=eval_concurrency,
         )
     return OptimizeResult(best_cfg, best_card.score, best_card, trace, notes, log=run_log)
+
+
+def _emit_metric_context(store: WikiStore, k: int) -> None:
+    """Print one line so the user can sanity-check whether Hit@k is
+    informative on their corpus before reading any scores.
+
+    With N pages and cutoff ``k``, the theoretical ceiling is ``min(k,N)/N``
+    — well below 1.0 for big corpora, but ``k=5`` on a 12-page wiki means
+    any retriever that returns its top-k slots covers 42% of the corpus
+    and Hit@k saturates near 1.0. The scores stop distinguishing strategies.
+    A loud-but-cheap warning here saves an honest "score=1.000 is too good
+    to be true" diagnosis after the fact."""
+    try:
+        n = len(store.list_slugs())
+    except Exception:
+        return
+    saturated = n > 0 and k / n > 0.25
+    flag = "  (⚠ Hit@k saturates — k is a large fraction of the corpus)" if saturated else ""
+    sys.stderr.write(f"corpus: {n} pages, k={k}{flag}\n")
+    sys.stderr.flush()
 
 
 def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:
