@@ -441,10 +441,18 @@ def _require_semantic_ready(store: WikiStore) -> None:
 
 def _semantic_pages(store: WikiStore, text: str, *, top_k: int, k: int) -> tuple[str, ...]:
     """Embed ``text``, map the matched chunks to wiki page slugs (dedup to
-    best chunk per page, drop source chunks), and return the top ``k``."""
+    best chunk per page, drop source chunks), and return the top ``k``.
+
+    Bypasses the config ``similarity_threshold`` (passes ``threshold=0.0``):
+    the optimizer's metric is Hit@k, which only cares about rank order, so
+    absolute-similarity filtering would just drop relevant results.
+    Question-vs-chunk cosines for `text-embedding-3-small` typically sit
+    below the 0.8 default tuned for whole-page near-duplicate detection
+    (`find_similar` agent tool's use case). Without this, every match was
+    filtered and scores fell to 0.000."""
     chunk_k = max(top_k, k) * 4  # over-fetch so dedup-to-pages still yields k
     try:
-        matches = store.semantic_find_similar(text, top_k=chunk_k)
+        matches = store.semantic_find_similar(text, top_k=chunk_k, threshold=0.0)
     except OutmemError:
         raise
     except Exception as exc:  # embedder / query error
