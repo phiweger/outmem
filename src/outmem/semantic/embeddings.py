@@ -18,9 +18,44 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Sequence
+from collections.abc import Coroutine, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+
+
+# A single, persistent background loop for every sync->async hop in this
+# module. Why this exists: provider clients (OpenAI's httpx-based AsyncOpenAI,
+# Voyage, Cohere, …) cache TCP connections + pool state that's bound to the
+# event loop they were created on. `asyncio.run` creates a FRESH loop per
+# call and CLOSES it on exit — so the cached client now points at a closed
+# loop, and the next call raises `RuntimeError: Event loop is closed`
+# (bubbled up as `APIConnectionError: Connection error`). One stable loop
+# fixes it. The loop runs on a daemon thread so it never blocks shutdown.
+_loop_lock = threading.Lock()
+_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _shared_loop() -> asyncio.AbstractEventLoop:
+    global _loop
+    with _loop_lock:
+        if _loop is None:
+            loop = asyncio.new_event_loop()
+            threading.Thread(
+                target=loop.run_forever, name="outmem-embed-loop", daemon=True
+            ).start()
+            _loop = loop
+        return _loop
+
+
+def _run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
+    """Run ``coro`` to completion on the shared loop and return its result.
+
+    Safe to call from any thread; raises whatever the coroutine raised.
+    Replaces ``asyncio.run`` for embedder calls — provider async clients
+    cache pool state tied to the loop, so we keep ONE loop alive for the
+    process instead of creating-and-closing one per call.
+    """
+    return asyncio.run_coroutine_threadsafe(coro, _shared_loop()).result()
 
 
 @dataclass
@@ -56,7 +91,7 @@ class EmbedderHandle:
         run the coroutine to completion here. Callers in an async
         context should call ``embed_documents_async`` directly.
         """
-        return asyncio.run(self.embed_documents_async(texts))
+        return _run_sync(self.embed_documents_async(texts))
 
     async def embed_documents_async(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
@@ -99,7 +134,7 @@ class EmbedderHandle:
                 hit = self._query_cache.get(text)
             if hit is not None:
                 return hit
-            vec = asyncio.run(self.embed_query_async(text))
+            vec = _run_sync(self.embed_query_async(text))
             with self._query_lock:
                 self._query_cache[text] = vec
                 # Drop the per-key lock — keeping per-text locks around
@@ -155,7 +190,7 @@ def build_embedder(model: str | Any = "openai:text-embedding-3-small") -> Embedd
 
     embedding_model = Embedder(model)._model
     embedding_model = _maybe_instrument(embedding_model)
-    probe = asyncio.run(embedding_model.embed("probe", input_type="query"))
+    probe = _run_sync(embedding_model.embed("probe", input_type="query"))
     dimensions = len(probe.embeddings[0])
     model_name = probe.model_name
     return EmbedderHandle(

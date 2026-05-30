@@ -374,7 +374,13 @@ class VectorStore:
                 prepared.append((rel_path, content_hash, kind, chunks))
 
         if prepared:
-            vectors_by_path = asyncio.run(self._embed_batch(prepared, max_concurrency))
+            # Route through the shared loop in semantic.embeddings — provider
+            # async clients cache pool state tied to a loop, so we can't create
+            # a fresh loop per reindex (each closure would invalidate the
+            # client on subsequent calls; see `_run_sync` for the full story).
+            from outmem.semantic.embeddings import _run_sync
+
+            vectors_by_path = _run_sync(self._embed_batch(prepared, max_concurrency))
             # Phase 3 — serial writes. Per-file embed failures (from phase 2)
             # arrive as exceptions in vectors_by_path; record an error result
             # and skip the commit so other files still land.
