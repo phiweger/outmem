@@ -277,11 +277,12 @@ def _emit_metric_context(store: WikiStore, k: int) -> None:
     informative on their corpus before reading any scores.
 
     With N pages and cutoff ``k``, the theoretical ceiling is ``min(k,N)/N``
-    — well below 1.0 for big corpora, but ``k=5`` on a 12-page wiki means
-    any retriever that returns its top-k slots covers 42% of the corpus
-    and Hit@k saturates near 1.0. The scores stop distinguishing strategies.
+    — well below 1.0 for big corpora, but on a 12-page wiki any retriever
+    that returns 4+ top slots already covers a third of the corpus and
+    Hit@k saturates near 1.0. The scores stop distinguishing strategies.
     A loud-but-cheap warning here saves an honest "score=1.000 is too good
-    to be true" diagnosis after the fact."""
+    to be true" diagnosis after the fact. (Default ``k=1`` already dodges
+    this on tiny corpora; the warning catches overrides.)"""
     try:
         n = len(store.list_slugs())
     except Exception:

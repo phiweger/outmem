@@ -79,7 +79,7 @@ DEFAULT_OPTIMIZE_SEMANTIC_TOP_K = 8         # neighbours for semantic / hybrid
 DEFAULT_OPTIMIZE_RRF_K = 60                 # Reciprocal Rank Fusion constant
 DEFAULT_OPTIMIZE_PER_PAGE = 2               # generated questions per page
 DEFAULT_OPTIMIZE_CONCURRENCY = 8            # in-flight model calls (gen + eval)
-DEFAULT_OPTIMIZE_K = 5                      # Hit@k cutoff
+DEFAULT_OPTIMIZE_K = 1                      # Hit@k cutoff (k=1 stays discriminative on small wikis)
 DEFAULT_OPTIMIZE_MAX_EVALS = 12             # optimizer turn budget
 DEFAULT_OPTIMIZE_MAX_FAILURES_SHOWN = 6     # failing questions shown per eval
 DEFAULT_OPTIMIZE_UNANSWERABLE_LIMIT = 20    # gap-log questions harvested

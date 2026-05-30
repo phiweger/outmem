@@ -411,8 +411,8 @@ result.log           # diagnostics: errors/fallbacks during the run (why + which
 Entry-point signatures:
 
 - `generate_bank(store, *, model, per_page=2, slugs=None, max_pages=None, include_unanswerable=True, max_concurrency=8, on_progress=None) -> QuestionBank`
-- `optimize_retrieval(store, bank, *, optimizer_model, rerank_model=None, k=5, eval_concurrency=8, eval_sample=None, max_evals=12, on_eval=None) -> OptimizeResult`
-- `evaluate(retriever, bank, *, k=5, max_concurrency=8, sample=None) -> Scorecard` — `.score`, `.hit_at_k`, `.abstention`, `.failures`, `.mean_latency_ms`, `.p95_latency_ms`; each entry in `.results` is a `QuestionResult` with `.latency_ms` for per-question wall-clock.
+- `optimize_retrieval(store, bank, *, optimizer_model, rerank_model=None, k=1, eval_concurrency=8, eval_sample=None, max_evals=12, on_eval=None) -> OptimizeResult`
+- `evaluate(retriever, bank, *, k=1, max_concurrency=8, sample=None) -> Scorecard` — `.score`, `.hit_at_k`, `.abstention`, `.failures`, `.mean_latency_ms`, `.p95_latency_ms`; each entry in `.results` is a `QuestionResult` with `.latency_ms` for per-question wall-clock.
 
 Progress prints to stderr by default: a page counter for `generate_bank`,
 and one epoch line per eval for `optimize_retrieval`
