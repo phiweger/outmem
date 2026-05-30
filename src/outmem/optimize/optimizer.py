@@ -83,8 +83,15 @@ _OPTIMIZER_SYSTEM_PROMPT = (
     "WHY retrieval missed (wrong keywords? paraphrase the lexical block "
     "can't match? a reranker discarding the right page?). Form a hypothesis, "
     "try the next config, keep what the score rewards. Don't brute-force the "
-    "grid — move deliberately. Stop when the score plateaus or your eval "
-    "budget is spent, then summarise what worked and why."
+    "grid — move deliberately.\n\n"
+    "Cover the strategy families before declaring a winner: at minimum try "
+    "one of {lexical, bm25}, one of {semantic, hyde}, and one hybrid fuse. "
+    "A perfect score on the first or second eval is almost always a small-"
+    "sample illusion (10 questions, score=1.000 has a 95% CI lower bound of "
+    "~0.69) — keep going to see whether a cheaper/faster strategy ties it, "
+    "or whether a different family actually wins on a tighter sample. "
+    "Stop early only when several distinct strategies have plateaued at "
+    "similar scores, or when the budget is spent."
 )
 
 _MODEL_SETTINGS: dict[str, Any] = {
@@ -230,7 +237,8 @@ def optimize_retrieval(
             ),
         )
         return _format_card(cfg, card, remaining=max_evals - len(trace),
-                            max_failures_shown=max_failures_shown)
+                            max_failures_shown=max_failures_shown,
+                            eval_sample=eval_sample)
 
     def read_page(slug: str) -> str:
         """Read a wiki page's body (truncated) to diagnose why retrieval
@@ -347,7 +355,12 @@ def _report_eval(on_eval: Callable[[EvalEvent], None] | None, event: EvalEvent) 
 
 
 def _format_card(
-    cfg: RetrievalConfig, card: Scorecard, *, remaining: int, max_failures_shown: int
+    cfg: RetrievalConfig,
+    card: Scorecard,
+    *,
+    remaining: int,
+    max_failures_shown: int,
+    eval_sample: int | None,
 ) -> str:
     lines = [
         f"score={card.score:.3f}  hit@{card.k}={card.hit_at_k:.3f}  "
@@ -366,5 +379,16 @@ def _format_card(
                 f"  [{kind}] Q={r.question!r} gold={gold} got={list(r.retrieved[:card.k])}"
             )
     else:
-        lines.append("no failures.")
+        # A perfect score on a small sample is almost always sample noise,
+        # not a real ceiling — surface that to the agent so it doesn't
+        # early-stop on the first config that hits 1.000.
+        if eval_sample is not None and eval_sample < 30 and card.score >= 0.99:
+            lines.append(
+                f"no failures, but eval_sample={eval_sample} is small — "
+                "a perfect score here is sample-noise-limited (95% CI lower "
+                "bound ~0.69 at n=10). Try other strategy families to see if "
+                "they tie at lower cost/latency before declaring a winner."
+            )
+        else:
+            lines.append("no failures.")
     return "\n".join(lines)
