@@ -252,7 +252,15 @@ class RetrievalSettings:
     Lives in a separate ``retrieval.yaml`` next to ``config.yaml`` (not
     in ``config.yaml`` itself) so an ``outmem optimize`` write doesn't
     touch user-curated config and so the existence of the file is itself
-    a signal that the wiki has been tuned.
+    a signal that the wiki has been tuned. When ``retrieval.yaml`` is
+    present it is authoritative and self-contained — it fully replaces any
+    ``retrieval:`` block in ``config.yaml`` rather than merging with it, so
+    a field you omit reverts to the default, not to the config.yaml value.
+
+    For ``rerank``, the source can be written either inline in the
+    strategy (``strategy: rerank(semantic)``) or as a sibling field
+    (``strategy: rerank`` + ``rerank_source: semantic``) — both resolve to
+    the same pipeline.
 
     Mirrors the YAML block::
 
@@ -423,7 +431,13 @@ def load_yaml_config(wiki_root: Path) -> OutmemConfig:
     if overlay is not None:
         block = overlay.get("retrieval")
         if isinstance(block, dict):
-            _apply_retrieval_block(config.retrieval, block)
+            # retrieval.yaml is authoritative and self-contained: reset to
+            # defaults first so the file fully defines the pipeline and
+            # nothing (e.g. a stale `from_optimization: true` or a tuned
+            # `semantic_top_k`) leaks in from config.yaml's retrieval block.
+            # strict=True: a typo in the optimizer's own home is loud.
+            config.retrieval = RetrievalSettings()
+            _apply_retrieval_block(config.retrieval, block, strict=True)
     return config
 
 
@@ -559,33 +573,77 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
 
     retrieval_block = data.get("retrieval")
     if isinstance(retrieval_block, dict):
-        _apply_retrieval_block(config.retrieval, retrieval_block)
+        # config.yaml follows the forgiving-load contract — a bad strategy
+        # here warns and falls back rather than crashing the open.
+        _apply_retrieval_block(config.retrieval, retrieval_block, strict=False)
 
     return config
 
 
-def _apply_retrieval_block(target: RetrievalSettings, block: dict[str, Any]) -> None:
+def _is_int(value: Any) -> bool:
+    """True for a real int, excluding bool.
+
+    ``bool`` is a subclass of ``int`` in Python, so a YAML ``true`` (or
+    ``yes``/``on`` under YAML 1.1) would otherwise satisfy an
+    ``isinstance(x, int)`` guard and silently set a numeric knob to 1/0.
+    Mirrors the ``not isinstance(..., bool)`` defence already used for
+    ``semantic.similarity_threshold``."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _apply_retrieval_block(
+    target: RetrievalSettings, block: dict[str, Any], *, strict: bool = True
+) -> None:
     """Mutate ``target`` with values from a YAML ``retrieval:`` block.
 
-    Validates ``strategy`` against the DSL eagerly (a typo crashes the
-    load with a clear error rather than silently picking the default).
-    Other knobs are tolerant: bad types are ignored so a fat-fingered
-    field doesn't take down the whole load."""
-    from outmem.optimize.dsl import parse_strategy  # avoid import cycle at load time
+    ``strict`` selects how a bad ``strategy`` DSL string is handled:
+
+    * ``True`` — the ``retrieval.yaml`` overlay, the optimizer's home,
+      where a typo should be loud: re-raise the :class:`OutmemError`.
+    * ``False`` — a ``retrieval:`` block embedded in ``config.yaml``,
+      which follows that file's forgiving-load contract: log a warning
+      and leave ``strategy`` untouched rather than crash every
+      ``WikiStore.open`` on one typo.
+
+    Non-strategy knobs are always tolerant — a bad type is ignored so one
+    fat-fingered field doesn't take down the load.
+
+    A bare ``rerank_source:`` key is folded into ``strategy`` (``strategy:
+    rerank`` + ``rerank_source: semantic`` ⇒ ``rerank(semantic)``), so the
+    field a user naturally reaches for from the optimizer's ``run_eval``
+    surface actually takes effect instead of being silently dropped. The
+    stored ``strategy`` is canonicalised through the DSL round-trip, so
+    ``bm25 + semantic`` lands as ``bm25+semantic``."""
+    # Lazy import avoids a config <-> optimize import cycle at load time.
+    from outmem.exceptions import OutmemError
+    from outmem.optimize.dsl import format_strategy, parse_strategy
 
     if "strategy" in block:
-        spec = block["strategy"]
-        parse_strategy(spec)  # raises OutmemError on bad DSL — let it bubble
-        target.strategy = str(spec).strip().lower()
+        spec = str(block["strategy"]).strip().lower()
+        source = block.get("rerank_source")
+        if spec == "rerank" and isinstance(source, str):
+            spec = f"rerank({source.strip().lower()})"
+        try:
+            # Round-trip through the DSL: validates, and stores the
+            # canonical form a save() would write.
+            target.strategy = format_strategy(parse_strategy(spec))
+        except OutmemError:
+            if strict:
+                raise
+            log.warning(
+                "Ignoring invalid retrieval.strategy %r in config.yaml; "
+                "keeping %r",
+                block["strategy"], target.strategy,
+            )
     if isinstance(block.get("from_optimization"), bool):
         target.from_optimization = block["from_optimization"]
-    if isinstance(block.get("semantic_top_k"), int):
+    if _is_int(block.get("semantic_top_k")):
         target.semantic_top_k = block["semantic_top_k"]
-    if isinstance(block.get("rrf_k"), int):
+    if _is_int(block.get("rrf_k")):
         target.rrf_k = block["rrf_k"]
-    if isinstance(block.get("max_candidates"), int):
+    if _is_int(block.get("max_candidates")):
         target.max_candidates = block["max_candidates"]
-    if isinstance(block.get("max_relevant"), int):
+    if _is_int(block.get("max_relevant")):
         target.max_relevant = block["max_relevant"]
     if isinstance(block.get("rerank_model"), str):
         target.rerank_model = block["rerank_model"]

@@ -384,6 +384,14 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             )
         return "\n".join(lines)
 
+    # Cache the built retriever per strategy across find_pages calls. For
+    # bm25 (the default) construction re-reads every page off disk and
+    # builds an FTS5 table — paying that once per agent process instead of
+    # once per tool call is the difference between O(turns·N) and O(N)
+    # page reads. Keyed by strategy so a mid-session retrieval.yaml save
+    # (which updates store.config) transparently rebuilds.
+    _retriever_cache: dict[str, Any] = {}
+
     def find_pages(question: str, k: int = 5) -> str:
         """Find the wiki pages most likely to answer a question.
 
@@ -407,21 +415,32 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             k: Number of pages to return (default 5).
         """
         _log_call("find_pages", question=question, k=k)
+        strategy = store.config.outmem.retrieval.strategy
         try:
             from outmem.optimize.blocks import build_retriever_from_settings
 
-            retriever = build_retriever_from_settings(store)
+            retriever = _retriever_cache.get(strategy)
+            if retriever is None:
+                retriever = build_retriever_from_settings(store)
+                _retriever_cache[strategy] = retriever
             result = retriever.retrieve(question, k=k)
-        except OutmemError as exc:  # e.g. semantic strategy w/ empty index
-            _log_error("find_pages", exc)
-            return f"(find_pages failed: {exc})"
-        except Exception as exc:  # build error (missing extras etc.)
+        except (OutmemError, ImportError) as exc:
+            # Expected, recoverable failures: a semantic strategy with the
+            # index disabled (OutmemError) or an optional extra not
+            # installed (ImportError). Surface as a tool result. Anything
+            # else (TypeError, AttributeError, …) is a real bug — let it
+            # propagate so tests and Logfire see it instead of the agent
+            # swallowing it as a string.
             _log_error("find_pages", exc)
             return f"(find_pages failed: {exc})"
         if not result.slugs:
+            # Carry the retriever's diagnostic (e.g. a hyde generation
+            # failure that forced a raw-question fallback) onto the
+            # no-match path too, so the agent learns *why* it got nothing.
+            note = f" ({result.note})" if result.note else ""
             return (
                 "(no pages matched — try rephrasing or `search_wiki` "
-                "for surgical keyword matches)"
+                f"for surgical keyword matches){note}"
             )
         lines: list[str] = []
         for slug in result.slugs:

@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import yaml
 
 from outmem.config import (
     ANTHROPIC_CACHE_WITH_TOOLS,
@@ -72,6 +75,18 @@ class EvalRow:
     p95_latency_ms: float
 
 
+def _eval_row(cfg: RetrievalConfig, card: Scorecard) -> EvalRow:
+    """Project a scored config + its :class:`Scorecard` into one summary row."""
+    return EvalRow(
+        config=cfg,
+        score=card.score,
+        hit_at_k=card.hit_at_k,
+        abstention=card.abstention,
+        mean_latency_ms=card.mean_latency_ms,
+        p95_latency_ms=card.p95_latency_ms,
+    )
+
+
 @dataclass
 class OptimizeResult:
     best_config: RetrievalConfig
@@ -80,10 +95,20 @@ class OptimizeResult:
     trace: list[tuple[dict[str, Any], float]]  # (config, score) in eval order
     notes: str  # the agent's closing rationale (advisory)
     log: list[str] = field(default_factory=list)  # diagnostics (errors/fallbacks)
-    # Per-eval summary rows, in score-descending order for direct table
-    # printing. Distinct from `trace` (which preserves eval order for
-    # dedupe lookups + agent reasoning). ``pick(rank)`` indexes into this.
+    # Per-eval summary rows. `__post_init__` sorts these into the same
+    # score-descending (latency-ascending tiebreak) order the table prints
+    # and `pick(rank)` indexes, so the rank a user reads off
+    # `print_summary()` is exactly what `pick(rank)` / `save(rank)` resolve.
+    # Distinct from `trace`, which preserves eval order for dedupe lookups
+    # and the agent's own reasoning.
     summary: list[EvalRow] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # The optimizer appends rows in eval-arrival order; the leaderboard
+        # is by score. Sort once here so `summary`, `summary_table()`, and
+        # `pick(rank)` share one ordering — otherwise `save(1)` could
+        # persist the first config tried instead of the highest-scoring one.
+        self.summary.sort(key=lambda r: (-r.score, r.mean_latency_ms))
 
     def summary_table(self) -> str:
         """Format the post-run leaderboard as plain text.
@@ -127,15 +152,44 @@ class OptimizeResult:
         """Write the picked config to ``<wiki>/retrieval.yaml`` as a
         ``retrieval:`` block with ``from_optimization: true``.
 
-        Idempotent: overwrites the file. Returns the absolute path
-        written. Pass ``path=`` to override the destination (e.g. for
-        tests). Loading happens automatically next time
-        :func:`outmem.config.load_yaml_config` runs — there is no
-        registration step.
+        Overwrites the file wholesale — ``retrieval.yaml`` is a
+        machine-owned artefact, so any hand-edits or comments in a prior
+        copy are replaced. Returns the absolute path written.
+
+        The write is atomic (temp file + ``os.replace``) and creates the
+        parent directory, so an interrupted save can't leave a truncated
+        file that the next load would reject. A read-only store, or any
+        OS-level write failure, raises :class:`OutmemError` rather than
+        leaking a bare ``OSError``.
+
+        Unless ``path=`` overrides the destination, the in-memory
+        ``store.config.outmem.retrieval`` is refreshed to match what was
+        written, so an :class:`~pydantic_ai.Agent` built from this same
+        ``store`` picks up the new pipeline without a reopen. With a custom
+        ``path=`` (e.g. in tests) the store is left untouched.
         """
         cfg = self.pick(rank)
+        default_dest = path is None
         target = path or (store.root / RETRIEVAL_FILENAME)
-        target.write_text(_render_retrieval_yaml(cfg), encoding="utf-8")
+        if default_dest and store.config.read_only:
+            raise OutmemError(
+                "cannot save retrieval.yaml: store was opened read_only"
+            )
+        text = _render_retrieval_yaml(cfg)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(f"{target.name}.tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, target)
+        except OSError as exc:
+            raise OutmemError(f"failed to write {target}: {exc}") from exc
+        if default_dest:
+            # Keep the live store consistent with what's now on disk. Reload
+            # from the file (single source of truth) rather than mirroring
+            # the render, so this can't drift from `load_yaml_config`.
+            from outmem.config import load_yaml_config
+
+            store.config.outmem.retrieval = load_yaml_config(store.root).retrieval
         return target
 
 
@@ -331,14 +385,7 @@ def optimize_retrieval(
             return f"config unavailable: {exc}"
         trace.append((cfg.to_dict(), card.score))
         seen[fingerprint] = (cfg, card)
-        summary_rows.append(EvalRow(
-            config=cfg,
-            score=card.score,
-            hit_at_k=card.hit_at_k,
-            abstention=card.abstention,
-            mean_latency_ms=card.mean_latency_ms,
-            p95_latency_ms=card.p95_latency_ms,
-        ))
+        summary_rows.append(_eval_row(cfg, card))
         if card.score > best["score"]:
             best.update(score=card.score, cfg=cfg, card=card)
         for note in card.notes:  # e.g. a rerank model that refused on N questions
@@ -385,6 +432,10 @@ def optimize_retrieval(
             build_retriever(store, cfg, model=rerank_model),
             bank, k=k, max_concurrency=eval_concurrency,
         )
+        # Record the fallback eval so `summary`/`pick`/`save` aren't empty —
+        # `best_config` is meaningful here, and a user should be able to
+        # persist it the same way as any other winning row.
+        summary_rows.append(_eval_row(cfg, card))
         return OptimizeResult(
             cfg, card.score, card, trace, notes,
             log=run_log, summary=summary_rows,
@@ -571,28 +622,35 @@ def _format_summary_table(rows: list[EvalRow]) -> str:
 def _render_retrieval_yaml(cfg: RetrievalConfig) -> str:
     """Dump a picked :class:`RetrievalConfig` as ``retrieval.yaml`` text.
 
-    Hand-written (not yaml.safe_dump) so the file format is predictable —
-    a stable shape under git diff, with a leading comment that says where
-    the file came from, and the strategy rendered as the DSL string a
-    human would type (e.g. ``bm25+semantic``, not the expanded
-    ``{strategy: hybrid, fuse: [bm25, semantic]}`` round-trip)."""
+    The body goes through ``yaml.safe_dump`` (``sort_keys=False`` to keep
+    the field order stable under git diff) so any scalar that needs
+    quoting — a model id that parses as a YAML keyword/number, a value
+    with a colon — is escaped correctly rather than emitted raw and
+    silently dropped on reload. ``strategy`` is the DSL string a human
+    would type (``bm25+semantic``, not the expanded ``{strategy: hybrid,
+    fuse: [...]}``). A leading comment records provenance."""
     from outmem.optimize.dsl import format_strategy
 
-    cfg_dict = cfg.to_dict()
-    strategy = format_strategy(cfg_dict)
-    return (
+    block = {
+        "retrieval": {
+            "strategy": format_strategy(cfg.to_dict()),
+            "from_optimization": True,
+            "semantic_top_k": cfg.semantic_top_k,
+            "rrf_k": cfg.rrf_k,
+            "max_candidates": cfg.max_candidates,
+            "max_relevant": cfg.max_relevant,
+            "rerank_model": cfg.rerank_model,
+            "hyde_model": cfg.hyde_model,
+            "case_insensitive": cfg.case_insensitive,
+        }
+    }
+    header = (
         "# Written by `outmem.optimize.OptimizeResult.save(...)`.\n"
-        "# Loaded as an overlay by `outmem.config.load_yaml_config` —\n"
-        "# delete this file or set `from_optimization: false` to revert\n"
-        "# to your hand-tuned config.yaml retrieval block / defaults.\n"
-        "retrieval:\n"
-        f"  strategy: {strategy}\n"
-        "  from_optimization: true\n"
-        f"  semantic_top_k: {cfg.semantic_top_k}\n"
-        f"  rrf_k: {cfg.rrf_k}\n"
-        f"  max_candidates: {cfg.max_candidates}\n"
-        f"  max_relevant: {cfg.max_relevant}\n"
-        f"  rerank_model: {cfg.rerank_model}\n"
-        f"  hyde_model: {cfg.hyde_model}\n"
-        f"  case_insensitive: {str(cfg.case_insensitive).lower()}\n"
+        "# Loaded by `outmem.config.load_yaml_config`; when present this\n"
+        "# file fully defines retrieval. Delete it to revert to config.yaml's\n"
+        "# retrieval block / defaults.\n"
     )
+    body = yaml.safe_dump(
+        block, sort_keys=False, default_flow_style=False, allow_unicode=True
+    )
+    return header + body

@@ -133,7 +133,9 @@ retrieval:
 ```
 
 `strategy` is a controlled-vocabulary DSL string — unsupported values
-raise at load time:
+raise at load time (in `retrieval.yaml`; a bad value in a `config.yaml`
+`retrieval:` block warns and falls back instead, per that file's
+forgiving-load contract):
 
 | string | pipeline |
 | --- | --- |
@@ -147,11 +149,20 @@ raise at load time:
 
 Examples: `bm25+semantic`, `lexical+semantic`, `rerank(semantic)`,
 `bm25+semantic+hyde`. Each leg must be one of
-`lexical`/`bm25`/`semantic`/`hyde`; rerank is not a fuse leg.
+`lexical`/`bm25`/`semantic`/`hyde`; rerank is not a fuse leg. The rerank
+source can be written inline (`strategy: rerank(semantic)`) or as a
+sibling field (`strategy: rerank` + `rerank_source: semantic`).
 
-Kept in a separate file (not in `config.yaml`) so an `outmem optimize`
-save doesn't rewrite user-curated config and so the file's mere
-existence is itself a signal that the wiki was tuned.
+**`retrieval.yaml` is authoritative and self-contained.** When it exists
+it *fully replaces* any `retrieval:` block in `config.yaml` (it does not
+merge) — a field you omit reverts to the default, not to the config.yaml
+value. Delete the file to fall back to config.yaml / defaults. It's kept
+separate so an `outmem optimize` save doesn't rewrite user-curated config,
+and so the file's mere existence signals the wiki was tuned.
+
+Note `semantic_top_k` here is distinct from `semantic.top_k` (which
+governs the `find_similar` tool): `find_pages` with a `semantic`/`hyde`
+strategy uses `retrieval.semantic_top_k`.
 
 ## Sample `.env`
 

@@ -889,9 +889,13 @@ def test_optimize_result_summary_table_and_save(
     assert fresh.strategy == second.strategy
 
 
-def test_optimize_result_pick_rejects_bad_rank(
+def test_optimize_result_fallback_is_pickable(
     store: WikiStore, bank: QuestionBank
 ) -> None:
+    """When the agent never scores a config, the fallback default eval is
+    recorded as a real summary row — so best_config and pick/save agree,
+    and pick(1) returns the (pickable) fallback rather than raising. An
+    out-of-range rank still raises."""
     def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("done")])
 
@@ -899,9 +903,43 @@ def test_optimize_result_pick_rejects_bad_rank(
         store, bank, optimizer_model=FunctionModel(optimizer),
         k=1, max_evals=2,
     )
-    # No evals ran (agent stopped immediately), so summary is empty.
+    assert len(result.summary) == 1
+    assert result.pick(1) == result.best_config
     with pytest.raises(OutmemError):
-        result.pick(1)
+        result.pick(2)  # out of range
+
+
+def test_optimize_pick_matches_printed_leaderboard_rank() -> None:
+    """Regression for the rank-inversion bug: pick(rank) must resolve the
+    SAME row the leaderboard prints at that rank, even though the optimizer
+    appends rows in eval-arrival order. Built directly (deterministic, no
+    fixture-scoring dependence): a low-scoring config is appended FIRST,
+    yet pick(1) must return the high-scoring one."""
+    from outmem.optimize.bench import Scorecard
+    from outmem.optimize.optimizer import EvalRow, OptimizeResult
+
+    loser = RetrievalConfig(strategy="lexical")
+    winner = RetrievalConfig(strategy="bm25")
+    rows = [  # appended in eval order: loser first
+        EvalRow(loser, score=0.40, hit_at_k=0.40, abstention=0.0,
+                mean_latency_ms=5.0, p95_latency_ms=6.0),
+        EvalRow(winner, score=0.90, hit_at_k=0.90, abstention=0.0,
+                mean_latency_ms=3.0, p95_latency_ms=4.0),
+    ]
+    card = Scorecard(
+        score=0.90, hit_at_k=0.90, abstention=0.0, k=1,
+        n_answerable=1, n_unanswerable=0, results=(),
+    )
+    result = OptimizeResult(
+        best_config=winner, best_score=0.90, scorecard=card,
+        trace=[], notes="", summary=list(rows),
+    )
+    # __post_init__ sorted the summary score-desc; rank 1 is the winner.
+    assert result.pick(1) is winner
+    assert result.pick(2) is loser
+    # And the printed table leads with the winner, not the first-evaluated.
+    first_body_line = result.summary_table().splitlines()[2]
+    assert "bm25" in first_body_line
 
 
 def test_retrieval_yaml_overlay_overrides_config(tmp_path: Path) -> None:
@@ -933,6 +971,147 @@ def test_retrieval_yaml_rejects_bad_strategy_loudly(tmp_path: Path) -> None:
     )
     with pytest.raises(OutmemError):
         load_yaml_config(tmp_path)
+
+
+def test_config_yaml_bad_strategy_is_lenient(tmp_path: Path) -> None:
+    """A bad strategy in config.yaml's retrieval block follows the
+    forgiving-load contract: warn + keep the default, NOT crash the open
+    (unlike the retrieval.yaml overlay, which is loud)."""
+    from outmem.config import load_yaml_config
+
+    (tmp_path / "config.yaml").write_text(
+        "retrieval:\n  strategy: not-a-strategy\n", encoding="utf-8",
+    )
+    settings = load_yaml_config(tmp_path).retrieval  # must not raise
+    assert settings.strategy == "bm25"  # default preserved
+
+
+def test_retrieval_numeric_knobs_reject_bool(tmp_path: Path) -> None:
+    """`semantic_top_k: true` must NOT slip through as 1 (bool is an int
+    subclass). The knob keeps its default."""
+    from outmem.config import load_yaml_config
+
+    (tmp_path / "retrieval.yaml").write_text(
+        "retrieval:\n  strategy: bm25\n  semantic_top_k: true\n"
+        "  max_candidates: false\n",
+        encoding="utf-8",
+    )
+    settings = load_yaml_config(tmp_path).retrieval
+    assert settings.semantic_top_k != 1  # default, not coerced True→1
+    assert settings.max_candidates != 0  # default, not coerced False→0
+
+
+def test_retrieval_rerank_source_field_folds_into_strategy(tmp_path: Path) -> None:
+    """`strategy: rerank` + `rerank_source: semantic` resolves to the same
+    pipeline as `strategy: rerank(semantic)` instead of being dropped."""
+    from outmem.config import load_yaml_config
+
+    (tmp_path / "retrieval.yaml").write_text(
+        "retrieval:\n  strategy: rerank\n  rerank_source: semantic\n",
+        encoding="utf-8",
+    )
+    settings = load_yaml_config(tmp_path).retrieval
+    assert settings.strategy == "rerank(semantic)"
+
+
+def test_retrieval_strategy_canonicalised_on_load(tmp_path: Path) -> None:
+    """A hand-written `bm25 + semantic` (spaces) is stored canonical."""
+    from outmem.config import load_yaml_config
+
+    (tmp_path / "retrieval.yaml").write_text(
+        "retrieval:\n  strategy: BM25 + Semantic\n", encoding="utf-8",
+    )
+    assert load_yaml_config(tmp_path).retrieval.strategy == "bm25+semantic"
+
+
+def test_retrieval_yaml_overlay_is_full_replace(tmp_path: Path) -> None:
+    """retrieval.yaml fully replaces config.yaml's retrieval block — a
+    stale `from_optimization: true` or tuned knob in config.yaml does NOT
+    leak through a fresh overlay that omits it."""
+    from outmem.config import load_yaml_config
+
+    (tmp_path / "config.yaml").write_text(
+        "retrieval:\n  from_optimization: true\n  semantic_top_k: 12\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "retrieval.yaml").write_text(
+        "retrieval:\n  strategy: bm25\n", encoding="utf-8",
+    )
+    settings = load_yaml_config(tmp_path).retrieval
+    assert settings.strategy == "bm25"
+    assert settings.from_optimization is False  # did not leak from config.yaml
+    assert settings.semantic_top_k == 8  # default, did not leak
+
+
+def test_save_refreshes_in_memory_store(
+    store: WikiStore, bank: QuestionBank
+) -> None:
+    """save(rank, store) updates store.config.outmem.retrieval in place, so
+    an agent built from the same store sees the picked strategy without a
+    reopen."""
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        if state["n"] == 1:
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="run_eval", args={"strategy": "lexical"})])
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store, bank, optimizer_model=FunctionModel(optimizer),
+        k=1, max_evals=2,
+    )
+    assert store.config.outmem.retrieval.from_optimization is False
+    result.save(1, store)
+    assert store.config.outmem.retrieval.from_optimization is True
+    assert store.config.outmem.retrieval.strategy == result.pick(1).strategy
+
+
+def test_save_atomic_creates_parent(
+    store: WikiStore, bank: QuestionBank, tmp_path: Path
+) -> None:
+    """save() to a nested path creates the parent dir (no FileNotFoundError)
+    and leaves no .tmp sidecar behind."""
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store, bank, optimizer_model=FunctionModel(optimizer),
+        k=1, max_evals=1,
+    )
+    dest = tmp_path / "nested" / "sub" / "retrieval.yaml"
+    written = result.save(1, store, path=dest)
+    assert written == dest and dest.exists()
+    assert not (dest.parent / f"{dest.name}.tmp").exists()
+
+
+def test_save_rejects_unparseable_roundtrip_via_format_guard() -> None:
+    """format_strategy refuses to render a hybrid whose legs aren't DSL
+    atomics (e.g. a 'rerank' leg) — so save() can never write a
+    retrieval.yaml that the next load would reject."""
+    from outmem.optimize.dsl import format_strategy
+
+    with pytest.raises(OutmemError):
+        format_strategy({"strategy": "hybrid", "fuse": ["rerank", "semantic"]})
+
+
+def test_fuse_rejects_rerank_leg() -> None:
+    """RetrievalConfig.from_dict rejects 'rerank' as a fuse leg at the
+    source, so the optimizer can never score/pick a bricking config."""
+    with pytest.raises(OutmemError):
+        RetrievalConfig.from_dict({"strategy": "hybrid", "fuse": ["rerank", "bm25"]})
+
+
+def test_dsl_vocab_no_drift() -> None:
+    """Single source of truth: the DSL atomic vocabulary is exactly the
+    retriever atomics minus the rerank gate. If someone adds an atomic to
+    one tuple and not the other, this fails (preventing optimizer-picks
+    the loader can't parse)."""
+    from outmem.optimize.blocks import _ATOMIC_STRATEGIES
+    from outmem.optimize.dsl import _DSL_ATOMICS
+
+    assert set(_DSL_ATOMICS) == set(_ATOMIC_STRATEGIES) - {"rerank"}
 
 
 def test_optimize_eval_sample_rescores_winner_on_full_bank(

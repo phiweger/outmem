@@ -95,8 +95,26 @@ def format_strategy(cfg_dict: dict[str, Any]) -> str:
             raise OutmemError(
                 f"hybrid config has <2 fuse legs: {list(legs)!r}"
             )
+        # Defence-in-depth: a fused config whose legs aren't DSL atomics
+        # (e.g. ``rerank`` as a leg) can't be rendered as a loadable
+        # strategy string — fail loudly at save() rather than write a
+        # ``retrieval.yaml`` that ``parse_strategy`` would later reject and
+        # brick the wiki. The real guard is in ``RetrievalConfig.from_dict``
+        # (rerank is rejected as a fuse leg); this catches anything that
+        # slips a non-DSL leg into a config some other way.
+        bad = [leg for leg in legs if leg not in _DSL_ATOMICS]
+        if bad:
+            raise OutmemError(
+                f"cannot render hybrid legs {bad} as a strategy string: not "
+                f"in the DSL vocabulary {_DSL_ATOMICS}"
+            )
         return "+".join(str(leg) for leg in legs)
     if strategy == "rerank":
         source = cfg_dict.get("rerank_source", "lexical")
+        if source not in _DSL_ATOMICS:
+            raise OutmemError(
+                f"cannot render rerank source {source!r} as a strategy "
+                f"string: not in the DSL vocabulary {_DSL_ATOMICS}"
+            )
         return f"rerank({source})"
     return str(strategy)

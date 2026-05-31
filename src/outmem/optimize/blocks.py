@@ -153,11 +153,18 @@ class RetrievalConfig:
             cfg = replace(cfg, hyde_model=str(data["hyde_model"]))
         if "fuse" in data:
             legs = tuple(str(x).strip().lower() for x in data["fuse"])
-            bad = [x for x in legs if x not in _ATOMIC_STRATEGIES]
+            # Fuse legs are *retrieval sources* whose ranked lists RRF
+            # blends — ``rerank`` is a yes/no gate, not a source, so it's
+            # excluded (same set as ``rerank_source``). This also keeps the
+            # hybrid renderable as a DSL string: dsl._DSL_ATOMICS has no
+            # ``rerank``, so allowing it here would let the optimizer pick a
+            # config that save() then can't write back loadably.
+            allowed = tuple(s for s in _ATOMIC_STRATEGIES if s != "rerank")
+            bad = [x for x in legs if x not in allowed]
             if bad:
                 raise OutmemError(
-                    f"fuse legs {bad} must be atomic strategies "
-                    f"{_ATOMIC_STRATEGIES} (not 'hybrid')"
+                    f"fuse legs {bad} must be retrieval sources {allowed} "
+                    "(not 'hybrid' or 'rerank')"
                 )
             if len(legs) < 2:
                 raise OutmemError("fuse needs at least 2 legs")
