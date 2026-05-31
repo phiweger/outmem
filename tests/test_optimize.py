@@ -775,6 +775,166 @@ def test_optimize_dedupes_repeat_configs(store: WikiStore, bank: QuestionBank) -
     assert [e.index for e in events] == [1]  # only the first call scored
 
 
+# --- strategy DSL ----------------------------------------------------------
+
+
+class TestStrategyDsl:
+    def test_atomic(self) -> None:
+        from outmem.optimize.dsl import parse_strategy
+        for name in ("lexical", "bm25", "semantic", "hyde"):
+            assert parse_strategy(name) == {"strategy": name}
+
+    def test_rerank_default_source(self) -> None:
+        from outmem.optimize.dsl import parse_strategy
+        assert parse_strategy("rerank") == {
+            "strategy": "rerank", "rerank_source": "lexical",
+        }
+
+    def test_rerank_with_source(self) -> None:
+        from outmem.optimize.dsl import parse_strategy
+        assert parse_strategy("rerank(semantic)") == {
+            "strategy": "rerank", "rerank_source": "semantic",
+        }
+
+    def test_hybrid_two_legs(self) -> None:
+        from outmem.optimize.dsl import parse_strategy
+        assert parse_strategy("bm25+semantic") == {
+            "strategy": "hybrid", "fuse": ["bm25", "semantic"],
+        }
+
+    def test_hybrid_three_legs(self) -> None:
+        from outmem.optimize.dsl import parse_strategy
+        assert parse_strategy("lexical+bm25+semantic") == {
+            "strategy": "hybrid", "fuse": ["lexical", "bm25", "semantic"],
+        }
+
+    def test_case_and_whitespace_tolerant(self) -> None:
+        from outmem.optimize.dsl import parse_strategy
+        assert parse_strategy("  BM25  ") == {"strategy": "bm25"}
+        assert parse_strategy("BM25+Semantic") == {
+            "strategy": "hybrid", "fuse": ["bm25", "semantic"],
+        }
+
+    @pytest.mark.parametrize("bad", [
+        "foo",                # not in vocabulary
+        "bm25+rerank",        # rerank is not a fuse leg
+        "rerank(bogus)",      # bogus source
+        "rerank(rerank)",     # no recursion
+        "",                   # empty
+        "+",                  # legs both empty
+        "bm25+bm25",          # duplicate legs
+        "bm25+",              # trailing leg empty
+    ])
+    def test_rejects_garbage(self, bad: str) -> None:
+        from outmem.optimize.dsl import parse_strategy
+        with pytest.raises(OutmemError):
+            parse_strategy(bad)
+
+    def test_format_roundtrip(self) -> None:
+        from outmem.optimize.dsl import format_strategy, parse_strategy
+        for spec in (
+            "bm25", "semantic", "rerank(semantic)", "bm25+semantic",
+            "lexical+bm25+semantic",
+        ):
+            parsed = parse_strategy(spec)
+            base = RetrievalConfig().to_dict()
+            assert format_strategy({**base, **parsed}) == spec
+
+
+# --- summary table + pick + save ------------------------------------------
+
+
+def test_optimize_result_summary_table_and_save(
+    store: WikiStore, bank: QuestionBank, tmp_path: Path
+) -> None:
+    """End-to-end of the post-run UX: the result carries one EvalRow per
+    scored eval, summary_table renders them, pick(rank) returns the
+    config at that rank, save(rank, store) writes retrieval.yaml that
+    a subsequent load_yaml_config picks up."""
+    from outmem.config import RETRIEVAL_FILENAME, load_yaml_config
+
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        if state["n"] == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name="run_eval",
+                args={"strategy": "lexical"})])
+        if state["n"] == 2:
+            return ModelResponse(parts=[ToolCallPart(tool_name="run_eval",
+                args={"strategy": "bm25"})])
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store, bank, optimizer_model=FunctionModel(optimizer),
+        k=1, max_evals=3,
+    )
+
+    assert len(result.summary) == 2
+    table = result.summary_table()
+    assert "score" in table and "hit@k" in table
+    # bm25 + lexical both score; whichever wins is rank 1; the other is rank 2.
+    top = result.pick(1)
+    second = result.pick(2)
+    assert {top.strategy, second.strategy} == {"lexical", "bm25"}
+
+    written = result.save(2, store)
+    assert written.name == RETRIEVAL_FILENAME
+    assert "from_optimization: true" in written.read_text()
+
+    # The loader picks the file up as an overlay; settings now carry the
+    # picked strategy as the DSL string.
+    fresh = load_yaml_config(store.root).retrieval
+    assert fresh.from_optimization is True
+    assert fresh.strategy == second.strategy
+
+
+def test_optimize_result_pick_rejects_bad_rank(
+    store: WikiStore, bank: QuestionBank
+) -> None:
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store, bank, optimizer_model=FunctionModel(optimizer),
+        k=1, max_evals=2,
+    )
+    # No evals ran (agent stopped immediately), so summary is empty.
+    with pytest.raises(OutmemError):
+        result.pick(1)
+
+
+def test_retrieval_yaml_overlay_overrides_config(tmp_path: Path) -> None:
+    """A ``retrieval.yaml`` next to ``config.yaml`` takes precedence over
+    the in-config block — the optimizer's output wins without rewriting
+    user-curated ``config.yaml``."""
+    from outmem.config import load_yaml_config
+
+    (tmp_path / "config.yaml").write_text(
+        "retrieval:\n  strategy: lexical\n", encoding="utf-8",
+    )
+    (tmp_path / "retrieval.yaml").write_text(
+        "retrieval:\n  strategy: bm25+semantic\n  from_optimization: true\n",
+        encoding="utf-8",
+    )
+    settings = load_yaml_config(tmp_path).retrieval
+    assert settings.strategy == "bm25+semantic"
+    assert settings.from_optimization is True
+
+
+def test_retrieval_yaml_rejects_bad_strategy_loudly(tmp_path: Path) -> None:
+    """A typo in ``retrieval.strategy`` raises at load-time instead of
+    silently falling back — the user's intent (a tuned pipeline) must
+    not be silently replaced with the default."""
+    from outmem.config import load_yaml_config
+
+    (tmp_path / "retrieval.yaml").write_text(
+        "retrieval:\n  strategy: bm25+rerank\n", encoding="utf-8",
+    )
+    with pytest.raises(OutmemError):
+        load_yaml_config(tmp_path)
+
+
 def test_optimize_eval_sample_rescores_winner_on_full_bank(
     store: WikiStore, bank: QuestionBank
 ) -> None:

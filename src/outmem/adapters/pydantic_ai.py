@@ -384,7 +384,59 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             )
         return "\n".join(lines)
 
+    def find_pages(question: str, k: int = 5) -> str:
+        """Find the wiki pages most likely to answer a question.
+
+        The high-level "which pages should I read?" tool. Picks the
+        pipeline configured by the wiki's ``retrieval.strategy`` (see
+        ``retrieval.yaml`` if one exists, else config defaults to
+        ``bm25``). Returns a ranked list of slugs with a short excerpt;
+        call ``read_page`` on the interesting ones to read in full.
+
+        Prefer this over ``search_wiki``/``find_similar`` for
+        question-shaped queries — the configured strategy is the one
+        whose Hit@k was measured on this wiki's question bank. Use
+        ``search_wiki`` only when you need surgical keyword/line-level
+        matches.
+
+        Example:
+            find_pages(question="What's the dose of penicillin for endocarditis?")
+
+        Args:
+            question: Natural-language question to retrieve pages for.
+            k: Number of pages to return (default 5).
+        """
+        _log_call("find_pages", question=question, k=k)
+        try:
+            from outmem.optimize.blocks import build_retriever_from_settings
+
+            retriever = build_retriever_from_settings(store)
+            result = retriever.retrieve(question, k=k)
+        except OutmemError as exc:  # e.g. semantic strategy w/ empty index
+            _log_error("find_pages", exc)
+            return f"(find_pages failed: {exc})"
+        except Exception as exc:  # build error (missing extras etc.)
+            _log_error("find_pages", exc)
+            return f"(find_pages failed: {exc})"
+        if not result.slugs:
+            return (
+                "(no pages matched — try rephrasing or `search_wiki` "
+                "for surgical keyword matches)"
+            )
+        lines: list[str] = []
+        for slug in result.slugs:
+            try:
+                body = store.read(slug).body.replace("\n", " ").strip()
+            except OutmemError:
+                body = ""
+            preview = body[:200] + ("…" if len(body) > 200 else "")
+            lines.append(f"  - [[{slug}]] {preview}")
+        if result.note:
+            lines.append(f"(diagnostics: {result.note})")
+        return "\n".join(lines)
+
     tools: list[WikiTool] = [
+        find_pages,
         search_wiki,
         read_page,
         list_pages,

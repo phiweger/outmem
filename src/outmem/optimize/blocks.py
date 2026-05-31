@@ -44,6 +44,7 @@ from outmem.relevance import judge_relevance
 from outmem.slug import PAGES_DIR, relpath_to_slug
 
 if TYPE_CHECKING:
+    from outmem.config import RetrievalSettings
     from outmem.store import WikiStore
 
 
@@ -162,6 +163,35 @@ class RetrievalConfig:
                 raise OutmemError("fuse needs at least 2 legs")
             cfg = replace(cfg, fuse=legs)
         return cfg
+
+
+def build_retriever_from_settings(
+    store: WikiStore, settings: RetrievalSettings | None = None, *, model: Any = None
+) -> Retriever:
+    """Translate a wiki's :class:`RetrievalSettings` into a live retriever.
+
+    The production entry point: ``settings.strategy`` is parsed through the
+    DSL (:mod:`outmem.optimize.dsl`), merged with the rest of the
+    settings, validated by :meth:`RetrievalConfig.from_dict`, and
+    composed with :func:`build_retriever`. When ``settings`` is None we
+    read it off ``store.config.outmem.retrieval`` — the common path from
+    the agent's wiki tools.
+    """
+    from outmem.optimize.dsl import parse_strategy
+
+    if settings is None:
+        settings = store.config.outmem.retrieval
+    cfg_dict: dict[str, Any] = {
+        **parse_strategy(settings.strategy),
+        "semantic_top_k": settings.semantic_top_k,
+        "rrf_k": settings.rrf_k,
+        "max_candidates": settings.max_candidates,
+        "max_relevant": settings.max_relevant,
+        "rerank_model": settings.rerank_model,
+        "hyde_model": settings.hyde_model,
+        "case_insensitive": settings.case_insensitive,
+    }
+    return build_retriever(store, RetrievalConfig.from_dict(cfg_dict), model=model)
 
 
 def build_retriever(

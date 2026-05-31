@@ -112,6 +112,47 @@ logfire:
   enabled: false                          # true + LOGFIRE_TOKEN in env → traces
 ```
 
+### `retrieval.yaml` — what the agent's wiki search runs
+
+Sits next to `config.yaml`. Auto-written by
+`OptimizeResult.save(rank, store)` (see `docs/autoresearch.md`); can also
+be hand-edited. Drives `find_pages` in `wiki_read_tools`.
+
+```yaml
+# retrieval.yaml
+retrieval:
+  strategy: bm25                    # the DSL (see below)
+  from_optimization: false          # true ⇒ written by an optimize run
+  semantic_top_k: 8                 # chunks fetched per semantic/hyde call
+  rrf_k: 60                         # Reciprocal Rank Fusion constant (hybrid)
+  max_candidates: 30                # candidate net width before rerank
+  max_relevant: 8                   # cap on pages the rerank gate keeps
+  rerank_model: anthropic:claude-haiku-4-5
+  hyde_model: anthropic:claude-haiku-4-5
+  case_insensitive: true
+```
+
+`strategy` is a controlled-vocabulary DSL string — unsupported values
+raise at load time:
+
+| string | pipeline |
+| --- | --- |
+| `lexical` | ripgrep, ranked by hit frequency |
+| `bm25` | SQLite FTS5 BM25 (the default) |
+| `semantic` | vector cosine over the index |
+| `hyde` | LLM hypothetical answer → semantic search |
+| `rerank` | shortcut for `rerank(lexical)` |
+| `rerank(<source>)` | LLM yes/no gate over `<source>` candidates |
+| `a+b[+c…]` | Reciprocal Rank Fusion of the named atomic legs |
+
+Examples: `bm25+semantic`, `lexical+semantic`, `rerank(semantic)`,
+`bm25+semantic+hyde`. Each leg must be one of
+`lexical`/`bm25`/`semantic`/`hyde`; rerank is not a fuse leg.
+
+Kept in a separate file (not in `config.yaml`) so an `outmem optimize`
+save doesn't rewrite user-curated config and so the file's mere
+existence is itself a signal that the wiki was tuned.
+
 ## Sample `.env`
 
 ```dotenv

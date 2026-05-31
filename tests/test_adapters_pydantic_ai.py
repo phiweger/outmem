@@ -54,6 +54,7 @@ def _by_name(tools: list, name: str):
 def test_wiki_tools_returns_expected_set(seeded_store: WikiStore) -> None:
     names = [t.__name__ for t in wiki_tools(seeded_store)]
     assert set(names) == {
+        "find_pages",
         "search_wiki",
         "read_page",
         "list_pages",
@@ -433,6 +434,19 @@ def test_build_consult_wiki_missing_path_raises(tmp_path: Path) -> None:
 
     with pytest.raises(OutmemError, match="does not exist"):
         build_consult_wiki(tmp_path / "nope", model=TestModel())
+
+
+def test_find_pages_uses_configured_strategy(seeded_store: WikiStore) -> None:
+    """``find_pages`` reads ``RetrievalSettings`` and ranks via the
+    configured pipeline (default: bm25). Returns slugs the agent can
+    then ``read_page`` on. Regression for the optimizer→production
+    seam: the optim's picked config must actually change what the
+    agent's search tool returns."""
+    tools = wiki_read_tools(seeded_store)
+    find_pages = _by_name(tools, "find_pages")
+    out = find_pages(question="cost-plus pricing formula", k=3)
+    # Returns slug-citation lines; the seeded fixture has a pricing page.
+    assert "[[" in out and "]]" in out
 
 
 def test_wiki_read_tools_includes_find_similar_when_semantic_enabled(

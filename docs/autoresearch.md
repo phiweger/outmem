@@ -191,6 +191,28 @@ an unavailable strategy, etc. — so you don't have to scrape stderr. (At
 the per-call level, `relevance_filter`'s `FilterOutcome` carries `.error`
 plus the `.query`/`.candidates_considered` it was processing.)
 
+### Picking a winner
+
+After the run, inspect the leaderboard and persist your pick:
+
+```python
+result.print_summary()        # one-row-per-config table → stderr, ranked by score
+#                            (then by latency for tiebreaks)
+#  #  config                       score  hit@k  abst   ms/q (p95)
+#  -  ---------------------------  -----  -----  -----  ----------
+#  1  semantic                     0.933  0.933  0.000   329 (520)
+#  2  hybrid[bm25+semantic]        0.833  0.833  0.000    59 ( 78)
+#  3  bm25                         0.600  0.600  0.000    55 ( 81)
+
+picked = result.save(2, store)   # write <wiki>/retrieval.yaml (from_optimization: true)
+```
+
+`retrieval.yaml` is the file the agent's wiki search reads next time
+(via `find_pages`); see `docs/configuration.md`. Keep it under version
+control so a `git diff` shows that the wiki was tuned and which pipeline
+it picked. `result.pick(rank)` returns the raw `RetrievalConfig` if you
+prefer to write the file yourself.
+
 ### Cost, scale & logging
 
 Every step is LLM calls, and `rerank`/`hybrid` are the multiplier:

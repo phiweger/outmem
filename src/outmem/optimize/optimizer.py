@@ -27,6 +27,7 @@ import logging
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from outmem.config import (
@@ -42,6 +43,7 @@ from outmem.config import (
     DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
     DEFAULT_OPTIMIZE_STRATEGY,
     DEFAULT_RELEVANCE_MODEL,
+    RETRIEVAL_FILENAME,
 )
 from outmem.exceptions import OutmemError
 from outmem.optimize.bench import Scorecard, evaluate
@@ -54,6 +56,22 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class EvalRow:
+    """One row of the post-run summary table — compact per-eval stats.
+
+    Kept lean (no per-question results) so a 12-eval run holds a dozen
+    of these in memory regardless of bank size, but rich enough to print
+    a useful scorecard and let the user pick a config by rank."""
+
+    config: RetrievalConfig
+    score: float
+    hit_at_k: float
+    abstention: float
+    mean_latency_ms: float
+    p95_latency_ms: float
+
+
 @dataclass
 class OptimizeResult:
     best_config: RetrievalConfig
@@ -62,6 +80,63 @@ class OptimizeResult:
     trace: list[tuple[dict[str, Any], float]]  # (config, score) in eval order
     notes: str  # the agent's closing rationale (advisory)
     log: list[str] = field(default_factory=list)  # diagnostics (errors/fallbacks)
+    # Per-eval summary rows, in score-descending order for direct table
+    # printing. Distinct from `trace` (which preserves eval order for
+    # dedupe lookups + agent reasoning). ``pick(rank)`` indexes into this.
+    summary: list[EvalRow] = field(default_factory=list)
+
+    def summary_table(self) -> str:
+        """Format the post-run leaderboard as plain text.
+
+        One row per scored config, ranked by score then by latency
+        (lower wins). The top row is what :attr:`best_config` already
+        names; ``pick(rank)`` / ``save(rank, ...)`` index in here."""
+        return _format_summary_table(self.summary)
+
+    def print_summary(self, stream: Any = None) -> None:
+        """Print :meth:`summary_table` to ``stream`` (default ``sys.stderr``).
+
+        Matches the optimizer's per-eval progress lines (also stderr) so
+        the table lands in the same stream as the running output."""
+        if stream is None:
+            stream = sys.stderr
+        stream.write(self.summary_table())
+        stream.write("\n")
+        stream.flush()
+
+    def pick(self, rank: int) -> RetrievalConfig:
+        """Return the :class:`RetrievalConfig` at the given 1-based rank
+        in :attr:`summary`. Raises :class:`OutmemError` on out-of-range
+        so callers don't silently get a default config."""
+        if not self.summary:
+            raise OutmemError("no evals were scored — nothing to pick")
+        if not 1 <= rank <= len(self.summary):
+            raise OutmemError(
+                f"rank {rank} out of range; the table has "
+                f"{len(self.summary)} rows (1..{len(self.summary)})"
+            )
+        return self.summary[rank - 1].config
+
+    def save(
+        self,
+        rank: int,
+        store: WikiStore,
+        *,
+        path: Path | None = None,
+    ) -> Path:
+        """Write the picked config to ``<wiki>/retrieval.yaml`` as a
+        ``retrieval:`` block with ``from_optimization: true``.
+
+        Idempotent: overwrites the file. Returns the absolute path
+        written. Pass ``path=`` to override the destination (e.g. for
+        tests). Loading happens automatically next time
+        :func:`outmem.config.load_yaml_config` runs — there is no
+        registration step.
+        """
+        cfg = self.pick(rank)
+        target = path or (store.root / RETRIEVAL_FILENAME)
+        target.write_text(_render_retrieval_yaml(cfg), encoding="utf-8")
+        return target
 
 
 @dataclass(frozen=True)
@@ -162,6 +237,9 @@ def optimize_retrieval(
     trace: list[tuple[dict[str, Any], float]] = []
     best: dict[str, Any] = {"score": -1.0, "cfg": None, "card": None}
     run_log: list[str] = []  # errors / fallbacks, surfaced on OptimizeResult.log
+    # Per-eval summary rows, accumulated for the post-run leaderboard
+    # (`OptimizeResult.summary` / `print_summary` / `pick` / `save`).
+    summary_rows: list[EvalRow] = []
     # Dedupe cache: an agent can wander into the same (strategy, params) twice
     # across 12 turns. Returning the cached scorecard without burning an eval
     # slot keeps the budget for genuinely new configs and stops the trace
@@ -253,6 +331,14 @@ def optimize_retrieval(
             return f"config unavailable: {exc}"
         trace.append((cfg.to_dict(), card.score))
         seen[fingerprint] = (cfg, card)
+        summary_rows.append(EvalRow(
+            config=cfg,
+            score=card.score,
+            hit_at_k=card.hit_at_k,
+            abstention=card.abstention,
+            mean_latency_ms=card.mean_latency_ms,
+            p95_latency_ms=card.p95_latency_ms,
+        ))
         if card.score > best["score"]:
             best.update(score=card.score, cfg=cfg, card=card)
         for note in card.notes:  # e.g. a rerank model that refused on N questions
@@ -299,7 +385,10 @@ def optimize_retrieval(
             build_retriever(store, cfg, model=rerank_model),
             bank, k=k, max_concurrency=eval_concurrency,
         )
-        return OptimizeResult(cfg, card.score, card, trace, notes, log=run_log)
+        return OptimizeResult(
+            cfg, card.score, card, trace, notes,
+            log=run_log, summary=summary_rows,
+        )
 
     best_cfg: RetrievalConfig = best["cfg"]
     best_card: Scorecard = best["card"]
@@ -308,7 +397,10 @@ def optimize_retrieval(
             build_retriever(store, best_cfg, model=rerank_model),
             bank, k=k, max_concurrency=eval_concurrency,
         )
-    return OptimizeResult(best_cfg, best_card.score, best_card, trace, notes, log=run_log)
+    return OptimizeResult(
+        best_cfg, best_card.score, best_card, trace, notes,
+        log=run_log, summary=summary_rows,
+    )
 
 
 def _config_fingerprint(cfg: RetrievalConfig) -> str:
@@ -440,3 +532,67 @@ def _format_card(
         else:
             lines.append("no failures.")
     return "\n".join(lines)
+
+
+def _format_summary_table(rows: list[EvalRow]) -> str:
+    """Render the post-run leaderboard.
+
+    Columns: rank | config | score | hit@k | abstain | ms/q (p95).
+    Ordering: score desc, then mean latency asc (faster wins ties — the
+    practical tiebreaker when two configs hit the same score)."""
+    if not rows:
+        return "(no evals scored)"
+    ranked = sorted(rows, key=lambda r: (-r.score, r.mean_latency_ms))
+    header = ("#", "config", "score", "hit@k", "abst", "ms/q (p95)")
+    body = [
+        (
+            str(i),
+            _describe_config(r.config),
+            f"{r.score:.3f}",
+            f"{r.hit_at_k:.3f}",
+            f"{r.abstention:.3f}",
+            f"{r.mean_latency_ms:.0f} ({r.p95_latency_ms:.0f})",
+        )
+        for i, r in enumerate(ranked, 1)
+    ]
+    cols = list(zip(header, *body, strict=False))
+    widths = [max(len(cell) for cell in col) for col in cols]
+    def fmt_row(cells: tuple[str, ...]) -> str:
+        return "  ".join(cell.ljust(w) for cell, w in zip(cells, widths, strict=False))
+    sep = "  ".join("-" * w for w in widths)
+    lines = [fmt_row(header), sep, *(fmt_row(row) for row in body)]
+    lines.append(
+        "\nPick a row with `result.save(rank, store)` — writes "
+        f"{RETRIEVAL_FILENAME} (from_optimization: true)."
+    )
+    return "\n".join(lines)
+
+
+def _render_retrieval_yaml(cfg: RetrievalConfig) -> str:
+    """Dump a picked :class:`RetrievalConfig` as ``retrieval.yaml`` text.
+
+    Hand-written (not yaml.safe_dump) so the file format is predictable —
+    a stable shape under git diff, with a leading comment that says where
+    the file came from, and the strategy rendered as the DSL string a
+    human would type (e.g. ``bm25+semantic``, not the expanded
+    ``{strategy: hybrid, fuse: [bm25, semantic]}`` round-trip)."""
+    from outmem.optimize.dsl import format_strategy
+
+    cfg_dict = cfg.to_dict()
+    strategy = format_strategy(cfg_dict)
+    return (
+        "# Written by `outmem.optimize.OptimizeResult.save(...)`.\n"
+        "# Loaded as an overlay by `outmem.config.load_yaml_config` —\n"
+        "# delete this file or set `from_optimization: false` to revert\n"
+        "# to your hand-tuned config.yaml retrieval block / defaults.\n"
+        "retrieval:\n"
+        f"  strategy: {strategy}\n"
+        "  from_optimization: true\n"
+        f"  semantic_top_k: {cfg.semantic_top_k}\n"
+        f"  rrf_k: {cfg.rrf_k}\n"
+        f"  max_candidates: {cfg.max_candidates}\n"
+        f"  max_relevant: {cfg.max_relevant}\n"
+        f"  rerank_model: {cfg.rerank_model}\n"
+        f"  hyde_model: {cfg.hyde_model}\n"
+        f"  case_insensitive: {str(cfg.case_insensitive).lower()}\n"
+    )

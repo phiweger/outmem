@@ -36,6 +36,7 @@ from dotenv import find_dotenv, load_dotenv
 log = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "config.yaml"
+RETRIEVAL_FILENAME = "retrieval.yaml"
 
 DEFAULT_MODEL = "anthropic:claude-sonnet-4-6"
 DEFAULT_AGENT_NAME = "outmem agent"
@@ -230,6 +231,51 @@ class LogfireSettings:
 
 
 @dataclass
+class RetrievalSettings:
+    """How the agent's wiki search picks which pages to read.
+
+    ``strategy`` names the pipeline via a small controlled vocabulary
+    (see :mod:`outmem.optimize.dsl`):
+
+    * ``lexical`` / ``bm25`` / ``semantic`` / ``hyde`` — atomic
+    * ``rerank`` or ``rerank(<source>)`` — LLM yes/no gate over a source
+    * ``a+b[+c…]`` (≥2 atomic legs) — RRF-fused hybrid
+
+    Unsupported combinations (``foo``, ``bm25+rerank``, …) raise at load
+    time so a typo doesn't quietly fall back to the default.
+
+    ``from_optimization`` is purely a marker: ``true`` when the block was
+    written by ``OptimizeResult.save(...)``, ``false`` for a hand-edited
+    file. It surfaces in ``git diff`` so a teammate can see whether the
+    current pipeline came from an empirical run or a guess.
+
+    Lives in a separate ``retrieval.yaml`` next to ``config.yaml`` (not
+    in ``config.yaml`` itself) so an ``outmem optimize`` write doesn't
+    touch user-curated config and so the existence of the file is itself
+    a signal that the wiki has been tuned.
+
+    Mirrors the YAML block::
+
+        # retrieval.yaml
+        retrieval:
+          strategy: bm25
+          from_optimization: false
+          semantic_top_k: 8
+          rrf_k: 60
+    """
+
+    strategy: str = "bm25"
+    from_optimization: bool = False
+    semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K
+    rrf_k: int = DEFAULT_OPTIMIZE_RRF_K
+    max_candidates: int = DEFAULT_OPTIMIZE_MAX_CANDIDATES
+    max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT
+    rerank_model: str = DEFAULT_RELEVANCE_MODEL
+    hyde_model: str = DEFAULT_RELEVANCE_MODEL
+    case_insensitive: bool = True
+
+
+@dataclass
 class GitSettings:
     """Resilience knobs for git subprocess operations."""
 
@@ -271,6 +317,7 @@ class OutmemConfig:
     relevance: RelevanceSettings = field(default_factory=RelevanceSettings)
     approval: ApprovalSettings = field(default_factory=ApprovalSettings)
     logfire: LogfireSettings = field(default_factory=LogfireSettings)
+    retrieval: RetrievalSettings = field(default_factory=RetrievalSettings)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -356,29 +403,54 @@ def load_dotenv_if_present(path: Path | None = None) -> bool:
 
 
 def load_yaml_config(wiki_root: Path) -> OutmemConfig:
-    """Parse ``<wiki_root>/config.yaml`` into an :class:`OutmemConfig`.
+    """Parse ``<wiki_root>/config.yaml`` (+ optional ``retrieval.yaml``
+    overlay) into an :class:`OutmemConfig`.
 
-    Returns the all-defaults config when the file is missing or
-    malformed. Logs a warning on malformed YAML so the user knows
-    the file was ignored.
+    Returns the all-defaults config when ``config.yaml`` is missing or
+    malformed. Logs a warning on malformed YAML so the user knows the
+    file was ignored.
+
+    ``retrieval.yaml`` is the home of the optimizer-written
+    ``retrieval:`` block (see :class:`RetrievalSettings`). Kept in a
+    separate file so an ``outmem optimize`` save doesn't rewrite hand-
+    edited ``config.yaml`` and so the file's mere existence is itself
+    a signal that the wiki has been tuned.
     """
-    path = wiki_root / CONFIG_FILENAME
-    if not path.exists():
-        return OutmemConfig()
+    raw = _read_yaml_mapping(wiki_root / CONFIG_FILENAME)
+    config = _config_from_dict(raw) if raw is not None else OutmemConfig()
 
+    overlay = _read_yaml_mapping(wiki_root / RETRIEVAL_FILENAME)
+    if overlay is not None:
+        block = overlay.get("retrieval")
+        if isinstance(block, dict):
+            _apply_retrieval_block(config.retrieval, block)
+    return config
+
+
+def _read_yaml_mapping(path: Path) -> dict[str, Any] | None:
+    """Read a YAML file expected to be a top-level mapping.
+
+    Returns ``None`` on missing / empty / malformed / non-mapping content
+    (each case logged), so the caller falls back to defaults instead of
+    raising. Used for both ``config.yaml`` and ``retrieval.yaml`` — they
+    have the same shape and the same forgiving-load contract.
+    """
+    if not path.exists():
+        return None
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         log.warning("Malformed %s, ignoring: %s", path, exc)
-        return OutmemConfig()
-
+        return None
     if raw is None:
-        return OutmemConfig()
+        return None
     if not isinstance(raw, dict):
-        log.warning("%s must be a YAML mapping, got %s; ignoring", path, type(raw).__name__)
-        return OutmemConfig()
-
-    return _config_from_dict(raw)
+        log.warning(
+            "%s must be a YAML mapping, got %s; ignoring",
+            path, type(raw).__name__,
+        )
+        return None
+    return raw
 
 
 def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
@@ -397,6 +469,7 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
         "relevance",
         "approval",
         "logfire",
+        "retrieval",
     }
     extra = {k: v for k, v in data.items() if k not in known}
 
@@ -484,7 +557,42 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
     ):
         config.logfire.enabled = logfire_block["enabled"]
 
+    retrieval_block = data.get("retrieval")
+    if isinstance(retrieval_block, dict):
+        _apply_retrieval_block(config.retrieval, retrieval_block)
+
     return config
+
+
+def _apply_retrieval_block(target: RetrievalSettings, block: dict[str, Any]) -> None:
+    """Mutate ``target`` with values from a YAML ``retrieval:`` block.
+
+    Validates ``strategy`` against the DSL eagerly (a typo crashes the
+    load with a clear error rather than silently picking the default).
+    Other knobs are tolerant: bad types are ignored so a fat-fingered
+    field doesn't take down the whole load."""
+    from outmem.optimize.dsl import parse_strategy  # avoid import cycle at load time
+
+    if "strategy" in block:
+        spec = block["strategy"]
+        parse_strategy(spec)  # raises OutmemError on bad DSL — let it bubble
+        target.strategy = str(spec).strip().lower()
+    if isinstance(block.get("from_optimization"), bool):
+        target.from_optimization = block["from_optimization"]
+    if isinstance(block.get("semantic_top_k"), int):
+        target.semantic_top_k = block["semantic_top_k"]
+    if isinstance(block.get("rrf_k"), int):
+        target.rrf_k = block["rrf_k"]
+    if isinstance(block.get("max_candidates"), int):
+        target.max_candidates = block["max_candidates"]
+    if isinstance(block.get("max_relevant"), int):
+        target.max_relevant = block["max_relevant"]
+    if isinstance(block.get("rerank_model"), str):
+        target.rerank_model = block["rerank_model"]
+    if isinstance(block.get("hyde_model"), str):
+        target.hyde_model = block["hyde_model"]
+    if isinstance(block.get("case_insensitive"), bool):
+        target.case_insensitive = block["case_insensitive"]
 
 
 def starter_yaml(
