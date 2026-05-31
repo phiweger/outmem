@@ -129,8 +129,20 @@ def evaluate(
         def _run_in_ctx(item: tuple[Question, bool]) -> tuple[QuestionResult, str | None]:
             return ctx.copy().run(_run, item)
 
-        with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+        # NOT a `with` block: ThreadPoolExecutor.__exit__ always does
+        # shutdown(wait=True), which on Ctrl+C joins workers still blocked on
+        # an in-flight embed — those waits can't see the (main-thread-only)
+        # KeyboardInterrupt, so exit hangs. On abort we instead cancel the
+        # shared embed loop's tasks (unblocking the workers' .result()) and
+        # shut down without waiting, so the interrupt propagates promptly.
+        pool = ThreadPoolExecutor(max_workers=max_concurrency)
+        try:
             pairs = list(pool.map(_run_in_ctx, items))  # preserves input order
+            pool.shutdown(wait=True)
+        except BaseException:
+            _cancel_inflight_embeds()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
     else:
         pairs = [_run(it) for it in items]
 
@@ -157,6 +169,17 @@ def evaluate(
         mean_latency_ms=mean_latency,
         p95_latency_ms=p95_latency,
     )
+
+
+def _cancel_inflight_embeds() -> None:
+    """Best-effort: cancel any in-flight embed calls on the shared loop so a
+    Ctrl+C abort doesn't wedge on a worker join. Lazy import keeps bench
+    free of the optional ``semantic`` extra for lexical/bm25-only evals."""
+    try:
+        from outmem.semantic.embeddings import cancel_inflight
+    except ImportError:
+        return
+    cancel_inflight()
 
 
 def _latency_stats(latencies: list[float]) -> tuple[float, float]:

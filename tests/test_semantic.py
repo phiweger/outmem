@@ -113,6 +113,63 @@ def test_hash_text_is_sha256_hex() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared embed loop lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_inflight_unblocks_a_waiting_worker() -> None:
+    """Regression: a worker blocked in ``_run_sync`` on a long embed must be
+    releasable, so a Ctrl+C abort can't wedge ``evaluate``'s ThreadPoolExecutor
+    join (a main-thread KeyboardInterrupt never reaches the worker). Cancelling
+    the shared loop's tasks makes the blocked ``.result()`` raise promptly."""
+    import asyncio
+    import threading
+    import time
+
+    from outmem.semantic.embeddings import _run_sync, cancel_inflight
+
+    async def slow() -> None:
+        await asyncio.sleep(30)  # stand-in for an in-flight network embed
+
+    seen: dict[str, str] = {}
+
+    def worker() -> None:
+        try:
+            _run_sync(slow())
+        except BaseException as exc:  # CancelledError is BaseException in 3.8+
+            seen["exc"] = type(exc).__name__
+
+    t = threading.Thread(target=worker)
+    t.start()
+    time.sleep(0.3)  # let the coroutine register on the loop
+    cancel_inflight()
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "worker stayed blocked after cancel_inflight()"
+    assert seen.get("exc") == "CancelledError"
+
+
+def test_shutdown_loop_stops_the_background_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_shutdown_loop`` (the atexit handler) must actually stop the loop and
+    join its thread within the timeout — so leaving a REPL doesn't stall on
+    an abandoned daemon thread. Isolated from the process-wide shared loop via
+    monkeypatch so it doesn't tear down the loop other tests rely on."""
+    from outmem.semantic import embeddings
+
+    monkeypatch.setattr(embeddings, "_loop", None)
+    monkeypatch.setattr(embeddings, "_loop_thread", None)
+
+    embeddings._shared_loop()  # spin a throwaway loop on a fresh thread
+    thread = embeddings._loop_thread
+    assert thread is not None and thread.is_alive()
+
+    embeddings._shutdown_loop()
+    thread.join(timeout=3.0)
+    assert not thread.is_alive(), "background loop thread outlived _shutdown_loop()"
+
+
+# ---------------------------------------------------------------------------
 # VectorStore
 # ---------------------------------------------------------------------------
 

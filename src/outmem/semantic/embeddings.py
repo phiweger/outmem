@@ -17,6 +17,8 @@ $0.02/M tokens). Any model id PydanticAI accepts works.
 from __future__ import annotations
 
 import asyncio
+import atexit
+import contextlib
 import threading
 from collections.abc import Coroutine, Sequence
 from dataclasses import dataclass, field
@@ -29,20 +31,25 @@ from typing import Any
 # call and CLOSES it on exit — so the cached client now points at a closed
 # loop, and the next call raises `RuntimeError: Event loop is closed`
 # (bubbled up as `APIConnectionError: Connection error`). One stable loop
-# fixes it. The loop runs on a daemon thread so it never blocks shutdown.
+# fixes it. The loop runs on a daemon thread so a crash never wedges exit;
+# we ALSO tear it down deterministically at interpreter exit (see
+# `_shutdown_loop`) so a clean exit doesn't abandon the thread or leak the
+# provider's open connection pool.
 _loop_lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
+_loop_thread: threading.Thread | None = None
 
 
 def _shared_loop() -> asyncio.AbstractEventLoop:
-    global _loop
+    global _loop, _loop_thread
     with _loop_lock:
         if _loop is None:
             loop = asyncio.new_event_loop()
-            threading.Thread(
+            thread = threading.Thread(
                 target=loop.run_forever, name="outmem-embed-loop", daemon=True
-            ).start()
-            _loop = loop
+            )
+            thread.start()
+            _loop, _loop_thread = loop, thread
         return _loop
 
 
@@ -55,6 +62,65 @@ def _run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
     process instead of creating-and-closing one per call.
     """
     return asyncio.run_coroutine_threadsafe(coro, _shared_loop()).result()
+
+
+def cancel_inflight() -> None:
+    """Cancel every task currently running on the shared loop.
+
+    The unblock valve for Ctrl+C. Embed calls run on the background loop
+    while worker threads block in ``run_coroutine_threadsafe(...).result()``;
+    a KeyboardInterrupt only ever hits the main thread, so those workers
+    would otherwise keep waiting and wedge a ``ThreadPoolExecutor`` join.
+    Cancelling the loop's tasks makes each blocked ``.result()`` raise
+    ``CancelledError`` and return promptly. No-op if the loop never started.
+    """
+    loop = _loop
+    if loop is None or not loop.is_running():
+        return
+
+    def _cancel_all() -> None:
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+
+    loop.call_soon_threadsafe(_cancel_all)
+
+
+def _shutdown_loop() -> None:
+    """Stop the background loop and join its thread at interpreter exit.
+
+    Cancels pending tasks, stops ``run_forever``, and joins with a short
+    timeout so a stuck network call can't make exit hang indefinitely.
+    Registered via ``atexit`` — without it the daemon thread (and the
+    provider's open httpx connection pool living on this loop) is abandoned
+    rather than closed, the symptom being a noticeable stall when leaving a
+    long-lived REPL session.
+    """
+    loop, thread = _loop, _loop_thread
+    if loop is None or not loop.is_running():
+        return
+
+    async def _drain() -> None:
+        # Cancel siblings and AWAIT them so the loop processes the
+        # cancellations before it stops — otherwise asyncio warns "Task was
+        # destroyed but it is pending" when the loop is GC'd mid-cancel.
+        current = asyncio.current_task()
+        tasks = [t for t in asyncio.all_tasks(loop) if t is not current]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    # loop already closed, or a task ignored cancellation within the
+    # timeout — either way, stop the loop anyway below.
+    with contextlib.suppress(RuntimeError, TimeoutError):
+        asyncio.run_coroutine_threadsafe(_drain(), loop).result(timeout=1.5)
+    loop.call_soon_threadsafe(loop.stop)
+    if thread is not None:
+        thread.join(timeout=2.0)
+
+
+atexit.register(_shutdown_loop)
+
 
 
 @dataclass
