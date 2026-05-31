@@ -37,6 +37,7 @@ from outmem.config import (
     DEFAULT_OPTIMIZE_MAX_EVALS,
     DEFAULT_OPTIMIZE_MAX_FAILURES_SHOWN,
     DEFAULT_OPTIMIZE_MAX_RELEVANT,
+    DEFAULT_OPTIMIZE_RERANK_SOURCE,
     DEFAULT_OPTIMIZE_RRF_K,
     DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
     DEFAULT_OPTIMIZE_STRATEGY,
@@ -86,7 +87,11 @@ _OPTIMIZER_SYSTEM_PROMPT = (
     "try the next config, keep what the score rewards. Don't brute-force the "
     "grid — move deliberately.\n\n"
     "Cover the strategy families before declaring a winner: at minimum try "
-    "one of {lexical, bm25}, one of {semantic, hyde}, and one hybrid fuse. "
+    "one of {lexical, bm25}, one of {semantic, hyde}, one hybrid fuse, and "
+    "the rerank gate over BOTH a lexical and a semantic candidate source "
+    "(`rerank_source` knob — feeding the LLM yes/no judge a high-recall "
+    "semantic shortlist instead of a keyword net is the actually-good "
+    "rerank pairing on paraphrase-heavy banks). "
     "A perfect score on the first or second eval is almost always a small-"
     "sample illusion (10 questions, score=1.000 has a 95% CI lower bound of "
     "~0.69) — keep going to see whether a cheaper/faster strategy ties it, "
@@ -169,6 +174,7 @@ def optimize_retrieval(
         max_candidates: int = DEFAULT_OPTIMIZE_MAX_CANDIDATES,
         rerank_model_id: str = DEFAULT_RELEVANCE_MODEL,
         max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT,
+        rerank_source: str = DEFAULT_OPTIMIZE_RERANK_SOURCE,
         semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
         rrf_k: int = DEFAULT_OPTIMIZE_RRF_K,
         hyde_model_id: str = DEFAULT_RELEVANCE_MODEL,
@@ -180,14 +186,19 @@ def optimize_retrieval(
         Args:
             strategy: "lexical" (keyword frequency rank), "bm25" (SQLite
                 FTS5 BM25 ranking — no model/index needed), "rerank"
-                (keyword net + cheap-model relevance gate), "semantic"
-                (vector similarity), "hyde" (generate a hypothetical answer,
-                then semantic-search on it — needs a model + the index), or
+                (candidate generator + cheap-model yes/no relevance gate;
+                source picked via `rerank_source`), "semantic" (vector
+                similarity), "hyde" (generate a hypothetical answer, then
+                semantic-search on it — needs a model + the index), or
                 "hybrid" (Reciprocal Rank Fusion of the `fuse` legs).
             case_insensitive: case-fold the keyword search.
-            max_candidates: width of the keyword net before reranking.
+            max_candidates: width of the candidate net before reranking.
             rerank_model_id: model id for the rerank block.
             max_relevant: cap on pages the rerank block keeps.
+            rerank_source: which atomic block builds the rerank candidate
+                shortlist ("lexical","bm25","semantic","hyde"). The classic
+                pairing is "lexical"; the high-recall pairing is "semantic"
+                — try both, they score very differently.
             semantic_top_k: neighbours for the semantic / hyde / hybrid blocks.
             rrf_k: Reciprocal Rank Fusion constant for the hybrid block.
             hyde_model_id: model id the hyde block uses to generate the
@@ -211,6 +222,7 @@ def optimize_retrieval(
                 "max_candidates": max_candidates,
                 "rerank_model": rerank_model_id,
                 "max_relevant": max_relevant,
+                "rerank_source": rerank_source,
                 "semantic_top_k": semantic_top_k,
                 "rrf_k": rrf_k,
                 "hyde_model": hyde_model_id,
@@ -350,12 +362,12 @@ def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:
 
 def _describe_config(cfg: RetrievalConfig) -> str:
     """Compact, human-readable label of which blocks a trial actually used,
-    so the epoch line shows e.g. `hybrid[bm25+semantic]` or `rerank(haiku)`
-    rather than a bare strategy name."""
+    so the epoch line shows e.g. `hybrid[bm25+semantic]` or
+    `rerank[semantic→haiku]` rather than a bare strategy name."""
     if cfg.strategy == "hybrid":
         return f"hybrid[{'+'.join(cfg.fuse)}]"
     if cfg.strategy == "rerank":
-        return f"rerank({_short_model(cfg.rerank_model)})"
+        return f"rerank[{cfg.rerank_source}→{_short_model(cfg.rerank_model)}]"
     if cfg.strategy == "hyde":
         return f"hyde({_short_model(cfg.hyde_model)})"
     return cfg.strategy

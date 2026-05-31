@@ -191,6 +191,15 @@ class TestRetrievalConfig:
         assert RetrievalConfig.from_dict({"case_insensitive": "true"}).case_insensitive is True
         assert RetrievalConfig.from_dict({"case_insensitive": False}).case_insensitive is False
 
+    def test_rerank_source_rejects_rerank(self) -> None:
+        # No recursive rerank-over-rerank — the source must be atomic.
+        with pytest.raises(OutmemError):
+            RetrievalConfig.from_dict({"rerank_source": "rerank"})
+
+    def test_rerank_source_accepts_atomic(self) -> None:
+        cfg = RetrievalConfig.from_dict({"rerank_source": "SEMANTIC"})  # case-fold
+        assert cfg.rerank_source == "semantic"
+
 
 class TestBM25Block:
     def test_ranks_by_relevance(self, store: WikiStore) -> None:
@@ -319,6 +328,40 @@ def test_rerank_block_returns_kept_slugs(store: WikiStore) -> None:
         store, RetrievalConfig(strategy="rerank"), model=model
     )
     assert retriever.retrieve("penicillin dose", k=3).slugs == ("abx:penicillin",)
+
+
+def test_rerank_block_uses_configured_source(
+    store: WikiStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rerank_source="semantic" routes candidates through SemanticRetriever
+    rather than the keyword net, so the LLM judge sees pages the lexical
+    net would never have surfaced."""
+    prefix = f"{store.config.wiki_dir}/pages/"
+
+    def fake_find(text: str, *, top_k: int = 0, **_: Any) -> list[Any]:
+        return [
+            SimpleNamespace(rel_path=f"{prefix}abx/ceftriaxone.md", chunk_index=0,
+                            similarity=0.92, content="…"),
+            SimpleNamespace(rel_path=f"{prefix}abx/penicillin.md", chunk_index=0,
+                            similarity=0.81, content="…"),
+        ]
+
+    monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+    monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
+    monkeypatch.setattr(store, "semantic_find_similar", fake_find)
+
+    model = _rerank_model([{"slug": "abx:penicillin", "reason": "exact match"}])
+    retriever = build_retriever(
+        store,
+        RetrievalConfig(strategy="rerank", rerank_source="semantic"),
+        model=model,
+    )
+    # The query has NO keyword overlap with either page — lexical-source
+    # rerank would return empty, but semantic-source surfaces both pages
+    # and the LLM judge keeps the relevant one.
+    assert retriever.retrieve("how do I treat a bug bite?", k=3).slugs == (
+        "abx:penicillin",
+    )
 
 
 # --- semantic block (wiring tested with a stubbed index) -------------------

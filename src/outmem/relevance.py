@@ -39,7 +39,7 @@ core library has no hard dependency on the optional ``agent`` extra.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -370,6 +370,40 @@ def _run_filter(
         if len(kept) >= max_relevant:
             break
     return kept, usage
+
+
+def judge_relevance(
+    *,
+    model: Any,
+    query: str,
+    candidates: Sequence[tuple[str, str]],
+    max_relevant: int,
+) -> tuple[tuple[str, ...], str | None]:
+    """LLM yes/no relevance gate over pre-built ``(slug, excerpt)`` pairs.
+
+    Decoupled from store/search so retrieval blocks can feed candidates
+    from any source (lexical, bm25, semantic, ...) — not just the keyword
+    net :func:`relevance_filter` builds itself. Returns
+    ``(kept_slugs, error)`` where ``error`` is ``None`` on success or a
+    one-line reason on fallback; on any model failure the kept set is the
+    input slug order (mirroring :func:`relevance_filter`'s lexical
+    fallback) so retrieval never gets WORSE on a filter failure.
+    """
+    if not candidates:
+        return (), None
+    cand_objs = [
+        _Candidate(slug=slug, lines=(), excerpt=excerpt)
+        for slug, excerpt in candidates
+    ]
+    try:
+        kept, _ = _run_filter(model, query, cand_objs, max_relevant)
+        return tuple(p.slug for p in kept), None
+    except Exception as exc:  # mirror relevance_filter's fallback shape
+        reason = _brief_error(exc)
+        log.warning(
+            "judge_relevance failed (%s); falling back to source order", reason
+        )
+        return tuple(slug for slug, _ in candidates)[:max_relevant], reason
 
 
 def _lexical_fallback(candidates: list[_Candidate]) -> list[RelevantPage]:

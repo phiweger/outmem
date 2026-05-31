@@ -404,9 +404,14 @@ result.log           # diagnostics: errors/fallbacks during the run (why + which
 
 `RetrievalConfig` carries `strategy` (`lexical`/`bm25`/`rerank`/`semantic`/
 `hyde`/`hybrid`) plus knobs: `max_candidates`, `max_relevant`,
-`semantic_top_k`, `rrf_k`, `rerank_model`, `hyde_model`, and `fuse` — the
-2+ atomic legs the `hybrid` strategy RRF-fuses (default
+`semantic_top_k`, `rrf_k`, `rerank_model`, `rerank_source`, `hyde_model`,
+and `fuse` — the 2+ atomic legs the `hybrid` strategy RRF-fuses (default
 `("lexical","semantic")`; see [autoresearch.md](autoresearch.md) for leg combos).
+`rerank_source` picks which atomic block feeds candidates to the `rerank`
+LLM gate (any of `lexical`/`bm25`/`semantic`/`hyde`); default `lexical`,
+but `semantic` is the recall-first pairing that lets the gate prune false
+positives from real recall instead of judging a keyword net the gold page
+may not even be in.
 
 Entry-point signatures:
 

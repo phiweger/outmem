@@ -32,13 +32,15 @@ from outmem.config import (
     ANTHROPIC_CACHE_SETTINGS,
     DEFAULT_OPTIMIZE_MAX_CANDIDATES,
     DEFAULT_OPTIMIZE_MAX_RELEVANT,
+    DEFAULT_OPTIMIZE_RERANK_SOURCE,
     DEFAULT_OPTIMIZE_RRF_K,
     DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
     DEFAULT_OPTIMIZE_STRATEGY,
+    DEFAULT_RELEVANCE_CONTEXT_CHARS,
     DEFAULT_RELEVANCE_MODEL,
 )
 from outmem.exceptions import OutmemError
-from outmem.relevance import relevance_filter
+from outmem.relevance import judge_relevance
 from outmem.slug import PAGES_DIR, relpath_to_slug
 
 if TYPE_CHECKING:
@@ -85,6 +87,12 @@ class RetrievalConfig:
     max_candidates: int = DEFAULT_OPTIMIZE_MAX_CANDIDATES  # keyword net width
     rerank_model: str = DEFAULT_RELEVANCE_MODEL
     max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT
+    # Which atomic block feeds candidates to the ``rerank`` strategy. Any
+    # non-rerank atomic name works ("lexical","bm25","semantic","hyde"); the
+    # LLM yes/no gate then judges that pool. "semantic" is the recall-first
+    # pairing — feeds the model a high-recall semantic shortlist instead of
+    # a keyword net the gold page may not even be in.
+    rerank_source: str = DEFAULT_OPTIMIZE_RERANK_SOURCE
     semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K  # semantic / hyde / hybrid
     rrf_k: int = DEFAULT_OPTIMIZE_RRF_K  # Reciprocal Rank Fusion (hybrid block)
     hyde_model: str = DEFAULT_RELEVANCE_MODEL  # generates the hypothetical doc
@@ -100,6 +108,7 @@ class RetrievalConfig:
             "max_candidates": self.max_candidates,
             "rerank_model": self.rerank_model,
             "max_relevant": self.max_relevant,
+            "rerank_source": self.rerank_source,
             "semantic_top_k": self.semantic_top_k,
             "rrf_k": self.rrf_k,
             "hyde_model": self.hyde_model,
@@ -130,6 +139,15 @@ class RetrievalConfig:
             cfg = replace(cfg, rrf_k=_as_int(data["rrf_k"], "rrf_k"))
         if "rerank_model" in data:
             cfg = replace(cfg, rerank_model=str(data["rerank_model"]))
+        if "rerank_source" in data:
+            source = str(data["rerank_source"]).strip().lower()
+            allowed = tuple(s for s in _ATOMIC_STRATEGIES if s != "rerank")
+            if source not in allowed:
+                raise OutmemError(
+                    f"rerank_source {source!r} must be one of {allowed} "
+                    "(no recursive rerank)"
+                )
+            cfg = replace(cfg, rerank_source=source)
         if "hyde_model" in data:
             cfg = replace(cfg, hyde_model=str(data["hyde_model"]))
         if "fuse" in data:
@@ -178,12 +196,19 @@ def _atomic_retriever(
     if strategy == "bm25":
         return BM25Retriever(store)
     if strategy == "rerank":
+        # The rerank block is "wide-recall candidate generator → LLM yes/no
+        # filter." Its source is itself an atomic retriever, usually
+        # `lexical` (keyword net, cheap) or `semantic` (high-recall
+        # shortlist; lets the gate prune false positives from real recall).
+        # Pass `model` through so a test FunctionModel applies to both the
+        # judge AND a model-using source like `hyde`.
+        source = _atomic_retriever(store, config.rerank_source, config, model=model)
         return RerankRetriever(
             store,
             model=model if model is not None else config.rerank_model,
+            source=source,
             max_candidates=config.max_candidates,
             max_relevant=config.max_relevant,
-            case_insensitive=config.case_insensitive,
         )
     if strategy == "semantic":
         return SemanticRetriever(store, top_k=config.semantic_top_k)
@@ -274,9 +299,20 @@ class BM25Retriever:
 
 
 class RerankRetriever:
-    """Wide keyword net → cheap-model relevance gate (the relevance filter
-    as a retrieval block). Returns the kept slugs in filter order; empty
-    when the model judges nothing relevant (a real abstention)."""
+    """Inner-retriever shortlist → cheap-model yes/no gate.
+
+    The recall tier is whichever atomic block is wired in as ``source``
+    (lexical keyword net, bm25, semantic, hyde). The precision tier is a
+    structured LLM call that decides per-page "is this relevant — yes/no"
+    and returns only the yes's. Empty result == a real abstention.
+
+    The classic pairing is ``source=lexical`` (cheap shortlist that the
+    model prunes for precision). The more powerful one — and the one the
+    optimizer should reach for on paraphrase-heavy banks — is
+    ``source=semantic``: feed the gate a high-recall semantic shortlist
+    so it can prune false positives from real recall, instead of judging
+    a keyword net the gold page may not even be in.
+    """
 
     name = "rerank"
 
@@ -285,30 +321,45 @@ class RerankRetriever:
         store: WikiStore,
         *,
         model: Any,
+        source: Retriever,
         max_candidates: int = DEFAULT_OPTIMIZE_MAX_CANDIDATES,
         max_relevant: int = DEFAULT_OPTIMIZE_MAX_RELEVANT,
-        case_insensitive: bool = True,
+        context_chars: int = DEFAULT_RELEVANCE_CONTEXT_CHARS,
     ) -> None:
         self._store = store
         self._model = model
+        self._source = source
         self._max_candidates = max_candidates
         self._max_relevant = max_relevant
-        self._ci = case_insensitive
+        self._context_chars = context_chars
 
     def retrieve(self, question: str, *, k: int) -> RetrievalResult:
-        pattern = _keywords(question)
-        if not pattern:
+        # Ask the source for the wide shortlist (capped at max_candidates).
+        # OutmemError from a source (e.g. semantic with no index) propagates,
+        # so the optimizer marks the config unavailable rather than scoring
+        # a degraded version.
+        shortlist = self._source.retrieve(
+            question, k=max(self._max_candidates, k)
+        ).slugs
+        if not shortlist:
             return RetrievalResult(())
-        outcome = relevance_filter(
-            self._store,
-            query=pattern,
+        excerpts: list[tuple[str, str]] = []
+        for slug in shortlist[:self._max_candidates]:
+            try:
+                body = self._store.read(slug).body
+            except OutmemError:
+                continue
+            excerpts.append((slug, body[:self._context_chars]))
+        if not excerpts:
+            return RetrievalResult(())
+        kept, error = judge_relevance(
             model=self._model,
+            query=question,
+            candidates=excerpts,
             max_relevant=max(k, self._max_relevant),
-            max_candidates=self._max_candidates,
-            case_insensitive=self._ci,
         )
-        note = f"rerank fell back to lexical: {outcome.error}" if outcome.fell_back else None
-        return RetrievalResult(tuple(p.slug for p in outcome.kept)[:k], note=note)
+        note = f"rerank fell back to source order: {error}" if error else None
+        return RetrievalResult(kept[:k], note=note)
 
 
 class SemanticRetriever:

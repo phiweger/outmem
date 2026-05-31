@@ -32,6 +32,7 @@ from outmem.relevance import (
     FilterOutcome,
     RelevanceConfig,
     RelevantPage,
+    judge_relevance,
     relevance_filter,
 )
 from outmem.search import SearchHit
@@ -63,6 +64,7 @@ __all__ = [
     "WikiStoreConfig",
     "WritebackError",
     "__version__",
+    "judge_relevance",
     "relevance_filter",
     "setup_logfire",
 ]

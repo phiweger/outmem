@@ -65,7 +65,7 @@ half of the metric. Shipped blocks:
 | --- | --- | --- |
 | `lexical` | keyword ripgrep, pages ranked by hit frequency | nothing |
 | `bm25` | SQLite FTS5 BM25 (IDF-weighted term ranking) | nothing (FTS5 is built into SQLite) |
-| `rerank` | wide keyword net → relevance-filter gate | a cheap model |
+| `rerank` | candidate generator (`rerank_source`: lexical/bm25/semantic/hyde) → LLM yes/no gate | a cheap model |
 | `semantic` | vector cosine similarity over the index | `semantic` + index |
 | `hyde` | generate a hypothetical answer, then semantic-search on *it* | a model + `semantic` + index |
 | `hybrid` | Reciprocal Rank Fusion of 2+ atomic legs (the `fuse` knob) | depends on the legs |
@@ -75,6 +75,13 @@ half of the metric. Shipped blocks:
 `["semantic","hyde"]` — the last "searches the question and a
 hypothetical answer together", fusing precision and recall. A leg's
 requirements apply (a `semantic`/`hyde` leg needs the index).
+
+`rerank` is composable too via `rerank_source`: the LLM yes/no gate runs
+over whatever atomic block produces the shortlist. The default
+`rerank_source="lexical"` is the cheap "keyword net then prune" pairing;
+`rerank_source="semantic"` is the recall-first pairing that lets the gate
+prune false positives from a high-recall semantic shortlist — the right
+pick when the question paraphrases the page rather than naming it.
 
 To tune with `semantic` / `hyde` / `hybrid` (any block or fuse-leg that
 hits the vector index): `pip install "outmem[semantic]"`, set
