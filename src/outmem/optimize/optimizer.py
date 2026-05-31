@@ -382,6 +382,15 @@ def optimize_retrieval(
         except OutmemError as exc:
             log.info("optimize: skipped strategy=%s (%s)", strategy, exc)
             run_log.append(f"[eval attempt] strategy={strategy} unavailable: {exc}")
+            # Surface on stderr next to the epoch lines (default UI only).
+            # Otherwise a whole family silently vanishing — e.g. semantic /
+            # hyde / semantic-hybrid when the index isn't built — looks like
+            # the agent ignored it, when really every such config was
+            # refused. Seeing "unavailable: index is empty" tells the user to
+            # run `outmem reindex` instead of wondering why no semantic ran.
+            if on_eval is None:
+                sys.stderr.write(f"[skip] {strategy} unavailable: {exc}\n")
+                sys.stderr.flush()
             return f"config unavailable: {exc}"
         trace.append((cfg.to_dict(), card.score))
         seen[fingerprint] = (cfg, card)
@@ -504,15 +513,26 @@ def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:
 
 
 def _describe_config(cfg: RetrievalConfig) -> str:
-    """Compact, human-readable label of which blocks a trial actually used,
-    so the epoch line shows e.g. `hybrid[bm25+semantic]` or
-    `rerank[semantic→haiku]` rather than a bare strategy name."""
+    """Compact, human-readable label of which blocks a trial used AND the
+    knobs that distinguish near-identical trials.
+
+    Includes the tuned numeric knobs (candidate width, kept count, fusion
+    constant, neighbour count) so that tuning *within* a strategy family —
+    e.g. ``rerank[bm25]`` at three different candidate widths — shows as
+    three distinct lines instead of looking like the same config run
+    repeatedly. The dedupe cache keys on the full config, so identical
+    trials are already skipped; these are genuinely different configs."""
     if cfg.strategy == "hybrid":
-        return f"hybrid[{'+'.join(cfg.fuse)}]"
+        return f"hybrid[{'+'.join(cfg.fuse)} rrf={cfg.rrf_k}]"
     if cfg.strategy == "rerank":
-        return f"rerank[{cfg.rerank_source}→{_short_model(cfg.rerank_model)}]"
+        return (
+            f"rerank[{cfg.rerank_source}→{_short_model(cfg.rerank_model)} "
+            f"cand={cfg.max_candidates} keep={cfg.max_relevant}]"
+        )
     if cfg.strategy == "hyde":
-        return f"hyde({_short_model(cfg.hyde_model)})"
+        return f"hyde({_short_model(cfg.hyde_model)} k={cfg.semantic_top_k})"
+    if cfg.strategy == "semantic":
+        return f"semantic[k={cfg.semantic_top_k}]"
     return cfg.strategy
 
 

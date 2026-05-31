@@ -1114,6 +1114,43 @@ def test_dsl_vocab_no_drift() -> None:
     assert set(_DSL_ATOMICS) == set(_ATOMIC_STRATEGIES) - {"rerank"}
 
 
+def test_describe_config_distinguishes_tuned_knobs() -> None:
+    """rerank trials that differ only in numeric knobs must render as
+    DISTINCT labels, so tuning a family doesn't look like repeated runs
+    of the same config in the epoch lines / leaderboard."""
+    from outmem.optimize.optimizer import _describe_config
+
+    a = RetrievalConfig(strategy="rerank", rerank_source="bm25", max_candidates=30,
+                        max_relevant=8)
+    b = RetrievalConfig(strategy="rerank", rerank_source="bm25", max_candidates=50,
+                        max_relevant=8)
+    assert _describe_config(a) != _describe_config(b)
+    assert "cand=30" in _describe_config(a) and "cand=50" in _describe_config(b)
+
+
+def test_optimize_surfaces_unavailable_strategy_on_stderr(
+    store: WikiStore, bank: QuestionBank, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When a strategy is refused (e.g. semantic with no index), the skip is
+    printed to stderr — not just buried in result.log — so a whole family
+    vanishing is visible rather than looking like the agent ignored it."""
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        if state["n"] == 1:
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="run_eval", args={"strategy": "semantic"})])
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store, bank, optimizer_model=FunctionModel(optimizer), k=1, max_evals=2,
+    )
+    err = capsys.readouterr().err
+    assert "semantic unavailable" in err  # loud on stderr
+    assert any("unavailable" in line for line in result.log)  # and in the log
+
+
 def test_optimize_eval_sample_rescores_winner_on_full_bank(
     store: WikiStore, bank: QuestionBank
 ) -> None:
