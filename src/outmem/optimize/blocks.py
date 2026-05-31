@@ -576,11 +576,16 @@ def _hyde_document(model: Any, question: str) -> tuple[str | None, str | None]:
     Lazy ``pydantic_ai`` import so the core has no hard agent dependency."""
     from pydantic_ai import Agent
 
+    from outmem.relevance import infer_model_cached
+
     agent_kwargs: dict[str, Any] = {
         "model_settings": {**ANTHROPIC_CACHE_SETTINGS, "max_tokens": 512}
     }
+    # infer_model_cached: reuse one httpx client per worker thread instead
+    # of spinning up a fresh provider/client per call — under the threaded
+    # eval that otherwise exhausts file descriptors. See its docstring.
     agent: Agent[None, str] = Agent(
-        model, system_prompt=_HYDE_SYSTEM_PROMPT, **agent_kwargs
+        infer_model_cached(model), system_prompt=_HYDE_SYSTEM_PROMPT, **agent_kwargs
     )
     try:
         text = str(agent.run_sync(question).output).strip()

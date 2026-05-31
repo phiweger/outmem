@@ -39,6 +39,7 @@ core library has no hard dependency on the optional ``agent`` extra.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -326,6 +327,44 @@ def _excerpt(
     return joined[:context_chars_per_page]
 
 
+_MODEL_CACHE = threading.local()
+
+
+def infer_model_cached(model: Any) -> Any:
+    """Infer a pydantic_ai ``Model`` from ``model``, memoised per thread.
+
+    Passing a model-id *string* to ``Agent(...)`` makes pydantic_ai build a
+    fresh provider + ``httpx.AsyncClient`` (own SSL context + sockets) on
+    every construction. The optimizer evaluates rerank/hyde strategies
+    across a thread pool (``evaluate(max_concurrency=...)``), calling the
+    model once per bank question — so per-call construction leaks file
+    descriptors until the process hits its limit
+    (``OSError: [Errno 24] Too many open files``).
+
+    Caching the inferred ``Model`` per *thread* reuses one client across
+    that thread's sequential calls, bounding live clients to the worker
+    count. Per-thread (not global) is deliberate: an ``httpx.AsyncClient``
+    binds to the event loop that first drives it, and ``run_sync`` uses one
+    persistent loop per thread — sharing a client across threads/loops is
+    unsafe. A ``Model`` instance (e.g. a test ``FunctionModel``) is
+    returned unchanged, so callers that already pass an object are
+    unaffected.
+    """
+    from pydantic_ai.models import Model, infer_model
+
+    if isinstance(model, Model):  # already concrete (e.g. tests) — no client
+        return model
+    cache: dict[Any, Any] | None = getattr(_MODEL_CACHE, "by_key", None)
+    if cache is None:
+        cache = {}
+        _MODEL_CACHE.by_key = cache
+    cached = cache.get(model)
+    if cached is None:
+        cached = infer_model(model)
+        cache[model] = cached
+    return cached
+
+
 def _run_filter(
     model: Any,
     query: str,
@@ -341,7 +380,7 @@ def _run_filter(
     # dict (mirrors build_consult_wiki).
     agent_kwargs: dict[str, Any] = {"model_settings": _RELEVANCE_MODEL_SETTINGS}
     agent: Agent[None, _FilterResult] = Agent(
-        model,
+        infer_model_cached(model),
         output_type=_FilterResult,
         system_prompt=_RELEVANCE_SYSTEM_PROMPT,
         **agent_kwargs,

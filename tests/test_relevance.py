@@ -147,3 +147,83 @@ class TestRelevanceFilter:
         (store.pages_path / "badpage.md").write_bytes(b"penicillin \xff\xfe bytes\n")
         out = relevance_filter(store, query="penicillin", model=_model_returning([]))
         assert isinstance(out, FilterOutcome)  # did not raise
+
+
+class TestInferModelCached:
+    """The per-thread model cache that stops the optimizer's threaded
+    rerank/hyde eval from opening a fresh httpx client (and FDs) per call —
+    the `OSError: Too many open files` regression."""
+
+    def test_string_inferred_once_per_thread(self) -> None:
+        from outmem.relevance import infer_model_cached
+
+        a = infer_model_cached("test")  # pydantic_ai builds a TestModel
+        b = infer_model_cached("test")
+        assert a is b  # memoised, not rebuilt
+
+    def test_distinct_strings_distinct_models(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from outmem.relevance import infer_model_cached
+
+        # Dummy key: provider construction reads it but makes no network call
+        # at inference time, so two ids resolve to two distinct cached models.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "x-not-real")
+        a = infer_model_cached("anthropic:claude-haiku-4-5")
+        b = infer_model_cached("anthropic:claude-sonnet-4-6")
+        assert a is not b
+        assert infer_model_cached("anthropic:claude-haiku-4-5") is a  # still cached
+
+    def test_model_instance_passes_through(self) -> None:
+        from pydantic_ai.models.test import TestModel
+
+        from outmem.relevance import infer_model_cached
+
+        m = TestModel()
+        assert infer_model_cached(m) is m  # concrete model returned as-is
+
+    def test_cache_is_per_thread(self) -> None:
+        import threading
+
+        from outmem.relevance import infer_model_cached
+
+        main = infer_model_cached("test")
+        other: list[object] = []
+        t = threading.Thread(target=lambda: other.append(infer_model_cached("test")))
+        t.start()
+        t.join()
+        # Different thread → its own client-bearing model instance (httpx
+        # clients are loop/thread-bound, so they must not be shared).
+        assert other and other[0] is not main
+
+    def test_judge_relevance_infers_model_once_per_thread(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The leak's mechanism, pinned: many judge_relevance calls in one
+        thread (the rerank eval inner loop) must build the model — and thus
+        the httpx client — exactly once, not once per call."""
+        from pydantic_ai.models import Model
+
+        from outmem.relevance import judge_relevance
+
+        calls = {"n": 0}
+        stub = _model_returning([])  # a stub model, no network
+
+        def counting_infer(model: object) -> Model:
+            # Mirror the real infer_model: a concrete Model passes through
+            # untouched (this is what Agent.__init__ calls internally). Only
+            # a *string* triggers a build — that's the call we're counting.
+            if isinstance(model, Model):
+                return model
+            calls["n"] += 1
+            return stub
+
+        monkeypatch.setattr("pydantic_ai.models.infer_model", counting_infer)
+        for _ in range(5):
+            judge_relevance(
+                model="anthropic:leak-probe",  # unique string → fresh cache slot
+                query="penicillin dose",
+                candidates=[("abx:penicillin", "IV penicillin G dosing")],
+                max_relevant=3,
+            )
+        assert calls["n"] == 1  # 5 calls, one inference (one client) in this thread
