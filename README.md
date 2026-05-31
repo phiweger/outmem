@@ -220,6 +220,52 @@ The agent does pull-rebase-push around every `outmem ask` by default
 are vanilla; any other tool (Obsidian Git plugin, GitHub Desktop,
 plain `git`) interoperates.
 
+### Tune retrieval to your wiki
+
+Which retrieval strategy wins (keyword, BM25, semantic, hybrid, LLM
+rerank) depends on *your* corpus and how questions are phrased. outmem
+can measure it: an agent generates a question bank from your pages, then
+tries strategies and keeps the one with the best Hit@k. This is a
+Python/API tool (not a CLI subcommand) — run it from a script or REPL:
+
+```python
+from outmem import WikiStore
+from outmem.optimize import generate_bank, optimize_retrieval
+
+store = WikiStore.open("/srv/wiki")
+bank = generate_bank(store, model="anthropic:claude-haiku-4-5")   # one-time, ~1 Q/page
+
+result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-4-6")
+result.print_summary()      # ranked leaderboard → stderr
+#  #  config                 score  hit@k  abst   ms/q (p95)
+#  1  bm25+semantic          0.93   0.93   0.00    59 ( 78)
+#  2  semantic               0.93   0.93   0.00   329 (520)
+#  3  bm25                   0.80   0.80   0.00     2 (  3)
+
+result.save(1, store)       # write <wiki>/retrieval.yaml from row 1
+```
+
+`save(rank, store)` writes a **separate `retrieval.yaml`** next to
+`config.yaml` (it never rewrites your hand-curated config), tagged
+`from_optimization: true` so a `git diff` shows the wiki was tuned. From
+then on the agent's `find_pages` tool runs that pipeline.
+
+You can also just write the file by hand — `strategy` is a small
+controlled vocabulary (unsupported strings error at load, no silent
+fallback):
+
+```yaml
+# retrieval.yaml
+retrieval:
+  strategy: bm25+semantic       # lexical | bm25 | semantic | hyde |
+                                # rerank(<source>) | a+b[+c…] (RRF hybrid)
+  from_optimization: false
+```
+
+Default when no file exists: `bm25`. Full strategy table, knobs, and
+cost notes in [docs/configuration.md](docs/configuration.md#retrievalyaml--what-the-agents-wiki-search-runs)
+and [docs/autoresearch.md](docs/autoresearch.md).
+
 ---
 
 ## Wiki page format
@@ -401,8 +447,9 @@ agent = Agent(
 - [`docs/features.md`](docs/features.md) — semantic index, relevance
   filter, retrieval tuning, write approval, Logfire, dashboard (all opt-in).
 - [`docs/autoresearch.md`](docs/autoresearch.md) — making outmem improve
-  its own retrieval: the block optimizer (now) and the self-modifying
-  code loop (future).
+  its own retrieval: generate a question bank, let an agent tune the
+  retrieval pipeline, pick a winner and save it to `retrieval.yaml`
+  (now) — and the self-modifying code loop (future).
 - [`docs/development.md`](docs/development.md) — dev install,
   repository layout.
 - [`specs/concept.md`](specs/concept.md) — the original pattern this
