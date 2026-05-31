@@ -73,6 +73,10 @@ class EvalRow:
     abstention: float
     mean_latency_ms: float
     p95_latency_ms: float
+    # Bank composition (same for every row of a run). Carried so the table
+    # can hide the abstention column when there were no unanswerable
+    # questions to measure it against — see `_format_summary_table`.
+    n_unanswerable: int = 0
 
 
 def _eval_row(cfg: RetrievalConfig, card: Scorecard) -> EvalRow:
@@ -84,6 +88,7 @@ def _eval_row(cfg: RetrievalConfig, card: Scorecard) -> EvalRow:
         abstention=card.abstention,
         mean_latency_ms=card.mean_latency_ms,
         p95_latency_ms=card.p95_latency_ms,
+        n_unanswerable=card.n_unanswerable,
     )
 
 
@@ -430,7 +435,7 @@ def optimize_retrieval(
     )
     # One parent span nests the optimizer's own turns and every per-eval
     # span (and their per-question children) under a single run in the trace.
-    _emit_metric_context(store, k)
+    _emit_metric_context(store, k, n_unanswerable=len(bank.unanswerable))
     with _span("optimize_retrieval", max_evals=max_evals, k=k):
         run = agent.run_sync(_initial_prompt(bank, k, max_evals))
     notes = str(run.output)
@@ -480,8 +485,8 @@ def _index_of(
     return -1
 
 
-def _emit_metric_context(store: WikiStore, k: int) -> None:
-    """Print one line so the user can sanity-check whether Hit@k is
+def _emit_metric_context(store: WikiStore, k: int, n_unanswerable: int = 0) -> None:
+    """Print one line so the user can sanity-check whether the metric is
     informative on their corpus before reading any scores.
 
     With N pages and cutoff ``k``, the theoretical ceiling is ``min(k,N)/N``
@@ -490,14 +495,19 @@ def _emit_metric_context(store: WikiStore, k: int) -> None:
     Hit@k saturates near 1.0. The scores stop distinguishing strategies.
     A loud-but-cheap warning here saves an honest "score=1.000 is too good
     to be true" diagnosis after the fact. (Default ``k=1`` already dodges
-    this on tiny corpora; the warning catches overrides.)"""
+    this on tiny corpora; the warning catches overrides.)
+
+    Also flags an all-answerable bank up front: with no unanswerables the
+    abstention half of the score is unmeasured (``score == hit@k``), which
+    is worth knowing before spending the eval budget."""
     try:
         n = len(store.list_slugs())
     except Exception:
         return
     saturated = n > 0 and k / n > 0.25
     flag = "  (⚠ Hit@k saturates — k is a large fraction of the corpus)" if saturated else ""
-    sys.stderr.write(f"corpus: {n} pages, k={k}{flag}\n")
+    abst = "" if n_unanswerable else "  (no unanswerables: score = hit@k)"
+    sys.stderr.write(f"corpus: {n} pages, k={k}{flag}{abst}\n")
     sys.stderr.flush()
 
 
@@ -545,9 +555,12 @@ def _short_model(model_id: str) -> str:
 def _format_epoch(event: EvalEvent) -> str:
     c = event.scorecard
     star = " *" if c.score >= event.best_score else ""  # this eval is (tied) best
+    # Only show abstain= when there were unanswerable questions to measure
+    # it on; otherwise it's a structural 0.000 and score == hit@k.
+    abstain = f" abstain={c.abstention:.3f}" if c.n_unanswerable else ""
     return (
         f"[eval {event.index}/{event.max_evals}] {_describe_config(event.config)} "
-        f"score={c.score:.3f} (hit@{c.k}={c.hit_at_k:.3f} abstain={c.abstention:.3f}) "
+        f"score={c.score:.3f} (hit@{c.k}={c.hit_at_k:.3f}{abstain}) "
         f"{c.mean_latency_ms:.0f}ms/search best={event.best_score:.3f}{star}"
     )
 
@@ -608,30 +621,39 @@ def _format_card(
 def _format_summary_table(rows: list[EvalRow]) -> str:
     """Render the post-run leaderboard.
 
-    Columns: rank | config | score | hit@k | abstain | ms/q (p95).
+    Columns: rank | config | score | hit@k | [abst] | ms/q (p95).
     Ordering: score desc, then mean latency asc (faster wins ties — the
-    practical tiebreaker when two configs hit the same score)."""
+    practical tiebreaker when two configs hit the same score).
+
+    The ``abst`` (abstention) column is dropped when the bank had no
+    unanswerable questions: with nothing to abstain on, the rate is a
+    structural ``0.000`` for every row and ``score`` equals ``hit@k``.
+    A banner says so, rather than showing a column of meaningless zeros."""
     if not rows:
         return "(no evals scored)"
     ranked = sorted(rows, key=lambda r: (-r.score, r.mean_latency_ms))
-    header = ("#", "config", "score", "hit@k", "abst", "ms/q (p95)")
-    body = [
-        (
-            str(i),
-            _describe_config(r.config),
-            f"{r.score:.3f}",
-            f"{r.hit_at_k:.3f}",
-            f"{r.abstention:.3f}",
-            f"{r.mean_latency_ms:.0f} ({r.p95_latency_ms:.0f})",
-        )
-        for i, r in enumerate(ranked, 1)
-    ]
+    show_abst = any(r.n_unanswerable > 0 for r in rows)
+
+    def cells(i: int, r: EvalRow) -> tuple[str, ...]:
+        base = (str(i), _describe_config(r.config), f"{r.score:.3f}", f"{r.hit_at_k:.3f}")
+        abst = (f"{r.abstention:.3f}",) if show_abst else ()
+        return (*base, *abst, f"{r.mean_latency_ms:.0f} ({r.p95_latency_ms:.0f})")
+
+    header = ("#", "config", "score", "hit@k", *(("abst",) if show_abst else ()),
+              "ms/q (p95)")
+    body = [cells(i, r) for i, r in enumerate(ranked, 1)]
     cols = list(zip(header, *body, strict=False))
     widths = [max(len(cell) for cell in col) for col in cols]
-    def fmt_row(cells: tuple[str, ...]) -> str:
-        return "  ".join(cell.ljust(w) for cell, w in zip(cells, widths, strict=False))
+    def fmt_row(cells_: tuple[str, ...]) -> str:
+        return "  ".join(cell.ljust(w) for cell, w in zip(cells_, widths, strict=False))
     sep = "  ".join("-" * w for w in widths)
     lines = [fmt_row(header), sep, *(fmt_row(row) for row in body)]
+    if not show_abst:
+        lines.append(
+            "\nNo unanswerable questions in the bank: score = hit@k, "
+            "abstention not measured. Add some (questions the wiki should "
+            "answer with nothing) to test abstention precision."
+        )
     lines.append(
         "\nPick a row with `result.save(rank, store)` — writes "
         f"{RETRIEVAL_FILENAME} (from_optimization: true)."

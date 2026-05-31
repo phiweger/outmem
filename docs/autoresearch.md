@@ -200,12 +200,20 @@ result.print_summary()        # one-row-per-config table → stderr, ranked by s
 #                            (then by latency for tiebreaks)
 #  #  config                       score  hit@k  abst   ms/q (p95)
 #  -  ---------------------------  -----  -----  -----  ----------
-#  1  semantic                     0.933  0.933  0.000   329 (520)
-#  2  hybrid[bm25+semantic]        0.833  0.833  0.000    59 ( 78)
-#  3  bm25                         0.600  0.600  0.000    55 ( 81)
+#  1  semantic[k=10]               0.933  0.933  0.200   329 (520)
+#  2  hybrid[bm25+semantic rrf=60] 0.833  0.833  0.200    59 ( 78)
+#  3  bm25                         0.600  0.600  0.200    55 ( 81)
 
 picked = result.save(2, store)   # write <wiki>/retrieval.yaml (from_optimization: true)
 ```
+
+The `abst` (abstention) column appears only when the bank has unanswerable
+questions to measure it against. With an all-answerable bank it's dropped
+and `score == hit@k` (a banner says so) — add unanswerables (questions the
+wiki *should* answer with nothing) to test a retriever's abstention
+precision, not just its recall. Config labels carry the tuned knobs
+(`cand=`/`keep=`, `rrf=`, `k=`) so tuning one family reads as distinct
+rows, not repeats.
 
 `retrieval.yaml` is the file the agent's wiki search reads next time
 (via `find_pages`); see `docs/configuration.md`. Keep it under version

@@ -942,6 +942,56 @@ def test_optimize_pick_matches_printed_leaderboard_rank() -> None:
     assert "bm25" in first_body_line
 
 
+def _row(strategy: str, *, score: float, n_unans: int) -> Any:
+    from outmem.optimize.optimizer import EvalRow
+
+    return EvalRow(
+        RetrievalConfig(strategy=strategy), score=score, hit_at_k=score,
+        abstention=0.0, mean_latency_ms=1.0, p95_latency_ms=1.0,
+        n_unanswerable=n_unans,
+    )
+
+
+def test_summary_table_hides_abst_when_no_unanswerables() -> None:
+    """All-answerable bank → the structurally-zero abstention column is
+    dropped and a banner explains score = hit@k."""
+    from outmem.optimize.optimizer import _format_summary_table
+
+    table = _format_summary_table([_row("bm25", score=0.6, n_unans=0)])
+    header = table.splitlines()[0]
+    assert "abst" not in header  # column gone (the banner may mention it)
+    assert "score = hit@k" in table
+
+
+def test_summary_table_keeps_abst_when_unanswerables_present() -> None:
+    """A bank with unanswerables keeps the abstention column and drops the
+    banner — the metric is informative."""
+    from outmem.optimize.optimizer import _format_summary_table
+
+    table = _format_summary_table([_row("bm25", score=0.6, n_unans=5)])
+    assert "abst" in table.splitlines()[0]  # column header present
+    assert "score = hit@k" not in table
+
+
+def test_epoch_line_omits_abstain_without_unanswerables() -> None:
+    """The live progress line drops `abstain=` when there's nothing to
+    abstain on, matching the table."""
+    from outmem.optimize.bench import Scorecard
+    from outmem.optimize.optimizer import EvalEvent, _format_epoch
+
+    def card(n_unans: int) -> Scorecard:
+        return Scorecard(score=0.6, hit_at_k=0.6, abstention=0.0, k=1,
+                         n_answerable=5, n_unanswerable=n_unans, results=())
+
+    cfg = RetrievalConfig(strategy="bm25")
+    line_no = _format_epoch(EvalEvent(index=1, max_evals=12, config=cfg,
+                                      scorecard=card(0), best_score=0.6))
+    line_yes = _format_epoch(EvalEvent(index=1, max_evals=12, config=cfg,
+                                       scorecard=card(5), best_score=0.6))
+    assert "abstain=" not in line_no
+    assert "abstain=" in line_yes
+
+
 def test_retrieval_yaml_overlay_overrides_config(tmp_path: Path) -> None:
     """A ``retrieval.yaml`` next to ``config.yaml`` takes precedence over
     the in-config block — the optimizer's output wins without rewriting
