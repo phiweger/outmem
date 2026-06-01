@@ -22,11 +22,13 @@ here.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -436,6 +438,9 @@ def optimize_retrieval(
     # One parent span nests the optimizer's own turns and every per-eval
     # span (and their per-question children) under a single run in the trace.
     _emit_metric_context(store, k, n_unanswerable=len(bank.unanswerable))
+    # Warm the query-embedding cache up front so the FIRST semantic-family
+    # eval isn't a latency outlier vs. the rest (see the helper's docstring).
+    _prewarm_query_cache(store, bank, eval_concurrency)
     with _span("optimize_retrieval", max_evals=max_evals, k=k):
         run = agent.run_sync(_initial_prompt(bank, k, max_evals))
     notes = str(run.output)
@@ -509,6 +514,47 @@ def _emit_metric_context(store: WikiStore, k: int, n_unanswerable: int = 0) -> N
     abst = "" if n_unanswerable else "  (no unanswerables: score = hit@k)"
     sys.stderr.write(f"corpus: {n} pages, k={k}{flag}{abst}\n")
     sys.stderr.flush()
+
+
+def _prewarm_query_cache(
+    store: WikiStore, bank: QuestionBank, max_concurrency: int
+) -> None:
+    """Embed every bank question once, *untimed*, before the eval loop.
+
+    The embedder caches query vectors by text (see
+    :class:`outmem.semantic.embeddings.EmbedderHandle`), so the optimizer
+    re-asks the same bank questions cheaply across evals. The catch for the
+    leaderboard: only the FIRST semantic/hyde/hybrid eval pays the cold
+    network embedding cost — its per-search latency is then a ~10x outlier
+    (e.g. semantic 1348ms cold vs 161ms warm), making the latency column
+    non-comparable across rows. Warming the cache up front moves that
+    one-off cost out of every timed eval, so all rows measure warm
+    retrieval and rank fairly on speed.
+
+    Best-effort and never fatal: a no-op when semantic is disabled or the
+    index is empty (the agent will surface that per-config instead), and a
+    per-question embed failure is swallowed — it'll resurface, attributed,
+    in the real eval."""
+    if not store.semantic_enabled():
+        return
+    try:
+        if store.semantic_index_is_empty():
+            return
+    except Exception:
+        return
+    questions = [q.question for q in bank.answerable]
+    questions += [q.question for q in bank.unanswerable]
+    if not questions:
+        return
+
+    def _warm(q: str) -> None:
+        # Best-effort: a real embed failure resurfaces, attributed, in the eval.
+        with contextlib.suppress(Exception):
+            store.semantic_find_similar(q, top_k=1, threshold=0.0)
+
+    workers = max(1, min(max_concurrency, len(questions)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(_warm, questions))
 
 
 def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:

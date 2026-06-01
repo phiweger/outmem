@@ -139,6 +139,15 @@ Latency isn't part of the score, but it lets you prefer a faster strategy
 among configs that score alike — e.g. `bm25` (in-memory FTS5, sub-
 millisecond) vs `rerank` (a model call per search).
 
+Query embeddings are **cached by text** across evals (the bank re-asks the
+same questions every eval), and the optimizer warms that cache before the
+timed loop. So semantic/hyde/hybrid latencies measure the *warm* path —
+vector search and any rerank/hyde model call — and exclude the one-off
+query-embedding round-trip. That keeps the latency column comparable
+across rows (otherwise only the first semantic eval would pay the embed
+cost and read ~10x slower); just remember production pays one embed per
+*distinct* query on top of these numbers.
+
 ### The optimizer is an agent, not a grid sweep
 
 `optimize_retrieval(store, bank, optimizer_model=...)` gives an agent two

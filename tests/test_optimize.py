@@ -1153,6 +1153,39 @@ def test_fuse_rejects_rerank_leg() -> None:
         RetrievalConfig.from_dict({"strategy": "hybrid", "fuse": ["rerank", "bm25"]})
 
 
+def test_prewarm_query_cache_warms_every_question() -> None:
+    """Pre-warm embeds each answerable + unanswerable question once, so the
+    first semantic eval isn't a cold-cache latency outlier."""
+    from outmem.optimize.optimizer import _prewarm_query_cache
+
+    seen: list[str] = []
+    store = SimpleNamespace(
+        semantic_enabled=lambda: True,
+        semantic_index_is_empty=lambda: False,
+        semantic_find_similar=lambda text, top_k, threshold: seen.append(text),
+    )
+    bank = QuestionBank(
+        answerable=[Question(question="q1"), Question(question="q2")],
+        unanswerable=[Question(question="u1", gold_slugs=())],
+    )
+    _prewarm_query_cache(store, bank, max_concurrency=4)  # type: ignore[arg-type]
+    assert sorted(seen) == ["q1", "q2", "u1"]
+
+
+def test_prewarm_query_cache_noop_when_semantic_off() -> None:
+    """No semantic index → warming is a no-op (and never raises)."""
+    from outmem.optimize.optimizer import _prewarm_query_cache
+
+    called: list[int] = []
+    store = SimpleNamespace(
+        semantic_enabled=lambda: False,
+        semantic_find_similar=lambda *a, **k: called.append(1),
+    )
+    bank = QuestionBank(answerable=[Question(question="q1")])
+    _prewarm_query_cache(store, bank, max_concurrency=2)  # type: ignore[arg-type]
+    assert called == []
+
+
 def test_dsl_vocab_no_drift() -> None:
     """Single source of truth: the DSL atomic vocabulary is exactly the
     retriever atomics minus the rerank gate. If someone adds an atomic to
