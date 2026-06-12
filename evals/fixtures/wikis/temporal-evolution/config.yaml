@@ -18,7 +18,6 @@ sources:
   max_chars: 200000
 
 semantic:
-  enabled: false
   embedding_model: openai:text-embedding-3-small
   db_filename: .vectors.db
   chunk_size: 2000

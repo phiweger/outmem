@@ -79,11 +79,11 @@ def _questions_model(questions: list[str]) -> FunctionModel:
     return FunctionModel(respond)
 
 
-def _rerank_model(selections: list[dict[str, str]]) -> FunctionModel:
+def _rerank_model(slugs: list[str]) -> FunctionModel:
     def respond(messages: object, info: AgentInfo) -> ModelResponse:
         name = info.output_tools[0].name
         return ModelResponse(
-            parts=[ToolCallPart(tool_name=name, args={"relevant": selections})]
+            parts=[ToolCallPart(tool_name=name, args={"relevant": slugs})]
         )
 
     return FunctionModel(respond)
@@ -323,7 +323,7 @@ class TestDataset:
 
 
 def test_rerank_block_returns_kept_slugs(store: WikiStore) -> None:
-    model = _rerank_model([{"slug": "abx:penicillin", "reason": "dosing"}])
+    model = _rerank_model(["abx:penicillin"])
     retriever = build_retriever(
         store, RetrievalConfig(strategy="rerank"), model=model
     )
@@ -350,7 +350,7 @@ def test_rerank_block_uses_configured_source(
     monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
     monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
-    model = _rerank_model([{"slug": "abx:penicillin", "reason": "exact match"}])
+    model = _rerank_model(["abx:penicillin"])
     retriever = build_retriever(
         store,
         RetrievalConfig(strategy="rerank", rerank_source="semantic"),

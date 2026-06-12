@@ -13,7 +13,7 @@ from evals import EvalRun, eval_case
 )
 def case_pricing_lookup(r: EvalRun) -> None:
     # The compiled page exists in wiki/ — agent should converge there.
-    r.expect_tool_called("search_wiki", pattern__contains="pricing")
+    r.expect_tool_called("search_wiki", question__contains="pricing")
     r.expect_tool_called("read_page", slug="pricing-formula")
     r.expect_commit(subject_matches=r"^(extend|log):")
 

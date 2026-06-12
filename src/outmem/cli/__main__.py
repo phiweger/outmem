@@ -261,6 +261,14 @@ def cmd_reindex(args: argparse.Namespace) -> int:
 
     try:
         if args.path:
+            if not store.semantic_available():
+                print(
+                    "outmem: no semantic index yet — run `outmem reindex` "
+                    "(without a path) to build it first, then reindex "
+                    "individual paths.",
+                    file=sys.stderr,
+                )
+                return 1
             results = []
             for rel in args.path:
                 if args.force:

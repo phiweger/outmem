@@ -68,10 +68,10 @@ human-driven workflow.
 
    Equivalent CLI: `outmem search "[[<slug>]]" --scope wiki --fixed-strings`.
 
-## Optional semantic tier (when enabled in `config.yaml`)
+## Optional semantic tier (when the semantic index is built)
 
-If the wiki has `semantic.enabled: true`, you also have
-`find_similar`:
+If the wiki has a semantic index (built with `outmem reindex`), you
+also have `find_similar`:
 
 ```python
 find_similar(text="cost-plus 35% pricing", top_k=5, exclude_slug=None)

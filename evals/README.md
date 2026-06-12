@@ -84,10 +84,10 @@ By default each case streams to stderr as it runs:
 == pricing-lookup
    Tier-1 lookup: agent should search the wiki, read the page, …
    query: 'What is our standard pricing formula and where does it come from?'
-    [tool] search_wiki pattern='pricing' scope='wiki' case_insensitive=True
+    [tool] search_wiki question='What is our standard pricing formula…' k=5
     [tool] read_page slug='pricing-formula'
     [tool] extend_page slug='pricing-formula' body=(742 chars)
-    ✓ trace: tool 'search_wiki' called with {'pattern__contains': 'pricing'}
+    ✓ trace: tool 'search_wiki' called with {'question__contains': 'pricing'}
     ✓ trace: tool 'read_page' called with {'slug': 'pricing-formula'}
     ✓ trace: commit matching /^(extend|log):/
     … judging: answer states the pricing formula is cost-plus 35%
@@ -179,7 +179,7 @@ per-case feature flags (`semantic`, `approval`), and runs `ask_sync`.
 ## Trace assertions cheat sheet
 
 ```python
-r.expect_tool_called("search_wiki", pattern__contains="pricing")
+r.expect_tool_called("search_wiki", question__contains="pricing")
 r.expect_tool_called("read_page", slug="pricing-formula")
 r.expect_tool_called("topic_evolution", slugs=lambda v: "pricing-formula" in v)
 r.expect_no_tool_called("read_source")        # negative

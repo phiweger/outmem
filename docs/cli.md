@@ -66,7 +66,7 @@ outmem record-run
 ```bash
 outmem ask "what is our pricing formula?"
 # → agent response on stdout, exits 0 on success
-# → tool calls logged to stderr: [HH:MM:SS] [tool] search_wiki pattern='…' …
+# → tool calls logged to stderr: [HH:MM:SS] [tool] search_wiki question='…' …
 
 outmem ask --stdin <<< "what is our pricing formula?"
 outmem ask "explain pricing" --model anthropic:claude-sonnet-4-6

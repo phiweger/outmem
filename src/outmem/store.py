@@ -800,9 +800,12 @@ class WikiStore:
         return _semantic.available(self)
 
     def semantic_index_is_empty(self) -> bool:
-        """True if semantic is enabled but the index has no files yet
-        (i.e. ``outmem reindex`` hasn't run). Opens the vector store, so
-        the first call pays the one-time embedder dimension probe."""
+        """True if the semantic index has no files indexed yet — including
+        when no index has been built at all (``outmem reindex`` hasn't
+        run). Safe to call without a prior :meth:`semantic_available`
+        check: it never creates an empty index. Once the index exists it
+        opens the vector store, paying the one-time embedder dimension
+        probe on the first call."""
         return _semantic.index_is_empty(self)
 
     def semantic_find_similar(

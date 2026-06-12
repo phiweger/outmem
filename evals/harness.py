@@ -45,7 +45,7 @@ class EvalCase:
     """Optional one-line summary for the report."""
 
     semantic: bool = False
-    """Whether to flip ``semantic.enabled: true`` in the wiki config."""
+    """Whether to build the wiki's semantic index for this case."""
 
     approval: bool = False
     """Whether to flip ``approval.required_for_writes: true``."""
@@ -586,24 +586,23 @@ def _flip_yaml_flags(workspace: Path, *, semantic: bool, approval: bool) -> None
     if not config.exists():
         return
     text = config.read_text(encoding="utf-8")
-    if semantic:
+    # The index itself is built by store.semantic_reindex_all() in
+    # _run_case; for semantic cases we only swap in the deterministic test
+    # embedder (and a lower threshold) so eval runs stay offline/reproducible
+    # — unless OUTMEM_EVAL_REAL_EMBEDDER asks for the real provider.
+    if semantic and not os.environ.get("OUTMEM_EVAL_REAL_EMBEDDER"):
         text = text.replace(
-            "semantic:\n  enabled: false",
-            "semantic:\n  enabled: true",
+            "embedding_model: openai:text-embedding-3-small",
+            "embedding_model: test:bag-of-words",
         )
-        if not os.environ.get("OUTMEM_EVAL_REAL_EMBEDDER"):
-            text = text.replace(
-                "embedding_model: openai:text-embedding-3-small",
-                "embedding_model: test:bag-of-words",
-            )
-            # Bag-of-words on small fixture text rarely hits 0.8; the
-            # case still cares that find_similar surfaces the duplicate,
-            # not the exact similarity number. 0.2 lets paraphrased
-            # overlap through while keeping unrelated chunks out.
-            text = text.replace(
-                "similarity_threshold: 0.8",
-                "similarity_threshold: 0.2",
-            )
+        # Bag-of-words on small fixture text rarely hits 0.8; the
+        # case still cares that find_similar surfaces the duplicate,
+        # not the exact similarity number. 0.2 lets paraphrased
+        # overlap through while keeping unrelated chunks out.
+        text = text.replace(
+            "similarity_threshold: 0.8",
+            "similarity_threshold: 0.2",
+        )
     if approval:
         text = text.replace(
             "approval:\n  required_for_writes: false",

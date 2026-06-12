@@ -71,7 +71,7 @@ outmem ask "What are the biggest gaps in our knowledge, based on
 recent log entries? Prioritise topics asked about more than once."
 ```
 
-This triggers `search_wiki(scope="log")` plus `topic_evolution` over
+This triggers `grep_wiki(scope="log")` plus `topic_evolution` over
 the relevant slugs and gives you a prioritised list. The agent itself
 produces another `log:` entry recording the meta-question, which
 shows up next time you ask the same.

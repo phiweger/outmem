@@ -16,13 +16,13 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from outmem.relevance import judge_relevance
 
 
-def _model_returning(selections: list[dict[str, str]]) -> FunctionModel:
+def _model_returning(slugs: list[str]) -> FunctionModel:
     """A FunctionModel that emits the structured ``_FilterResult`` once."""
 
     def respond(messages: object, info: AgentInfo) -> ModelResponse:
         name = info.output_tools[0].name
         return ModelResponse(
-            parts=[ToolCallPart(tool_name=name, args={"relevant": selections})]
+            parts=[ToolCallPart(tool_name=name, args={"relevant": slugs})]
         )
 
     return FunctionModel(respond)
@@ -45,7 +45,7 @@ class TestJudgeRelevance:
     ]
 
     def test_keeps_only_selected(self) -> None:
-        model = _model_returning([{"slug": "abx:penicillin", "reason": "dosing"}])
+        model = _model_returning(["abx:penicillin"])
         kept, err = judge_relevance(
             model=model, query="penicillin", candidates=self._cands, max_relevant=5
         )
@@ -53,10 +53,7 @@ class TestJudgeRelevance:
         assert err is None
 
     def test_invented_slug_dropped(self) -> None:
-        model = _model_returning(
-            [{"slug": "made-up", "reason": "x"},
-             {"slug": "abx:ceftriaxone", "reason": "alt"}]
-        )
+        model = _model_returning(["made-up", "abx:ceftriaxone"])
         kept, _ = judge_relevance(
             model=model, query="alternative", candidates=self._cands, max_relevant=5
         )

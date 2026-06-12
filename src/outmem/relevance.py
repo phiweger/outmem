@@ -7,7 +7,8 @@ yes's. It's a **filter, not a ranker**: no score, no ordering claim.
 
 The load-bearing invariant — **no LLM emits wiki content here.** The
 model *consumes* deterministic excerpts (assembled by the caller from
-disk reads) and *emits only decisions*: ``{slug, one-line reason}``.
+disk reads) and *emits only decisions*: which candidate slugs are
+relevant.
 
 Reliability: the model may return only slugs from the candidate list (an
 invented slug is dropped); it may return empty (a weak match is not
@@ -37,7 +38,6 @@ class RelevantPage:
     """One page the gate judged relevant to the query."""
 
     slug: str
-    reason: str  # one-line why-relevant (the only model-generated text)
 
 
 # Haiku-friendly settings. The Anthropic cache keys are no-ops on other
@@ -50,18 +50,15 @@ _RELEVANCE_MODEL_SETTINGS: dict[str, Any] = {
 }
 
 _RELEVANCE_SYSTEM_PROMPT = (
-    "You are a relevance filter sitting between a keyword search and an "
+    "You are a relevance gate between a first-pass search and an "
     "expensive downstream agent. You are given a QUERY and a list of "
     "CANDIDATE wiki pages, each with its slug and a verbatim excerpt.\n\n"
     "For each candidate decide a single yes/no question: is this page "
-    "relevant to the QUERY? Return ONLY the relevant ones.\n\n"
+    "relevant to the QUERY? Return ONLY the slugs of the relevant ones.\n\n"
     "Rules:\n"
     "- Use slugs EXACTLY as given. Never invent, alter, or merge slugs.\n"
     "- If NOTHING is relevant, return an empty list. A weak keyword match "
     "is not relevance — do not pass through false positives.\n"
-    "- `reason` is ONE short line (≤ ~12 words) naming why the page bears "
-    "on the query. Describe the page; do NOT answer the query yourself, do "
-    "NOT quote more than a few words, do NOT invent content.\n"
     "- Judge relevance to THIS query, not general page quality."
 )
 
@@ -73,19 +70,11 @@ class _Candidate:
 
 
 @dataclass
-class _Selection:
-    """Structured-output row from the gate model."""
-
-    slug: str
-    reason: str
-
-
-@dataclass
 class _FilterResult:
     """Wrapper output type — more portable across pydantic_ai versions
-    than a bare ``list[...]`` output."""
+    than a bare ``list[str]`` output."""
 
-    relevant: list[_Selection] = field(default_factory=list)
+    relevant: list[str] = field(default_factory=list)
 
 
 _MODEL_CACHE = threading.local()
@@ -150,12 +139,12 @@ def _run_filter(
     by_slug = {c.slug for c in candidates}
     kept: list[RelevantPage] = []
     seen: set[str] = set()
-    for sel in run.output.relevant:
-        slug = sel.slug.strip()
+    for raw_slug in run.output.relevant:
+        slug = raw_slug.strip()
         if slug not in by_slug or slug in seen:  # invent-guard + dedup
             continue
         seen.add(slug)
-        kept.append(RelevantPage(slug=slug, reason=sel.reason.strip()))
+        kept.append(RelevantPage(slug=slug))
         if len(kept) >= max_relevant:
             break
     return kept

@@ -18,7 +18,7 @@ from outmem import (
     ConflictError,
     SearchHit,          # a single ripgrep hit (path, line_number, text)
     # The LLM relevance gate the rerank retrieval strategy uses:
-    RelevantPage,       # one kept page: slug + reason
+    RelevantPage,       # one kept page (slug)
     judge_relevance,    # gate over (slug, excerpt) candidates → kept slugs
 )
 ```

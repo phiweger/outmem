@@ -24,6 +24,7 @@ sections give concrete valid values.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -394,6 +395,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
     # so a mid-session config.yaml retrieval save (which updates
     # store.config) transparently rebuilds.
     _retriever_cache: dict[str, Any] = {}
+    _retriever_lock = threading.Lock()
 
     def search_wiki(question: str, k: int = 5) -> str:
         """Find the wiki pages most likely to answer a question.
@@ -421,10 +423,15 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         try:
             from outmem.optimize.blocks import build_retriever_from_settings
 
-            retriever = _retriever_cache.get(strategy)
-            if retriever is None:
-                retriever = build_retriever_from_settings(store)
-                _retriever_cache[strategy] = retriever
+            # Build-or-reuse under a lock so two concurrent first-calls for
+            # the same strategy don't both pay the O(N) candidate-net build
+            # (and orphan one retriever). retrieve() runs outside the lock —
+            # only the cache miss is serialized.
+            with _retriever_lock:
+                retriever = _retriever_cache.get(strategy)
+                if retriever is None:
+                    retriever = build_retriever_from_settings(store)
+                    _retriever_cache[strategy] = retriever
             result = retriever.retrieve(question, k=k)
         except (OutmemError, ImportError) as exc:
             # Expected, recoverable failures: a semantic strategy with no

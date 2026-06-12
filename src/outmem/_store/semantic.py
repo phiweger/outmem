@@ -43,10 +43,16 @@ def available(store: WikiStore) -> bool:
 def index_is_empty(store: WikiStore) -> bool:
     """True if the semantic index has no indexed files yet.
 
-    Opens the vector store, so the first call pays the one-time
-    ``build_embedder`` probe (a tiny embed request to detect dimensions);
-    the handle is then cached on the store.
+    Returns ``True`` when the index hasn't been built at all, so a caller
+    that probes emptiness without first checking :func:`available` does
+    not accidentally *create* an empty db via ``vector_store_or_open``
+    (which would flip :func:`available` permanently True with no content).
+    Once the db exists, opens the vector store — the first call pays the
+    one-time ``build_embedder`` probe (a tiny embed request to detect
+    dimensions); the handle is then cached on the store.
     """
+    if not available(store):  # don't materialise an empty db just to probe
+        return True
     return len(vector_store_or_open(store).list_indexed_files()) == 0
 
 

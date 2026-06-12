@@ -18,7 +18,7 @@ def case_raw_contradicts_wiki(r: EvalRun) -> None:
     # The agent should read both.
     r.expect_tool_called("read_page", slug="discounts")
     # The raw scan is what surfaces the discrepancy.
-    r.expect_tool_called("search_wiki", scope="raw")
+    r.expect_tool_called("grep_wiki", scope="raw")
     r.expect_commit()
 
     r.judge(

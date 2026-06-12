@@ -180,7 +180,7 @@ class LogfireSettings:
 
     Off by default; ``enabled: true`` opts in. When on, outmem configures
     Logfire once (``service_name="outmem"``) and instruments pydantic_ai,
-    so every model call — the agent runtime, the relevance filter, and
+    so every model call — the agent runtime, the rerank gate, and
     the optimize tool — is traced. The destination project is determined
     entirely by ``$LOGFIRE_TOKEN`` (Logfire's API has no project-name
     kwarg), so there is nothing else to configure here. Requires
