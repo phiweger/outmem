@@ -21,6 +21,7 @@ EXPECTED_SKILLS = {
     ("notes", "search"),
     ("notes", "evolution"),
     ("notes", "write"),
+    ("notes", "ingest"),
 }
 EXPECTED_SKILL_NAMES = {s for _, s in EXPECTED_SKILLS}
 

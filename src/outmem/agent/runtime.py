@@ -32,7 +32,7 @@ DEFAULT_PROMPT_NAME = "system"
 # source of truth — rendered verbatim into the prompt here and also
 # usable from an external PydanticAI agent via
 # :func:`outmem.adapters.pydantic_ai.skill_text`.
-DEFAULT_INJECTED_SKILLS: tuple[str, ...] = ("search", "evolution", "write")
+DEFAULT_INJECTED_SKILLS: tuple[str, ...] = ("search", "evolution", "write", "ingest")
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "prompts"
 

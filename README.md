@@ -390,7 +390,7 @@ store = WikiStore.open("/path/to/wiki")
 
 agent = Agent(
     "anthropic:claude-sonnet-4-6",
-    tools=wiki_tools(store),                   # 12 tools (13 with semantic)
+    tools=wiki_tools(store),                   # 14 tools (15 with semantic)
     system_prompt=render_system_prompt(store), # identical to outmem ask's
 )
 ```
@@ -398,9 +398,9 @@ agent = Agent(
 `render_system_prompt(store)` returns the **exact same prompt string**
 the bundled `outmem ask` runtime sends — the three-phase framing
 (orient / retrieve / compact), recent human commits as steering
-signal, the bundled skill bodies (`search` / `evolution` / `write`),
-and your wiki's `AGENTS.md`. Tools + prompt → your agent has prompt-
-level parity with `outmem ask`. Pass `include_steering=False` if you
+signal, the bundled skill bodies (`search` / `evolution` / `write` /
+`ingest`), and your wiki's `AGENTS.md`. Tools + prompt → your agent
+has prompt-level parity with `outmem ask`. Pass `include_steering=False` if you
 don't want the phase-1 steering signal injected (handy for stateless
 assistant turns).
 

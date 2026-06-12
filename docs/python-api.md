@@ -204,11 +204,27 @@ agent = Agent(
     tools=wiki_tools(store),
     system_prompt=(
         "You answer with citations. "
-        + skill_text("search")    # injects the bundled `search` skill body
+        + skill_text("search")    # the bundled `search` skill body
+        + "\n\n"
+        + skill_text("write")     # writeback rules (`compact:`/`extend:`/`log:`)
+        + "\n\n"
+        + skill_text("ingest")    # source → page workflow + record_ingestion
+        # `evolution` (page history + `topic_evolution`) is also available.
     ),
 )
 
 result = await agent.run("what did we decide about pricing?")
+```
+
+A short tool plan a competent agent will follow with this palette:
+
+```text
+search_index()                            # orient on an unfamiliar wiki
+└─ search_index(prefix="abx")             # drill into a namespace
+   └─ search_wiki(question="…")           # then ask the question
+      └─ read_page(slug, peek=True)       # cheap triage of a candidate
+         └─ read_page(slug)               # full read on the winner
+            └─ write_page / extend_page / append_log  # close the loop
 ```
 
 The tools — fourteen, plus `find_similar` when the semantic index is

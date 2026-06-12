@@ -119,9 +119,14 @@ def test_render_system_prompt_injects_bundled_skills(store: WikiStore) -> None:
     # evolution skill anchors
     assert "## skill: evolution" in prompt
     assert "topic_evolution(" in prompt
+    # ingest skill anchors
+    assert "## skill: ingest" in prompt
+    assert "list_sources()" in prompt
+    assert "record_ingestion(" in prompt
     # And the YAML frontmatter is NOT leaked into the prompt body.
     assert "name: write" not in prompt
     assert "name: search" not in prompt
+    assert "name: ingest" not in prompt
 
 
 def test_init_seeds_agents_md_under_wiki(tmp_path: Path) -> None:

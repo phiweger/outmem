@@ -477,19 +477,40 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             k: Number of pages to return (default 5).
         """
         _log_call("search_wiki", question=question, k=k)
-        strategy = store.config.outmem.retrieval.strategy
+        configured = store.config.outmem.retrieval.strategy
         try:
-            from outmem.optimize.blocks import build_retriever_from_settings
+            from dataclasses import replace
 
+            from outmem.optimize.blocks import build_retriever_from_settings
+            from outmem.optimize.dsl import strategy_needs_semantic
+
+            # If the configured strategy needs a semantic index but none
+            # is built yet, fall back to bm25 for THIS query rather than
+            # error — the agent should still get results, the user just
+            # learns (via the note below) that they're not the configured
+            # ones until `outmem reindex` runs. Configured strategy is
+            # untouched, so once the index exists the next call uses it.
+            effective = configured
+            fallback_note: str | None = None
+            if strategy_needs_semantic(configured) and not store.semantic_available():
+                effective = "bm25"
+                fallback_note = (
+                    f"no semantic index — fell back from {configured!r} to "
+                    "'bm25' for this query; run `outmem reindex` to enable "
+                    "the configured strategy"
+                )
             # Build-or-reuse under a lock so two concurrent first-calls for
             # the same strategy don't both pay the O(N) candidate-net build
             # (and orphan one retriever). retrieve() runs outside the lock —
             # only the cache miss is serialized.
             with _retriever_lock:
-                retriever = _retriever_cache.get(strategy)
+                retriever = _retriever_cache.get(effective)
                 if retriever is None:
-                    retriever = build_retriever_from_settings(store)
-                    _retriever_cache[strategy] = retriever
+                    settings = store.config.outmem.retrieval
+                    if effective != configured:
+                        settings = replace(settings, strategy=effective)
+                    retriever = build_retriever_from_settings(store, settings)
+                    _retriever_cache[effective] = retriever
             result = retriever.retrieve(question, k=k)
         except (OutmemError, ImportError) as exc:
             # Expected, recoverable failures: a semantic strategy with no
@@ -499,14 +520,17 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             # Logfire see it instead of the agent swallowing it as a string.
             _log_error("search_wiki", exc)
             return f"(search_wiki failed: {exc})"
+        # Merge the strategy-level fallback note (if we swapped to bm25)
+        # with the retriever's own per-query diagnostic — the agent sees
+        # both reasons it wasn't run with the configured pipeline.
+        notes = [n for n in (fallback_note, result.note) if n]
         if not result.slugs:
-            # Carry the retriever's diagnostic (e.g. a hyde generation
-            # failure that forced a raw-question fallback) onto the
-            # no-match path too, so the agent learns *why* it got nothing.
-            note = f" ({result.note})" if result.note else ""
+            # Carry diagnostics onto the no-match path too, so the agent
+            # learns *why* it got nothing.
+            suffix = f" ({'; '.join(notes)})" if notes else ""
             return (
                 "(no pages matched — try rephrasing or `grep_wiki` "
-                f"for literal keyword matches){note}"
+                f"for literal keyword matches){suffix}"
             )
         lines: list[str] = []
         for slug in result.slugs:
@@ -516,8 +540,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 body = ""
             preview = body[:200] + ("…" if len(body) > 200 else "")
             lines.append(f"  - [[{slug}]] {preview}")
-        if result.note:
-            lines.append(f"(diagnostics: {result.note})")
+        if notes:
+            lines.append(f"(diagnostics: {'; '.join(notes)})")
         return "\n".join(lines)
 
     tools: list[WikiTool] = [

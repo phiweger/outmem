@@ -81,6 +81,34 @@ def parse_strategy(spec: str) -> dict[str, Any]:
     )
 
 
+def strategy_needs_semantic(spec: str) -> bool:
+    """True if the strategy ``spec`` needs a built semantic index to run.
+
+    Used by the ``search_wiki`` agent tool to detect when a configured
+    strategy can't run yet (no ``outmem reindex``) so it can gracefully
+    fall back to ``bm25`` for that query instead of erroring. Returns
+    False for anything that would also be False on a missing-index probe
+    (lexical/bm25, plain ``rerank`` = ``rerank(lexical)``).
+
+    A malformed ``spec`` returns False — the eventual retriever build
+    surfaces the real parse error.
+    """
+    try:
+        parsed = parse_strategy(spec)
+    except OutmemError:
+        return False
+    strategy = parsed.get("strategy")
+    if strategy in ("semantic", "hyde"):
+        return True
+    if strategy == "rerank":
+        return parsed.get("rerank_source") in ("semantic", "hyde")
+    if strategy == "hybrid":
+        return any(
+            leg in ("semantic", "hyde") for leg in parsed.get("fuse") or ()
+        )
+    return False
+
+
 def format_strategy(cfg_dict: dict[str, Any]) -> str:
     """Inverse of :func:`parse_strategy` — render a config dict as the DSL.
 
