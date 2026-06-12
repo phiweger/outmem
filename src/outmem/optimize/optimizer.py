@@ -457,13 +457,15 @@ def optimize_retrieval(
         system_prompt=_OPTIMIZER_SYSTEM_PROMPT,
         **agent_kwargs,
     )
-    # One parent span nests the optimizer's own turns and every per-eval
-    # span (and their per-question children) under a single run in the trace.
     _emit_metric_context(store, k, n_unanswerable=len(bank.unanswerable))
-    # Warm the query-embedding cache up front so the FIRST semantic-family
-    # eval isn't a latency outlier vs. the rest (see the helper's docstring).
-    _prewarm_query_cache(store, bank, eval_concurrency)
+    # One parent span nests EVERYTHING — the prewarm, the optimizer's own
+    # turns, and every per-eval span (with its per-question children) — under
+    # a single run in the trace. The prewarm goes INSIDE this span (not
+    # before it) so its embed block doesn't dangle as a separate root.
     with _span("optimize_retrieval", max_evals=max_evals, k=k):
+        # Warm the query-embedding cache up front so the FIRST semantic-family
+        # eval isn't a latency outlier vs. the rest (see helper docstring).
+        _prewarm_query_cache(store, bank, eval_concurrency)
         run = agent.run_sync(_initial_prompt(bank, k, max_evals, allowed))
     notes = str(run.output)
 
