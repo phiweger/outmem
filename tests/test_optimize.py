@@ -666,6 +666,53 @@ def test_optimize_survives_bad_strategy_from_agent(
     assert any("tfidf" in line for line in result.log)
 
 
+def test_allowed_strategies_bounces_disabled_config(
+    store: WikiStore, bank: QuestionBank
+) -> None:
+    """A run restricted to {bm25} must reject a semantic config without
+    burning an eval, while still scoring an allowed one."""
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        if state["n"] == 1:  # disallowed → bounced, no eval consumed
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="run_eval", args={"strategy": "semantic"})])
+        if state["n"] == 2:  # allowed → scored
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="run_eval", args={"strategy": "bm25"})])
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store, bank, optimizer_model=FunctionModel(optimizer),
+        k=1, max_evals=5, allowed_strategies=["bm25"],
+    )
+    # Only the bm25 eval was recorded; semantic was bounced.
+    assert [cfg["strategy"] for cfg, _ in result.trace] == ["bm25"]
+
+
+def test_allowed_strategies_rejects_unknown_name(
+    store: WikiStore, bank: QuestionBank
+) -> None:
+    def lazy(messages: object, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("done")])
+
+    with pytest.raises(OutmemError, match="unknown"):
+        optimize_retrieval(
+            store, bank, optimizer_model=FunctionModel(lazy),
+            allowed_strategies=["bm25", "tfidf"],  # tfidf is not a strategy
+        )
+
+
+def test_normalise_allowed_strategies() -> None:
+    from outmem.optimize.optimizer import _normalise_allowed_strategies
+
+    assert _normalise_allowed_strategies(None) is None
+    assert _normalise_allowed_strategies(["BM25", " Semantic "]) == {"bm25", "semantic"}
+    with pytest.raises(OutmemError):
+        _normalise_allowed_strategies([])  # empty → nothing to evaluate
+
+
 def _exploding_model() -> FunctionModel:
     def respond(messages: object, info: AgentInfo) -> ModelResponse:
         raise RuntimeError("model is down")

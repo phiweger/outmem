@@ -245,9 +245,16 @@ So a single `rerank` eval over a 120-question bank is ~120 small-model
 calls; the optimizer trying it a few times reaches the hundreds. Three
 knobs bound it:
 
+- **`allowed_strategies=[…]`** — restrict the palette, e.g.
+  `["lexical", "bm25", "semantic"]` to skip `rerank`/`hyde` (the only
+  strategies that make a model call *per question*) entirely. The biggest
+  lever when you already know you don't want the LLM gate: it turns the
+  expensive evals off at the source. A disabled config is bounced without
+  burning an eval. (A `hybrid` left in can still fuse a semantic leg —
+  drop `semantic`/`hyde`/`hybrid` together to avoid all embedding work.)
 - **`eval_sample=N`** — score each config on a fixed, seeded subset of N
   answerable questions while tuning (the winner is re-scored on the full
-  bank, so `best_score` stays honest). The biggest lever.
+  bank, so `best_score` stays honest).
 - **`eval_concurrency`** (and `generate_bank`'s `max_concurrency`) — run
   the per-question / per-page calls in parallel (default 8). Cuts wall
   time, not total cost.

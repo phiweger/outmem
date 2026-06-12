@@ -23,11 +23,12 @@ here.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -256,6 +257,7 @@ def optimize_retrieval(
     eval_sample: int | None = None,
     max_evals: int = DEFAULT_OPTIMIZE_MAX_EVALS,
     max_failures_shown: int = DEFAULT_OPTIMIZE_MAX_FAILURES_SHOWN,
+    allowed_strategies: Sequence[str] | None = None,
     on_eval: Callable[[EvalEvent], None] | None = None,
 ) -> OptimizeResult:
     """Let ``optimizer_model`` search the config space over ``bank``.
@@ -278,6 +280,17 @@ def optimize_retrieval(
     the full bank so the reported score is honest. See
     ``docs/autoresearch.md`` for the full run + logging recipe.
 
+    ``allowed_strategies`` restricts which top-level strategies the agent
+    may score — e.g. ``["lexical", "bm25", "semantic"]`` to skip the
+    per-question LLM cost of ``rerank``/``hyde`` entirely, the single
+    biggest cost lever on a run. A ``run_eval`` for a disabled strategy is
+    bounced without consuming an eval, and the agent is told the allowed
+    set up front. Valid names: lexical, bm25, semantic, hyde, rerank,
+    hybrid (unknown names raise). Note a ``hybrid`` allowed here can still
+    fuse a semantic leg; exclude ``semantic``/``hyde``/``hybrid`` together
+    to avoid all embedding work. To cap the *number* of configs instead of
+    the kinds, lower ``max_evals``.
+
     ``on_eval(EvalEvent)`` fires once per scored eval — an epoch-style
     progress hook carrying the config just tried, its metrics, and the
     best score so far. By default it prints one line per eval to stderr
@@ -285,6 +298,8 @@ def optimize_retrieval(
     (hit@5=0.550 abstain=0.800) best=0.710``; wire it to your own display
     or a logger if you like.
     """
+    allowed: frozenset[str] | None = _normalise_allowed_strategies(allowed_strategies)
+
     # Reuse outmem's Logfire wiring (no-op unless logfire.enabled is set);
     # instrument_pydantic_ai is process-global, so this one call traces the
     # optimizer agent AND the per-question rerank calls in the loop.
@@ -369,6 +384,13 @@ def optimize_retrieval(
             if fuse is not None:
                 cfg_dict["fuse"] = fuse
             cfg = RetrievalConfig.from_dict(cfg_dict)
+            if allowed is not None and cfg.strategy not in allowed:
+                # Caller restricted the palette (e.g. to skip the per-question
+                # LLM cost of rerank/hyde). Bounce without burning an eval.
+                return (
+                    f"strategy {cfg.strategy!r} is disabled for this run; "
+                    f"choose from {sorted(allowed)}. Evals left unchanged."
+                )
             fingerprint = _config_fingerprint(cfg)
             if fingerprint in seen:
                 prior_card = seen[fingerprint][1]
@@ -442,7 +464,7 @@ def optimize_retrieval(
     # eval isn't a latency outlier vs. the rest (see the helper's docstring).
     _prewarm_query_cache(store, bank, eval_concurrency)
     with _span("optimize_retrieval", max_evals=max_evals, k=k):
-        run = agent.run_sync(_initial_prompt(bank, k, max_evals))
+        run = agent.run_sync(_initial_prompt(bank, k, max_evals, allowed))
     notes = str(run.output)
 
     if best["cfg"] is None:  # agent never produced a scorable config
@@ -552,19 +574,64 @@ def _prewarm_query_cache(
         with contextlib.suppress(Exception):
             store.semantic_find_similar(q, top_k=1, threshold=0.0)
 
+    from outmem._logfire import span as _span
+
     workers = max(1, min(max_concurrency, len(questions)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        list(pool.map(_warm, questions))
+    # One parent span so the per-question embed spans nest under it instead
+    # of appearing as N flat lines on the Logfire timeline. The worker
+    # threads inherit the current context (the span) via copy_context.
+    with _span("prewarm query-embedding cache", questions=len(questions)):
+        ctx = contextvars.copy_context()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda q: ctx.copy().run(_warm, q), questions))
 
 
-def _initial_prompt(bank: QuestionBank, k: int, max_evals: int) -> str:
+# Top-level strategies a config can name (atomics + the hybrid fuser). The
+# `allowed_strategies` restriction is checked against this set.
+_VALID_STRATEGIES = ("lexical", "bm25", "semantic", "hyde", "rerank", "hybrid")
+
+
+def _normalise_allowed_strategies(
+    allowed: Sequence[str] | None,
+) -> frozenset[str] | None:
+    """Lower-case + validate the ``allowed_strategies`` allow-list.
+
+    Returns ``None`` (no restriction) when ``allowed`` is None. Raises
+    :class:`OutmemError` on an unknown strategy name so a typo fails fast
+    instead of silently disabling every config."""
+    if allowed is None:
+        return None
+    names = frozenset(str(s).strip().lower() for s in allowed)
+    bad = names - set(_VALID_STRATEGIES)
+    if bad:
+        raise OutmemError(
+            f"allowed_strategies contains unknown {sorted(bad)}; "
+            f"valid: {list(_VALID_STRATEGIES)}"
+        )
+    if not names:
+        raise OutmemError("allowed_strategies is empty — nothing to evaluate")
+    return names
+
+
+def _initial_prompt(
+    bank: QuestionBank,
+    k: int,
+    max_evals: int,
+    allowed_strategies: frozenset[str] | None = None,
+) -> str:
+    restriction = ""
+    if allowed_strategies is not None:
+        restriction = (
+            f" This run is restricted to these strategies ONLY: "
+            f"{sorted(allowed_strategies)} — do not try any others."
+        )
     return (
         f"Wiki bank: {len(bank.answerable)} answerable + "
         f"{len(bank.unanswerable)} unanswerable questions. Metric (maximise, "
         f"0..1): mean of [answerable: gold page in top-{k}] and "
         f"[unanswerable: retriever returned empty]. You have up to "
         f"{max_evals} `run_eval` calls. Start with the lexical baseline, "
-        f"diagnose its failures by reading gold pages, then improve."
+        f"diagnose its failures by reading gold pages, then improve.{restriction}"
     )
 
 
