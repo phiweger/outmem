@@ -14,6 +14,22 @@ Compiled knowledge is cheaper to read than raw sources are to
 re-derive, and the wiki is *your* prior work — start there and only
 fall through to raw material when the wiki was silent.
 
+## Tools at a glance
+
+The full search/navigation/read surface — reach for the right one:
+
+| Tool | Reach for it when |
+|------|-------------------|
+| `search_wiki(question, k)` | **Primary recall.** Question-shaped lookup — ranks whole pages by relevance using the wiki's configured strategy (default `rerank(bm25)`). |
+| `grep_wiki(pattern, scope)` | The *exact line* a literal/regex string sits on, or to search `raw/` sources / the gap `log` (`scope="raw"` / `"log"`). |
+| `search_index(prefix)` | **Browse the structure.** Walk the slug namespaces (the table of contents) one level at a time to orient on an unfamiliar wiki. |
+| `list_pages()` | A flat dump of *every* slug — a cheap existence check. |
+| `read_page(slug, peek)` | Open a page; `peek=True` returns just the title + first ~1000 chars for a cheap skim before a full read. |
+| `find_backlinks(slug)` | What links *to* a page (the reverse `[[wikilink]]` graph). |
+| `find_similar(text, …)` | Paraphrase / semantic matches — only when a semantic index is built (see "Optional semantic tier" below). |
+
+The workflow below is the canonical happy path through these.
+
 ## Workflow
 
 Tool calls below show the primary API (PydanticAI tools attached to
@@ -29,6 +45,10 @@ human-driven workflow.
    Returns the most relevant whole pages as `[[slug]]` citations with a
    short excerpt, ranked by the wiki's configured retrieval strategy.
    This is the primary recall move — `read_page` the interesting hits.
+
+   *New to this wiki?* `search_index()` first shows its shape — the
+   top-level namespaces with page counts — so you can `search_index(prefix="…")`
+   to drill in, rather than guessing search terms blind.
 
 2. **Need an exact line, or to search raw sources / the log?** Use
    `grep_wiki` — literal/regex ripgrep, not relevance ranking:
@@ -46,15 +66,18 @@ human-driven workflow.
 
    Equivalent CLI: `outmem search "<pattern>" --scope wiki|raw|log`.
 
-3. **Read the candidate page.**
+3. **Read the candidate page** (skim first if you're unsure):
 
    ```python
-   read_page(slug="pricing-formula")
+   read_page(slug="pricing-formula", peek=True)   # title + first ~1000 chars
+   read_page(slug="pricing-formula")               # the full file
    ```
 
-   Returns the full file (frontmatter + body). The frontmatter
-   `provenance` field tells you which raw files the page was
-   compiled from.
+   The full read returns the whole file (frontmatter + body); its
+   frontmatter `provenance` field tells you which raw files the page
+   was compiled from. Use `peek=True` to triage a candidate cheaply —
+   confirm it's the right page before committing the whole body to
+   context.
 
    Equivalent CLI: `outmem read "<slug>"`.
 

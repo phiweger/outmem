@@ -1,20 +1,28 @@
 # Search & retrieval
 
-Retrieval in outmem is a **workflow**, not a single call: *locate* a
-page, *read* it in full, *traverse* to neighbours. This page explains the
-loop, the two search tools, and how the configured retrieval strategy
-fits in.
+Retrieval in outmem is a **workflow**, not a single call: *orient* on
+the wiki, *locate* a page, *read* it in full, *traverse* to neighbours.
+This page explains the loop, the tools, and how the configured retrieval
+strategy fits in.
 
-## The two search tools
+## The tools at a glance
 
 | tool | input | returns | use it for |
 | --- | --- | --- | --- |
 | **`search_wiki`** | a natural-language *question* | wiki pages ranked by relevance, as `[[slug]]` citations + excerpt | "which pages answer this?" — the primary recall move |
 | **`grep_wiki`** | a *pattern* (regex/literal) + `scope` | `key:line:text` rows, one per match | the *exact line* a string is on; searching `raw/` sources or the `log/` |
+| **`search_index`** | a namespace *prefix* (optional) | child namespaces (with page counts) + leaf pages at that level | browsing the wiki's structure (the TOC) to orient before searching |
+| **`list_pages`** | — | every slug, one per line | a flat existence check |
+| **`read_page`** | a `slug` (+ `peek`) | the full page, or — with `peek=True` — the title + first ~1000 chars | reading a hit in full, or skimming it cheaply first |
+| **`find_backlinks`** | a `slug` | slugs that link to it | "what references / depends on this page?" |
+| **`find_similar`** | free *text* | cosine-similar chunks (needs a built index) | paraphrase / near-duplicate matches grep would miss |
 
 `search_wiki` runs the pipeline configured by the wiki's
 `retrieval.strategy` (the `retrieval:` block in `config.yaml`; default
 `rerank(bm25)`). `grep_wiki` is plain ripgrep — no ranking, no model.
+`search_index` and `list_pages` are cheap directory walks — no model, no
+index. (`page_history` / `topic_evolution` traverse *time* rather than
+content — see [growing-the-wiki.md](growing-the-wiki.md).)
 
 ## The core loop
 
@@ -23,17 +31,43 @@ search_wiki(question) ──▶ [[slug]] ──▶ read_page(slug) ──▶ tra
    rank relevant pages       cite        full text         backlinks / [[links]] / history
 ```
 
+0. **Orient (optional)** — on an unfamiliar wiki, `search_index()` shows
+   its shape (top-level namespaces + page counts) before you search;
+   drill in with `search_index(prefix="abx")`.
+
 1. **`search_wiki(question="…")`** — ask a question, get the most
    relevant whole pages back as `[[slug]]` citations with a short
    excerpt. `read_page` the interesting ones.
 
 2. **`read_page(slug)`** — the full page text. This is the step that
    matters: reasoning should happen over the whole page, not an excerpt.
+   Unsure a hit is the right one? `read_page(slug, peek=True)` returns
+   just the title + first ~1000 chars to triage it before you spend the
+   context on a full read.
 
 3. **Traverse** — `find_backlinks(slug)` (who links here), `[[slug]]`
    wikilinks in the body, `page_history(slug)`, `topic_evolution(slugs…)`.
 
-`list_pages()` enumerates every slug when you'd rather browse than search.
+`list_pages()` enumerates every slug flat; `search_index()` browses the
+same slugs *by namespace* when you'd rather see the structure.
+
+## Browsing the index (`search_index`)
+
+Slugs are `:`-namespaced (`abx:penicillin`, `abx:side-effects:rash`),
+mirroring directories under `wiki/pages/`. `search_index` walks that tree
+one level at a time — the wiki's table of contents:
+
+```
+search_index()              # top-level namespaces (with counts) + top-level pages
+search_index(prefix="abx")  # the namespaces and pages directly under abx:
+```
+
+Each call returns the child namespaces at that level (each with the count
+of pages beneath it, ready to pass back as the next `prefix`) and the leaf
+pages sitting directly there. Where `list_pages()` dumps every slug flat,
+`search_index` shows the *shape* — reach for it to orient on an unfamiliar
+wiki, then `read_page` (optionally `peek=True`) the leaves that look
+relevant. It's a plain directory walk: no model call, no semantic index.
 
 ## `grep_wiki` — literal matches & non-wiki scopes
 

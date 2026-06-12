@@ -81,8 +81,10 @@ from outmem.index import (
     AGENTS_FILENAME,
     INDEX_FILENAME,
     INDEX_SLUG,
+    IndexLevel,
     editorial_pages,
     index_page_text,
+    navigate_index,
 )
 from outmem.search import DEFAULT_RESULT_BYTES, SearchResult, rg_available, search
 from outmem.slug import PAGES_DIR, slug_to_relpath, validate_slug
@@ -443,6 +445,16 @@ class WikiStore:
             relpath_to_slug(p.relative_to(self.pages_path))
             for p in editorial_pages(self.pages_path)
         )
+
+    def index_tree(self, prefix: str = "") -> IndexLevel:
+        """Navigate the slug index (the TOC) one namespace level at a time.
+
+        Groups :meth:`list_slugs` by the ``:`` namespace separator via
+        :func:`outmem.index.navigate_index`. ``prefix=""`` returns the
+        root level; pass a namespace from ``IndexLevel.namespaces`` back
+        as ``prefix`` to drill in.
+        """
+        return navigate_index(self.list_slugs(), prefix)
 
     def repair_pages(
         self, *, dry_run: bool = True, commit_subject: str | None = None

@@ -5,7 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from outmem.frontmatter import parse_wiki_page
-from outmem.index import INDEX_FILENAME, INDEX_SLUG, index_page_text, render_index
+from outmem.index import (
+    INDEX_FILENAME,
+    INDEX_SLUG,
+    index_page_text,
+    navigate_index,
+    render_index,
+)
 from outmem.store import WikiStore
 
 
@@ -67,6 +73,64 @@ def test_index_page_text_round_trips(tmp_path: Path) -> None:
     assert fm.slug == INDEX_SLUG
     assert fm.extra.get("generated") is True
     assert "[[alpha]]" in body
+
+
+# ---------------------------------------------------------------------------
+# navigate_index — one-level TOC navigation over a flat slug list
+# ---------------------------------------------------------------------------
+
+
+_NS_SLUGS = [
+    "pricing-formula",
+    "abx:penicillin",
+    "abx:ceftriaxone",
+    "abx:side-effects:rash",
+]
+
+
+def test_navigate_index_root() -> None:
+    level = navigate_index(_NS_SLUGS)
+    assert level.prefix == ""
+    assert level.namespaces == [("abx", 3)]  # 3 pages anywhere under abx:
+    assert level.pages == ["pricing-formula"]  # the only top-level leaf
+
+
+def test_navigate_index_drill() -> None:
+    level = navigate_index(_NS_SLUGS, "abx")
+    assert level.prefix == "abx"
+    assert level.namespaces == [("abx:side-effects", 1)]
+    assert level.pages == ["abx:ceftriaxone", "abx:penicillin"]  # sorted
+
+
+def test_navigate_index_tolerates_trailing_colon() -> None:
+    level = navigate_index(_NS_SLUGS, "abx:")
+    assert level.prefix == "abx"
+    assert level.pages == ["abx:ceftriaxone", "abx:penicillin"]
+
+
+def test_navigate_index_page_and_namespace_coexist() -> None:
+    # ``abx`` is both a leaf page (abx.md) and a namespace (abx/…).
+    slugs = ["abx", "abx:penicillin"]
+    root = navigate_index(slugs)
+    assert root.pages == ["abx"]
+    assert root.namespaces == [("abx", 1)]
+    drill = navigate_index(slugs, "abx")
+    assert drill.pages == ["abx:penicillin"]
+
+
+def test_navigate_index_empty_and_unknown_prefix() -> None:
+    assert navigate_index([]).namespaces == []
+    miss = navigate_index(_NS_SLUGS, "nope")
+    assert miss.namespaces == [] and miss.pages == []
+
+
+def test_store_index_tree_round_trips(tmp_path: Path) -> None:
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("pricing-formula", title="P", body="b")
+    store.write_page("abx:penicillin", title="Pen", body="b")
+    root = store.index_tree()
+    assert root.namespaces == [("abx", 1)]
+    assert root.pages == ["pricing-formula"]
 
 
 # ---------------------------------------------------------------------------

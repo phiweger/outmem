@@ -211,15 +211,16 @@ agent = Agent(
 result = await agent.run("what did we decide about pricing?")
 ```
 
-The tools — twelve, plus `find_similar` when the semantic index is built
-(thirteen):
+The tools — fourteen, plus `find_similar` when the semantic index is
+built (fifteen):
 
 | Tool | Required args | Purpose |
 |------|---------------|---------|
 | `search_wiki(question, k)` | 1 | Strategy-driven page search → ranked `[[slug]]` citations |
 | `grep_wiki(pattern, scope, case_insensitive)` | 1 | Ripgrep over wiki / raw / log / all |
-| `read_page(slug)` | 1 | Full file (frontmatter + body) |
-| `list_pages()` | 0 | Every slug, one per line |
+| `read_page(slug, peek)` | 1 | Full file (frontmatter + body); `peek=True` → title + first ~1000 chars |
+| `list_pages()` | 0 | Every slug, one per line (flat) |
+| `search_index(prefix)` | 0 | Browse the slug namespaces (the TOC) one level at a time |
 | `find_backlinks(slug)` | 1 | Pages linking *to* slug |
 | `page_history(slug)` | 1 | Commits touching the page |
 | `topic_evolution(slugs, include_log)` | 1 | `git log -p --follow` diff stream |

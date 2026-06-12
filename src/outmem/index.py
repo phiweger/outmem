@@ -31,6 +31,8 @@ an orphan.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from outmem.frontmatter import parse_wiki_page
@@ -90,6 +92,63 @@ def render_index(pages_dir: Path) -> str:
     return f"# {INDEX_TITLE}\n\n{len(entries)} page{'' if len(entries) == 1 else 's'}.\n\n{body}\n"
 
 
+@dataclass(frozen=True)
+class IndexLevel:
+    """One navigable level of the slug index (the wiki's table of contents).
+
+    ``prefix`` is the namespace this level sits at (``""`` is the root).
+    ``namespaces`` are the child namespaces directly below it — each a
+    ``(name, page_count)`` pair where ``name`` is itself a valid prefix to
+    drill into and ``page_count`` is how many pages live anywhere beneath
+    it. ``pages`` are the leaf-page slugs that sit *directly* at this level
+    (no further namespace segment). Both lists are sorted.
+    """
+
+    prefix: str
+    namespaces: list[tuple[str, int]]
+    pages: list[str]
+
+
+def navigate_index(slugs: Sequence[str], prefix: str = "") -> IndexLevel:
+    """Group a flat slug list into one navigable level of the TOC.
+
+    Slugs are ``:``-namespaced (``abx:penicillin``,
+    ``abx:side-effects:misc``). Given ``prefix`` (``""`` = root), return
+    the child namespaces directly below it (with page counts) plus the
+    leaf pages sitting directly at that level — the shape a caller walks
+    one step at a time, passing a returned namespace back as the next
+    ``prefix``. A trailing ``:`` on ``prefix`` is tolerated.
+
+    A slug can be both a page *and* a namespace (``abx.md`` alongside
+    ``abx/penicillin.md``): it then appears in ``pages`` at its own level
+    and as a namespace one level up.
+    """
+    prefix = prefix.strip().rstrip(":")
+    seg_prefix = f"{prefix}:" if prefix else ""
+    counts: dict[str, int] = {}
+    pages: list[str] = []
+    for slug in slugs:
+        if seg_prefix:
+            if not slug.startswith(seg_prefix):
+                continue
+            remainder = slug[len(seg_prefix) :]
+        else:
+            remainder = slug
+        head, sep, _ = remainder.partition(":")
+        if not head:
+            continue
+        if sep:  # more segments below → ``head`` names a child namespace
+            child = f"{seg_prefix}{head}"
+            counts[child] = counts.get(child, 0) + 1
+        else:  # a leaf page sitting directly at this level
+            pages.append(slug)
+    return IndexLevel(
+        prefix=prefix,
+        namespaces=sorted(counts.items()),
+        pages=sorted(pages),
+    )
+
+
 def index_page_text(pages_dir: Path) -> str:
     """Render the full ``index.md`` file with frontmatter + body."""
     from outmem.frontmatter import WikiFrontmatter, serialize_wiki_page
@@ -111,7 +170,9 @@ __all__ = [
     "INDEX_TITLE",
     "PAGES_DIR",
     "RESERVED_WIKI_FILES",
+    "IndexLevel",
     "editorial_pages",
     "index_page_text",
+    "navigate_index",
     "render_index",
 ]

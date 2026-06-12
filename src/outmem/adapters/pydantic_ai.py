@@ -43,6 +43,10 @@ from outmem.store import WikiStore
 # don't pretend a tight signature we can't enforce across nine arities.
 WikiTool = Callable[..., Any]
 
+# How many characters of the body ``read_page(peek=True)`` returns — enough
+# to judge a candidate's relevance without pulling a whole page into context.
+PEEK_CHARS = 1000
+
 # Logger every tool call writes a one-line trace to. Disabled by default
 # (Python's logging emits nothing without a handler); the CLI's
 # ``outmem ask`` attaches a stderr handler so users can see what the
@@ -148,14 +152,19 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             return f"(search failed: {exc})"
         return _format_hits(result, scope)
 
-    def read_page(slug: str) -> str:
+    def read_page(slug: str, peek: bool = False) -> str:
         """Read a single wiki page by slug. Returns the full file
         (frontmatter + body) as a string.
 
+        Set ``peek=True`` to get just the title and the first ~1000
+        characters of the body — a cheap way to triage whether a
+        candidate page is worth reading in full before spending the
+        context on it.
+
         Use this after ``search_wiki`` has surfaced a candidate slug,
-        or when you already know which page you want. To read a raw
-        source document rather than a wiki page, use ``grep_wiki`` with
-        ``scope="raw"`` to locate it.
+        ``search_index`` has led you to one, or when you already know
+        which page you want. To read a raw source document rather than a
+        wiki page, use ``grep_wiki`` with ``scope="raw"`` to locate it.
 
         Slugs may be flat (``pricing-formula``) or namespaced with
         ``:`` separators (``abx:penicillin``,
@@ -164,12 +173,13 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
 
         Example:
             read_page(slug="pricing-formula")
-            read_page(slug="abx:penicillin")
+            read_page(slug="abx:penicillin", peek=True)   # quick skim
 
         Args:
-            slug: A slug from ``list_pages`` or ``search_wiki``.
+            slug: A slug from ``list_pages``, ``search_index`` or ``search_wiki``.
+            peek: If true, return only the title + first ~1000 chars (a preview).
         """
-        _log_call("read_page", slug=slug)
+        _log_call("read_page", slug=slug, peek=peek)
         try:
             page = store.read(slug)
         except SlugError as exc:
@@ -187,13 +197,24 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 f"(no such wiki page: {slug!r} — try `list_pages` to see "
                 "what exists, or `grep_wiki` with scope='raw' for source material)"
             )
+        if peek:
+            body = page.body
+            clipped = body[:PEEK_CHARS]
+            if len(body) > PEEK_CHARS:
+                clipped += (
+                    f"\n\n… (peek: first {PEEK_CHARS} of {len(body)} chars — "
+                    f"call read_page(slug={slug!r}) without peek for the full page)"
+                )
+            return f"# {page.title}\n\n{clipped}"
         return page.path.read_text(encoding="utf-8")
 
     def list_pages() -> str:
         """Return every wiki page slug, one per line, alphabetically.
 
-        Cheap (one directory listing). Use to map the territory before
-        a broad search, or to confirm a slug exists before reading it.
+        Cheap (one directory listing). A flat dump of *every* slug — to
+        browse the wiki's structure by namespace instead, use
+        ``search_index``. Use either to map the territory before a broad
+        search, or to confirm a slug exists before reading it.
 
         Example:
             list_pages()
@@ -201,6 +222,43 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         _log_call("list_pages")
         slugs = store.list_slugs()
         return "\n".join(slugs) if slugs else "(no pages)"
+
+    def search_index(prefix: str = "") -> str:
+        """Browse the wiki's table of contents by namespace.
+
+        Slugs are ``:``-namespaced (``abx:penicillin``,
+        ``abx:side-effects:misc``). This walks that hierarchy one level
+        at a time: call it with no argument for the top-level namespaces
+        (with page counts) and any top-level pages, then pass a namespace
+        back as ``prefix`` to drill in. Where ``list_pages`` dumps every
+        slug flat, this shows the *shape* — use it to orient on an
+        unfamiliar wiki, then ``read_page`` (optionally ``peek=True``)
+        the leaves that look relevant.
+
+        Example:
+            search_index()                  # top-level namespaces + pages
+            search_index(prefix="abx")      # what's under abx:
+
+        Args:
+            prefix: A namespace to drill into (omit for the root level).
+        """
+        _log_call("search_index", prefix=prefix)
+        level = store.index_tree(prefix)
+        if not level.namespaces and not level.pages:
+            return f"(nothing under {prefix!r})" if level.prefix else "(no pages)"
+        lines: list[str] = [
+            f"index of {level.prefix}:" if level.prefix else "index (root):"
+        ]
+        if level.namespaces:
+            lines.append("  namespaces (drill in with search_index(prefix=…)):")
+            lines += [
+                f"    {name}:  ({count} page{'' if count == 1 else 's'})"
+                for name, count in level.namespaces
+            ]
+        if level.pages:
+            lines.append("  pages (open with read_page(slug=…)):")
+            lines += [f"    {slug}" for slug in level.pages]
+        return "\n".join(lines)
 
     def find_backlinks(slug: str) -> str:
         """List wiki pages that link to ``slug`` via ``[[wikilink]]``.
@@ -467,6 +525,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         grep_wiki,
         read_page,
         list_pages,
+        search_index,
         find_backlinks,
         page_history,
         topic_evolution,

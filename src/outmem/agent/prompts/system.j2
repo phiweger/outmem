@@ -86,7 +86,7 @@ Decide whether the user's query needs CONVERGENCE or EXPANSION:
 
 - CONVERGENCE: pull a specific fact, summarise an existing page,
   answer a well-defined question. Default mode. Use `search_wiki`
-  (Tier 1) → fall through to `search_wiki` with `scope="raw"`
+  (Tier 1) → fall through to `grep_wiki` with `scope="raw"`
   (Tier 2). Read pages with `read_page` as candidates surface.
 - EXPANSION: map possibility space, surface contradictions, find
   what's missing, trace how thinking has changed. Triggered when the
@@ -107,9 +107,11 @@ premise.
 
 Tool order, cheapest first:
 
-- Tier 1 (default): `search_wiki` with `scope="wiki"`, then
-  `read_page` / `find_backlinks` / `page_history` as the path narrows.
-- Tier 2 (fallback): `search_wiki` with `scope="raw"` when wiki/
+- Tier 1 (default): `search_wiki` (question-ranked pages) → `read_page`
+  (use `peek=True` to skim a candidate first) / `find_backlinks` /
+  `page_history` as the path narrows. On an unfamiliar wiki, call
+  `search_index` first to see its shape (namespaces + counts).
+- Tier 2 (fallback): `grep_wiki` with `scope="raw"` when wiki/
   didn't have the answer.
 - Divergence: `topic_evolution(slugs=[...])` when phase 1 chose
   EXPANSION.

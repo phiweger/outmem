@@ -58,6 +58,7 @@ def test_wiki_tools_returns_expected_set(seeded_store: WikiStore) -> None:
         "grep_wiki",
         "read_page",
         "list_pages",
+        "search_index",
         "find_backlinks",
         "page_history",
         "topic_evolution",
@@ -127,6 +128,57 @@ def test_read_page_returns_full_file(seeded_store: WikiStore) -> None:
 def test_list_pages(seeded_store: WikiStore) -> None:
     out = _by_name(wiki_tools(seeded_store), "list_pages")()
     assert out.split("\n") == ["acme-msa", "pricing-formula"]
+
+
+def test_read_page_peek_previews_long_body(seeded_store: WikiStore) -> None:
+    seeded_store.write_page("long-page", title="Long", body=("x" * 3000) + "\n")
+    out = _by_name(wiki_tools(seeded_store), "read_page")(slug="long-page", peek=True)
+    assert out.startswith("# Long")
+    assert "peek: first 1000 of 3001 chars" in out
+    assert out.count("x") == 1000  # only the first ~1000 chars of the body
+
+
+def test_read_page_peek_short_body_has_no_marker(seeded_store: WikiStore) -> None:
+    out = _by_name(wiki_tools(seeded_store), "read_page")(
+        slug="pricing-formula", peek=True
+    )
+    assert out.startswith("# Pricing formula")
+    assert "cost-plus 35%" in out
+    assert "peek:" not in out  # short page fits → no truncation note
+    assert "title:" not in out  # a peek is body-only, no frontmatter
+
+
+@pytest.fixture
+def namespaced_store(tmp_path: Path) -> WikiStore:
+    store = WikiStore.init(tmp_path / "wiki")
+    store.write_page("pricing-formula", title="Pricing", body="b\n")
+    store.write_page("abx:penicillin", title="Pen", body="b\n")
+    store.write_page("abx:ceftriaxone", title="Cef", body="b\n")
+    store.write_page("abx:side-effects:rash", title="Rash", body="b\n")
+    return store
+
+
+def test_search_index_root_shows_namespaces_and_top_pages(
+    namespaced_store: WikiStore,
+) -> None:
+    out = _by_name(wiki_tools(namespaced_store), "search_index")()
+    assert "index (root):" in out
+    assert "abx:  (3 pages)" in out  # penicillin + ceftriaxone + side-effects:rash
+    assert "pricing-formula" in out  # a top-level leaf page
+    assert "penicillin" not in out  # hidden until you drill into abx:
+
+
+def test_search_index_drills_into_namespace(namespaced_store: WikiStore) -> None:
+    out = _by_name(wiki_tools(namespaced_store), "search_index")(prefix="abx")
+    assert "index of abx:" in out
+    assert "abx:side-effects:  (1 page)" in out  # singular, one page below
+    assert "abx:penicillin" in out
+    assert "abx:ceftriaxone" in out
+
+
+def test_search_index_unknown_prefix(namespaced_store: WikiStore) -> None:
+    out = _by_name(wiki_tools(namespaced_store), "search_index")(prefix="nope")
+    assert out == "(nothing under 'nope')"
 
 
 def test_find_backlinks(seeded_store: WikiStore) -> None:
@@ -245,6 +297,7 @@ def test_wiki_read_tools_drops_write_tools(seeded_store: WikiStore) -> None:
         "search_wiki",
         "read_page",
         "list_pages",
+        "search_index",
         "find_backlinks",
         "page_history",
         "topic_evolution",
