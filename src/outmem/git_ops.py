@@ -227,6 +227,13 @@ def commit_as(
     # spec v0.5 §12 explicitly defers GPG-signed agent commits to v0.2;
     # turn signing off so v0.1 commits succeed regardless of the user's
     # global ``commit.gpgsign`` setting.
+    #
+    # ``--no-verify`` skips the pre-commit hook: outmem already maintains
+    # the derived artefacts (index.md, vector DB) inline on its own writes
+    # and always emits valid frontmatter, so the hook — which exists to
+    # catch *external* manual edits — would only do redundant work here.
+    # This also keeps the auto-installed hook (see :func:`outmem.hooks.
+    # ensure_hook`) from re-entering on every ``write_page``.
     args = [
         "-c",
         f"user.name={author_name}",
@@ -235,6 +242,7 @@ def commit_as(
         "-c",
         "commit.gpgsign=false",
         "commit",
+        "--no-verify",
         "-m",
         message,
     ]

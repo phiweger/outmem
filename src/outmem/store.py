@@ -46,7 +46,7 @@ from outmem.config import (
     starter_agents_md,
     starter_yaml,
 )
-from outmem.exceptions import OutmemError, SlugError
+from outmem.exceptions import FrontmatterError, OutmemError, SlugError
 from outmem.frontmatter import (
     ProvenanceEntry,
     WikiFrontmatter,
@@ -75,6 +75,7 @@ from outmem.git_ops import (
     push as _git_push,
 )
 from outmem.history import page_history, topic_evolution
+from outmem.hooks import ensure_hook
 from outmem.identity import Contributors, load_contributors
 from outmem.index import (
     AGENTS_FILENAME,
@@ -324,6 +325,7 @@ class WikiStore:
         if not read_only:
             store._ensure_layout()
             store._maybe_clear_stale_lock()
+            store._maybe_auto_install_hook()
         return store
 
     @classmethod
@@ -364,6 +366,7 @@ class WikiStore:
         store._seed_contributors()
         store._seed_agents_md()
         store._maybe_ignore_dotenv()
+        store._maybe_auto_install_hook()
         return store
 
     # ------------------------------------------------------------------
@@ -378,15 +381,36 @@ class WikiStore:
         lives at ``wiki/index.md`` and is fetched via the special
         ``index`` slug.
 
+        Self-heals frontmatter that won't parse but is mechanically
+        fixable — the imported-data case where a title contains an
+        unquoted ``: `` (see :func:`outmem.frontmatter.repair_wiki_page`).
+        The repair is applied **in memory** and logged at WARNING (naming
+        the page), so callers like ``generate_bank`` and the agent's
+        retrieval tools get usable content instead of silently dropping
+        the page — without ``read`` taking on a surprise disk write. The
+        on-disk file is persisted by the pre-commit hook (next commit) or
+        :meth:`repair_pages`.
+
         Raises :class:`OutmemError` if the page does not exist;
         :class:`outmem.exceptions.FrontmatterError` if frontmatter is
-        missing or malformed.
+        missing or malformed in a way the repair doesn't cover.
         """
         path = self._page_path(slug)
         if not path.exists():
             raise OutmemError(f"No such wiki page: {slug}")
         text = path.read_text(encoding="utf-8")
-        frontmatter, body = parse_wiki_page(text)
+        try:
+            frontmatter, body = parse_wiki_page(text)
+        except FrontmatterError:
+            repaired = repair_wiki_page(text)
+            if repaired is None:
+                raise  # not a shape we can mend — surface it loudly
+            log.warning(
+                "self-healed unparseable frontmatter in %r (in memory; "
+                "persist with the pre-commit hook or store.repair_pages())",
+                slug,
+            )
+            frontmatter, body = parse_wiki_page(repaired)
         return WikiPage(slug=slug, frontmatter=frontmatter, body=body, path=path)
 
     def exists(self, slug: str) -> bool:
@@ -925,6 +949,20 @@ class WikiStore:
         if not settings.remove_stale_lock:
             return
         clear_stale_index_lock(self.root, max_age_seconds=settings.stale_lock_seconds)
+
+    def _maybe_auto_install_hook(self) -> None:
+        """Ensure the pre-commit hook unless the user opted out.
+
+        Best-effort and idempotent (see :func:`outmem.hooks.ensure_hook`):
+        installs our hook when absent/stale, never clobbers a foreign one,
+        never raises. Skipped for read-only stores (they must not mutate
+        the repo). This is what lets manual ``git commit`` self-repair +
+        reindex without the user remembering ``outmem hook install``."""
+        if self.config.read_only:
+            return
+        if not self.config.outmem.git.auto_install_hook:
+            return
+        ensure_hook(self.root)
 
     def _maybe_ignore_dotenv(self) -> None:
         """Ensure ``.env`` is in the wiki's top-level ``.gitignore``.

@@ -157,6 +157,37 @@ class TestRead:
         with pytest.raises(FrontmatterError):
             fresh_store.read("broken")
 
+    def test_read_self_heals_repairable_frontmatter(
+        self, fresh_store: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A page with an unquoted ': ' in the title (the import failure
+        mode) is repaired in memory on read — usable content, no raise —
+        and a warning is logged. The on-disk file is left for the hook /
+        repair_pages to persist."""
+        import logging
+
+        bad = fresh_store.pages_path / "rki.md"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        on_disk = "---\ntitle: Influenza (Teil 1): saisonale\nslug: rki\n---\n\nbody\n"
+        bad.write_text(on_disk, encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING):
+            page = fresh_store.read("rki")
+        assert page.title == "Influenza (Teil 1): saisonale"  # usable content
+        assert "self-healed" in caplog.text
+        # read() did NOT rewrite the file (no surprise disk write).
+        assert bad.read_text(encoding="utf-8") == on_disk
+
+    def test_read_still_raises_when_unrepairable(
+        self, fresh_store: WikiStore
+    ) -> None:
+        """A frontmatter break the repair doesn't cover still surfaces."""
+        bad = fresh_store.pages_path / "wrecked.md"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_text("---\ntitle: ok\ntags:\n[broken\n---\n\nbody\n", encoding="utf-8")
+        with pytest.raises(FrontmatterError):
+            fresh_store.read("wrecked")
+
 
 # ---------------------------------------------------------------------------
 # Write / extend / log
@@ -168,6 +199,24 @@ class TestWrite:
         fresh_store.write_page("alpha", title="Alpha", body="body")
         log = log_since(fresh_store.root)
         assert log[0].subject == "compact: alpha"
+
+    def test_internal_commit_bypasses_pre_commit_hook(
+        self, fresh_store: WikiStore
+    ) -> None:
+        """outmem's own commits must not fire the (possibly auto-installed)
+        pre-commit hook — they maintain derived artefacts inline, so firing
+        it would be redundant and, with auto-install, re-entrant. Install a
+        hook that writes a sentinel; a write_page commit must not trip it."""
+        hooks = fresh_store.root / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        sentinel = fresh_store.root / "HOOK_FIRED"
+        (hooks / "pre-commit").write_text(
+            f"#!/bin/sh\ntouch '{sentinel}'\n", encoding="utf-8"
+        )
+        (hooks / "pre-commit").chmod(0o755)
+
+        fresh_store.write_page("alpha", title="Alpha", body="body")
+        assert not sentinel.exists()  # --no-verify kept the hook from firing
 
     def test_write_persists_frontmatter(self, fresh_store: WikiStore) -> None:
         when = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)

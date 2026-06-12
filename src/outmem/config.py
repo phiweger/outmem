@@ -47,6 +47,7 @@ DEFAULT_BRANCH = "main"
 DEFAULT_REMOVE_STALE_LOCK = True
 DEFAULT_STALE_LOCK_SECONDS = 60
 DEFAULT_RETRY_ON_LOCK = True
+DEFAULT_AUTO_INSTALL_HOOK = True
 
 DEFAULT_SOURCE_MAX_CHARS = 200_000  # cap on `read_source` tool returns
 
@@ -290,6 +291,10 @@ class GitSettings:
     remove_stale_lock: bool = DEFAULT_REMOVE_STALE_LOCK
     stale_lock_seconds: int = DEFAULT_STALE_LOCK_SECONDS
     retry_on_lock: bool = DEFAULT_RETRY_ON_LOCK
+    # Auto-ensure the pre-commit hook on store init/open (idempotent, never
+    # clobbers a hook you wrote). Set false to manage the hook yourself;
+    # note `outmem hook uninstall` alone won't stick while this is true.
+    auto_install_hook: bool = DEFAULT_AUTO_INSTALL_HOOK
 
 
 @dataclass
@@ -514,6 +519,8 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
             config.git.stale_lock_seconds = git_block["stale_lock_seconds"]
         if isinstance(git_block.get("retry_on_lock"), bool):
             config.git.retry_on_lock = git_block["retry_on_lock"]
+        if isinstance(git_block.get("auto_install_hook"), bool):
+            config.git.auto_install_hook = git_block["auto_install_hook"]
 
     sources_block = data.get("sources")
     if isinstance(sources_block, dict) and isinstance(sources_block.get("max_chars"), int):

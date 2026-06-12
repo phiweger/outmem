@@ -147,22 +147,49 @@ outmem index rebuild       # → `index: rebuild` commit (no-op if in sync)
 outmem reindex             # full semantic walk; skip-if-hash-unchanged
 ```
 
-Or install the pre-commit hook once and forget about it — a manual
-`git commit` of wiki pages will, in the same commit: **repair** any
-staged page whose frontmatter won't parse (e.g. an externally pasted
-title with an unquoted `: `), regenerate `index.md`, and update the
-vector DB:
+The pre-commit hook does the same in the same commit on a manual
+`git commit` of wiki pages: **repair** any staged page whose frontmatter
+won't parse, regenerate `index.md`, and update the vector DB. outmem
+**auto-installs it** on `init`/`open` (idempotent, never clobbers a hook
+you wrote), so you normally don't run anything:
 
 ```bash
-outmem hook install        # → .git/hooks/pre-commit
-outmem hook uninstall
+outmem hook install        # explicit install (rarely needed) / --force to replace
+outmem hook uninstall      # one-off removal
 ```
 
-The repair only rewrites a page that *currently* fails to parse (it's a
-no-op on well-formed pages) and prints `repaired frontmatter in <path>`
-so the fix is visible in the commit output, not silent. For pages
-already committed (e.g. pulled from a remote), repair on demand with
-`store.repair_pages(dry_run=False)` from the Python API.
+To stop the auto-install permanently, set `git.auto_install_hook: false`
+in `config.yaml` (otherwise the next `open` re-ensures it). The hook
+prints `repaired frontmatter in <path>` so a fix is visible in the commit
+output, not silent.
+
+### Frontmatter self-healing
+
+A wiki page whose YAML frontmatter won't parse — overwhelmingly the
+imported-data case where a `title:` contains an unquoted `: `
+(`title: Influenza (Teil 1): ...`) — is handled in three places, so a bad
+page can't silently disappear from a question bank or search:
+
+| When | What happens | Persists to disk? |
+| --- | --- | --- |
+| **On read** (`store.read`, so `generate_bank`, `find_pages`, the agent) | repaired *in memory*, logged at WARNING — you get usable content, never a silent skip | no (read has no side effects) |
+| **Pre-commit hook** (manual `git commit`) | repaired + re-staged into the commit | yes |
+| **On demand** (`store.repair_pages(dry_run=False)`) | walks all pages, repairs, commits | yes |
+
+The repair only ever touches a page that *currently* fails to parse —
+it's a guaranteed no-op on a well-formed page, and it verifies the result
+parses before accepting it, so it can't make a page worse. Breaks it
+*doesn't* understand (mis-indented blocks, truncated frontmatter) are left
+to surface loudly. outmem's own writes never produce this (the serializer
+quotes correctly); it only arises from external tools or manual edits.
+
+For pages already committed (e.g. pulled from a remote, which the hook
+won't have seen), repair on demand:
+
+```python
+store.repair_pages(dry_run=True)    # report what's fixable
+store.repair_pages(dry_run=False)   # repair + commit
+```
 
 ## Semantic search (requires `outmem[semantic]`)
 

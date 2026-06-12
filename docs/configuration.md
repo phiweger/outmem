@@ -81,6 +81,7 @@ git:
   remove_stale_lock: true       # clean .git/index.lock left by killed prior runs
   stale_lock_seconds: 60         # lock counts as stale after this many seconds
   retry_on_lock: true            # retry git ops once on transient index.lock failures
+  auto_install_hook: true        # ensure the pre-commit hook on open (see below)
 
 # Optional — requires `pip install outmem[semantic]`.
 semantic:

@@ -384,61 +384,48 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
     return 0
 
 
-HOOK_NAME = "pre-commit"
-HOOK_MARKER = "# outmem pre-commit hook"
-HOOK_SCRIPT = f"""#!/bin/sh
-{HOOK_MARKER}
-# For externally edited wiki pages (Obsidian, etc.): repairs unparseable
-# frontmatter, keeps wiki/index.md current, and keeps the semantic vector
-# DB in lockstep — re-staging each into the commit. Installed by
-# `outmem hook install`. Safe to remove: `outmem hook uninstall`.
-set -e
-exec outmem reindex --staged
-"""
-
-
 def cmd_hook_install(args: argparse.Namespace) -> int:
+    from outmem.hooks import HOOK_NAME, install_hook
+
     store = _open_store(args)
-    hooks_dir = store.root / ".git" / "hooks"
-    if not hooks_dir.is_dir():
+    target = store.root / ".git" / "hooks" / HOOK_NAME
+    status = install_hook(store.root, force=args.force)
+    if status == "no-git":
         print(
             f"outmem: no .git/hooks at {store.root} — is this a git repo?",
             file=sys.stderr,
         )
         return 1
-    target = hooks_dir / HOOK_NAME
-    if target.exists() and not args.force:
-        existing = target.read_text(encoding="utf-8", errors="replace")
-        if HOOK_MARKER in existing:
-            _status(f"{target} already installed.")
-            return 0
+    if status == "foreign":
         print(
             f"outmem: {target} exists and was not installed by outmem; "
             "rerun with --force to overwrite.",
             file=sys.stderr,
         )
         return 1
-    target.write_text(HOOK_SCRIPT, encoding="utf-8")
-    target.chmod(0o755)
+    if status == "unchanged":
+        _status(f"{target} already installed.")
+        return 0
     _status(f"installed pre-commit hook → {target}")
     return 0
 
 
 def cmd_hook_uninstall(args: argparse.Namespace) -> int:
+    from outmem.hooks import HOOK_NAME, uninstall_hook
+
     store = _open_store(args)
     target = store.root / ".git" / "hooks" / HOOK_NAME
-    if not target.exists():
+    status = uninstall_hook(store.root, force=args.force)
+    if status == "absent":
         _status(f"{target} is not present.")
         return 0
-    existing = target.read_text(encoding="utf-8", errors="replace")
-    if HOOK_MARKER not in existing and not args.force:
+    if status == "foreign":
         print(
             f"outmem: {target} was not installed by outmem; "
             "rerun with --force to remove anyway.",
             file=sys.stderr,
         )
         return 1
-    target.unlink()
     _status(f"removed pre-commit hook ← {target}")
     return 0
 

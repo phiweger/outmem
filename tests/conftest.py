@@ -8,6 +8,18 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _no_auto_install_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable WikiStore's auto-ensure-hook for the suite.
+
+    Otherwise every `WikiStore.init`/`open` would write `.git/hooks/
+    pre-commit`, and a raw `git commit` in a test would fire it
+    (`exec outmem reindex --staged`). The auto-install wiring is covered
+    explicitly by tests that re-patch this to a spy or call
+    `outmem.hooks` directly."""
+    monkeypatch.setattr("outmem.store.ensure_hook", lambda *a, **k: None)
+
+
 def _run_git(args: list[str], *, cwd: Path) -> str:
     """Test-only git runner. Mirrors outmem.git_ops but lives here so the
     fixture is independent of the code under test. Pins

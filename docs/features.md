@@ -20,13 +20,15 @@ only what changed (skipped via a content hash when the body is
 unchanged), and stage the updated `.vectors.db` in the same commit as
 the page. No "rebooting" needed within a session.
 
-For external edits (Obsidian, manual `git add`, etc.), install the
-pre-commit hook so the index AND `wiki/index.md` keep step with the
-human's commit:
+For external edits (Obsidian, manual `git add`, etc.), the pre-commit
+hook keeps the index AND `wiki/index.md` in step with the human's commit.
+outmem auto-installs it on `init`/`open` (idempotent, never clobbers your
+own hook; disable with `git.auto_install_hook: false`), so you normally
+don't run anything:
 
 ```bash
-outmem hook install        # → .git/hooks/pre-commit
-outmem hook uninstall      # remove
+outmem hook install        # explicit install / --force to replace
+outmem hook uninstall      # one-off removal
 ```
 
 The hook calls `outmem reindex --staged`, which walks the git index
