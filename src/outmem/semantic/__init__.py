@@ -6,7 +6,7 @@ when ripgrep over compiled material yields nothing useful, and so
 ``outmem lint --semantic`` can surface near-duplicate / contradicting
 chunks across pages (issue #7).
 
-The semantic layer is opt-in (``semantic.enabled: true`` in
+The semantic layer is opt-in (build the index with `outmem reindex`;
 ``config.yaml``) and ships in the ``outmem[semantic]`` extra:
 
     pip install "outmem[semantic]"

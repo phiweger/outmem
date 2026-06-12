@@ -366,22 +366,15 @@ def test_search_wiki_uses_configured_strategy(seeded_store: WikiStore) -> None:
     assert "[[" in out and "]]" in out
 
 
-def test_wiki_read_tools_includes_find_similar_when_semantic_enabled(
-    tmp_path: Path,
+def test_wiki_read_tools_includes_find_similar_when_index_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Positive case of the semantic gating — when ``semantic.enabled``
-    is True, ``find_similar`` makes it into the read-tool list. Pair
-    with the implicit negative case (find_similar absent when semantic
-    is off — every other read-tool test demonstrates that)."""
-    root = tmp_path / "w"
-    root.mkdir()
-    (root / "config.yaml").write_text(
-        "semantic:\n  enabled: true\n  embedding_model: bag-of-words:stub\n",
-        encoding="utf-8",
-    )
-    # Init after writing config so the WikiStore picks it up.
-    store = WikiStore.init(root)
-    assert store.semantic_enabled()
+    """Positive case of the semantic gating — when the semantic index is
+    available (built), ``find_similar`` makes it into the read-tool list.
+    Pair with the implicit negative case (find_similar absent when there's
+    no index — every other read-tool test demonstrates that)."""
+    store = WikiStore.init(tmp_path / "w")
+    monkeypatch.setattr(store, "semantic_available", lambda: True)
     names = {t.__name__ for t in wiki_read_tools(store)}
     assert "find_similar" in names
 

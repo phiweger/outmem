@@ -57,7 +57,6 @@ DEFAULT_RETRIEVAL_STRATEGY = "rerank(bm25)"
 
 DEFAULT_SOURCE_MAX_CHARS = 200_000  # cap on `read_source` tool returns
 
-DEFAULT_SEMANTIC_ENABLED = False
 DEFAULT_SEMANTIC_MODEL = "openai:text-embedding-3-small"
 DEFAULT_SEMANTIC_DB_FILENAME = ".vectors.db"
 DEFAULT_SEMANTIC_CHUNK_SIZE = 2000
@@ -108,12 +107,15 @@ ANTHROPIC_CACHE_WITH_TOOLS: dict[str, bool] = {
     "anthropic_cache_tool_definitions": True,  # cache the tool-def array
 }
 
-# Error string when a caller hits a semantic-only path but the wiki has
-# the feature off — shared across the CLI, the WikiStore facet, and the
-# PydanticAI adapter so the user sees the same fix-it advice everywhere.
-SEMANTIC_DISABLED_HELP = (
-    "semantic indexing is disabled — set `semantic.enabled: true` "
-    "in config.yaml and `pip install outmem[semantic]`."
+# Error string when a caller hits a semantic path but the index hasn't
+# been built — shared across the CLI, the WikiStore facet, the optimizer,
+# and the PydanticAI adapter so the user sees the same fix-it everywhere.
+# Semantic is implied by use (a `semantic`/`hyde`/`*+semantic` retrieval
+# strategy, or `find_similar`), not a config flag: build the index to
+# turn it on.
+SEMANTIC_UNAVAILABLE_HELP = (
+    "semantic index not built — run `outmem reindex` "
+    "(needs `pip install outmem[semantic]`)."
 )
 
 @dataclass
@@ -144,12 +146,16 @@ class ApprovalSettings:
 
 @dataclass
 class SemanticSettings:
-    """Knobs for the optional vector index (``outmem[semantic]``).
+    """Knobs for the vector index (``outmem[semantic]``).
+
+    There is no ``enabled`` flag: semantic is on for a wiki once its index
+    exists (build it with ``outmem reindex``). These settings configure
+    *how* the index is built and queried when a ``semantic``/``hyde``/
+    ``*+semantic`` retrieval strategy or ``find_similar`` needs it.
 
     Mirrors the YAML block::
 
         semantic:
-          enabled: true
           embedding_model: openai:text-embedding-3-small
           db_filename: .vectors.db          # relative to wiki root
           chunk_size: 2000
@@ -159,7 +165,6 @@ class SemanticSettings:
           top_k: 5
     """
 
-    enabled: bool = DEFAULT_SEMANTIC_ENABLED
     embedding_model: str = DEFAULT_SEMANTIC_MODEL
     db_filename: str = DEFAULT_SEMANTIC_DB_FILENAME
     chunk_size: int = DEFAULT_SEMANTIC_CHUNK_SIZE
@@ -464,8 +469,6 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
 
     semantic_block = data.get("semantic")
     if isinstance(semantic_block, dict):
-        if isinstance(semantic_block.get("enabled"), bool):
-            config.semantic.enabled = semantic_block["enabled"]
         if isinstance(semantic_block.get("embedding_model"), str):
             config.semantic.embedding_model = semantic_block["embedding_model"]
         if isinstance(semantic_block.get("db_filename"), str):
@@ -608,11 +611,12 @@ def starter_yaml(
         "sources:\n"
         f"  max_chars: {DEFAULT_SOURCE_MAX_CHARS}    # cap on read_source returns\n"
         "\n"
-        "# Semantic retrieval / lint — requires `pip install outmem[semantic]`.\n"
-        "# Off by default; flip `enabled: true` to index pages and sources\n"
-        "# into a local sqlite-vec DB and surface near-duplicate / similar chunks.\n"
+        "# Semantic vector index (requires `pip install outmem[semantic]`).\n"
+        "# No on/off flag: it's active once built — run `outmem reindex` to\n"
+        "# index pages + sources into a local sqlite-vec DB. A semantic /\n"
+        "# hyde / *+semantic retrieval strategy and `find_similar` need it;\n"
+        "# the keys below configure how it's built and queried.\n"
         "semantic:\n"
-        f"  enabled: {str(DEFAULT_SEMANTIC_ENABLED).lower()}\n"
         f"  embedding_model: {DEFAULT_SEMANTIC_MODEL}\n"
         f"  db_filename: {DEFAULT_SEMANTIC_DB_FILENAME}\n"
         f"  chunk_size: {DEFAULT_SEMANTIC_CHUNK_SIZE}\n"
@@ -643,8 +647,8 @@ def starter_yaml(
         "# rerank(bm25): BM25 keyword shortlist gated by one Haiku call per\n"
         "# query (~1.5 s/query, lifts recall on paraphrases). For free/fast\n"
         "# plain keyword ranking with no model call, set strategy: bm25.\n"
-        "# semantic/hyde/<...>+semantic need semantic.enabled + `outmem\n"
-        "# reindex`. Tune empirically with `outmem.optimize.optimize_retrieval`,\n"
+        "# semantic/hyde/<...>+semantic need a built index (`outmem\n"
+        "# reindex`). Tune empirically with `outmem.optimize.optimize_retrieval`,\n"
         "# then `result.save(rank, store)` rewrites this block. See\n"
         "# docs/configuration.md.\n"
         "retrieval:\n"

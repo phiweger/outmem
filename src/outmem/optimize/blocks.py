@@ -409,7 +409,7 @@ class SemanticRetriever:
     abstention. This is the recall tier: it surfaces pages that share no
     keywords with the query, which lexical/rerank cannot.
 
-    Requires ``semantic.enabled`` + a built index (``outmem[semantic]``);
+    Requires a built semantic index (``outmem[semantic]``);
     raises :class:`OutmemError` otherwise, so the optimizer marks the
     config unavailable instead of crashing the loop.
     """
@@ -438,7 +438,7 @@ class HydeRetriever:
     page than a terse question does, lifting recall on oblique/paraphrased
     queries. Reuses the same chunk→page mapping as ``semantic``.
 
-    Needs both a generation model AND the semantic index (``semantic.enabled``
+    Needs both a generation model AND a built semantic index (run
     + ``outmem reindex``); raises :class:`OutmemError` otherwise so the
     optimizer marks the config unavailable. If generation fails it falls
     back to embedding the raw question (with a note), so a model hiccup
@@ -504,16 +504,14 @@ class HybridRetriever:
 
 
 def _require_semantic_ready(store: WikiStore) -> None:
-    """Raise :class:`OutmemError` unless semantic is enabled AND indexed.
+    """Raise :class:`OutmemError` unless the semantic index is built AND
+    non-empty — so a ``semantic``/``hyde``/``*+semantic`` strategy fails
+    loud ("run ``outmem reindex``") instead of silently returning nothing.
+    Checks db-existence first (cheap, no auto-create) before opening."""
+    from outmem.config import SEMANTIC_UNAVAILABLE_HELP
 
-    Distinguishes disabled (config gap) from enabled-but-empty (forgot
-    ``outmem reindex``) so the optimizer reports the right reason and skips
-    the config rather than scoring an empty/useless retriever."""
-    if not store.semantic_enabled():
-        raise OutmemError(
-            "semantic retrieval needs `semantic.enabled: true` in "
-            "config.yaml (+ `pip install outmem[semantic]`)"
-        )
+    if not store.semantic_available():
+        raise OutmemError(SEMANTIC_UNAVAILABLE_HELP)
     try:
         empty = store.semantic_index_is_empty()
     except OutmemError:
@@ -523,7 +521,7 @@ def _require_semantic_ready(store: WikiStore) -> None:
     if empty:
         raise OutmemError(
             "semantic index is empty — run `outmem reindex` to build it "
-            "before tuning with the semantic/hyde/hybrid strategies"
+            "before using the semantic/hyde/hybrid strategies"
         )
 
 

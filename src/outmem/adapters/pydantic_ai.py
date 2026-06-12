@@ -335,10 +335,10 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         different framings). Also useful when answering open-ended
         questions where keyword search misses paraphrased material.
 
-        Requires ``semantic.enabled: true`` in ``config.yaml`` — returns
-        an explanatory string if disabled. Similarity is cosine
-        (``1.0`` is identical, ``0.0`` is orthogonal); the per-call
-        threshold comes from config.
+        Requires a built semantic index (``outmem reindex``) — returns an
+        explanatory string if there's none. Similarity is cosine (``1.0``
+        is identical, ``0.0`` is orthogonal); the per-call threshold comes
+        from config.
 
         Example:
             find_similar(text="cost-plus pricing formula", top_k=5)
@@ -356,10 +356,10 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             top_k=top_k,
             exclude_slug=exclude_slug,
         )
-        if not store.semantic_enabled():
+        if not store.semantic_available():
             return (
-                "(find_similar unavailable: set `semantic.enabled: true` in "
-                "config.yaml and install `outmem[semantic]`)"
+                "(find_similar unavailable: no semantic index — run "
+                "`outmem reindex` and install `outmem[semantic]`)"
             )
         try:
             matches = store.semantic_find_similar(
@@ -469,7 +469,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
     # find_similar is only exposed when the semantic index is enabled,
     # so the model isn't tempted to call a tool that always returns
     # "unavailable".
-    if store.semantic_enabled():
+    if store.semantic_available():
         tools.append(find_similar)
     return tools
 

@@ -130,7 +130,7 @@ class WikiStoreConfig:
     customisable but rarely changed.
 
     File-loaded settings live under ``store.config.outmem.*`` —
-    e.g. ``store.config.outmem.semantic.enabled``,
+    e.g. ``store.config.outmem.semantic.embedding_model``,
     ``store.config.outmem.git.remove_stale_lock``,
     ``store.config.outmem.model``.
     """
@@ -793,9 +793,11 @@ class WikiStore:
     # Semantic index — implementations live in :mod:`outmem._store.semantic`
     # ------------------------------------------------------------------
 
-    def semantic_enabled(self) -> bool:
-        """Whether ``semantic.enabled: true`` is set in ``config.yaml``."""
-        return _semantic.enabled(self)
+    def semantic_available(self) -> bool:
+        """Whether this wiki's semantic index has been built (its db
+        exists). Semantic has no config flag — build the index with
+        ``outmem reindex`` to turn it on."""
+        return _semantic.available(self)
 
     def semantic_index_is_empty(self) -> bool:
         """True if semantic is enabled but the index has no files yet

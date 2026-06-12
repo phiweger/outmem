@@ -11,7 +11,10 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from outmem.config import DEFAULT_SEMANTIC_REINDEX_CONCURRENCY, SEMANTIC_DISABLED_HELP
+from outmem.config import (
+    DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
+    SEMANTIC_UNAVAILABLE_HELP,
+)
 from outmem.exceptions import OutmemError
 from outmem.frontmatter import parse_wiki_page
 from outmem.index import RESERVED_WIKI_FILES, editorial_pages
@@ -27,18 +30,22 @@ log = logging.getLogger(__name__)
 WikiContentKind = Literal["wiki", "source"]
 
 
-def enabled(store: WikiStore) -> bool:
-    return store.config.outmem.semantic.enabled
+def available(store: WikiStore) -> bool:
+    """True if the semantic index has been built (its db file exists).
+
+    Semantic has no on/off config flag: a wiki "has semantic" once
+    ``outmem reindex`` has created the index. A cheap path check (no DB
+    open / embedder probe), so it's safe to call at tool-build time to
+    decide whether to expose ``find_similar``, etc."""
+    return db_path(store).exists()
 
 
 def index_is_empty(store: WikiStore) -> bool:
     """True if the semantic index has no indexed files yet.
 
-    Used to fail loud when ``semantic.enabled`` is true but ``outmem
-    reindex`` was never run — otherwise queries return nothing and look
-    like a useless retriever. Opens the vector store, so the first call
-    pays the one-time ``build_embedder`` probe (a tiny embed request to
-    detect dimensions); the handle is then cached on the store.
+    Opens the vector store, so the first call pays the one-time
+    ``build_embedder`` probe (a tiny embed request to detect dimensions);
+    the handle is then cached on the store.
     """
     return len(vector_store_or_open(store).list_indexed_files()) == 0
 
@@ -48,14 +55,14 @@ def db_path(store: WikiStore) -> Path:
 
 
 def vector_store_or_open(store: WikiStore) -> VectorStore:
-    """Lazy open of the :class:`VectorStore`.
+    """Lazy open of the :class:`VectorStore` (creating the db if missing).
 
-    Raises :class:`OutmemError` if semantic indexing is disabled or
-    the extras aren't installed. The build_embedder probe is real
-    (one API call) so we cache the handle.
+    Callers that must *not* create an empty index on a read (e.g. the
+    retrieval strategies, ``find_similar``) gate on :func:`available`
+    first and fail loud with :data:`SEMANTIC_UNAVAILABLE_HELP`. The
+    ``build_embedder`` probe is real (one API call) so we cache the
+    handle.
     """
-    if not enabled(store):
-        raise OutmemError(SEMANTIC_DISABLED_HELP)
     if store._vector_store is not None:
         return store._vector_store
     # Double-checked lock: concurrent callers (the optimize thread pool)
@@ -92,6 +99,8 @@ def find_similar(
     threshold: float | None = None,
     exclude_slug: str | None = None,
 ) -> list[Match]:
+    if not available(store):  # fail loud, don't auto-create an empty index
+        raise OutmemError(SEMANTIC_UNAVAILABLE_HELP)
     settings = store.config.outmem.semantic
     if top_k is None:
         top_k = settings.top_k
@@ -112,7 +121,7 @@ def find_similar(
 
 
 def reindex_path(store: WikiStore, rel_path: str) -> ReindexResult | None:
-    if not enabled(store):
+    if not available(store):  # don't build an index on a write — opt in via reindex
         return None
     load = load_for_index(store, rel_path)
     if load is None:
@@ -131,7 +140,7 @@ def reindex_path(store: WikiStore, rel_path: str) -> ReindexResult | None:
 
 
 def remove_path(store: WikiStore, rel_path: str) -> int:
-    if not enabled(store):
+    if not available(store):
         return 0
     vs = vector_store_or_open(store)
     return vs.remove_file(rel_path)
@@ -144,11 +153,11 @@ def reindex_all(
     max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
-    """Resync the whole index with disk. Embeds files concurrently (the
-    network bottleneck), at most ``max_concurrency`` in flight; writes stay
-    serial. ``on_progress(done, total)`` fires as each file completes."""
-    if not enabled(store):
-        raise OutmemError(SEMANTIC_DISABLED_HELP)
+    """Resync the whole index with disk — the opt-in that *builds* the
+    index (creating its db). Embeds files concurrently (the network
+    bottleneck), at most ``max_concurrency`` in flight; writes stay serial.
+    ``on_progress(done, total)`` fires as each file completes. Raises if
+    the ``outmem[semantic]`` extra isn't installed."""
     vs = vector_store_or_open(store)
 
     on_disk = indexable_files_on_disk(store)
@@ -287,7 +296,7 @@ def maybe_reindex_commit_paths(
     Errors during reindex are logged and swallowed — they must never
     block a writeback.
     """
-    if not enabled(store):
+    if not available(store):  # don't build an index on a write — opt in via reindex
         return None
     try:
         vs = vector_store_or_open(store)

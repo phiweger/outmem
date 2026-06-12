@@ -27,7 +27,7 @@ from pathlib import Path
 
 from outmem import __version__
 from outmem._progress import report_progress
-from outmem.config import SEMANTIC_DISABLED_HELP
+from outmem.config import SEMANTIC_UNAVAILABLE_HELP
 from outmem.exceptions import OutmemError
 from outmem.store import AgentIdentity, WikiStore
 
@@ -204,8 +204,8 @@ def cmd_record_run(args: argparse.Namespace) -> int:
 
 def cmd_similar(args: argparse.Namespace) -> int:
     store = _open_store(args)
-    if not store.semantic_enabled():
-        print(f"outmem: {SEMANTIC_DISABLED_HELP}", file=sys.stderr)
+    if not store.semantic_available():
+        print(f"outmem: {SEMANTIC_UNAVAILABLE_HELP}", file=sys.stderr)
         return 1
 
     if args.slug:
@@ -252,11 +252,10 @@ def cmd_similar(args: argparse.Namespace) -> int:
 
 
 def cmd_reindex(args: argparse.Namespace) -> int:
+    # `reindex` is the opt-in that *builds* the semantic index — no
+    # availability gate (it creates the db). The `outmem[semantic]` extra
+    # missing surfaces as an OutmemError below.
     store = _open_store(args)
-    if not store.semantic_enabled():
-        print(f"outmem: {SEMANTIC_DISABLED_HELP}", file=sys.stderr)
-        return 1
-
     if args.staged:
         return _cmd_reindex_staged(store)
 
@@ -298,7 +297,7 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
 
     Two derived things need to track manual wiki edits:
     1. ``wiki/index.md`` — the auto-maintained slug index.
-    2. The semantic vector DB (when ``semantic.enabled: true``).
+    2. The semantic vector DB (when an index exists).
 
     For each staged wiki page / source: reindex it (or remove its
     chunks if the change is a deletion), regenerate ``index.md`` if

@@ -481,20 +481,18 @@ class TestVectorStoreTransactionSafety:
 def wiki_with_semantic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> WikiStore:
-    """A wiki with ``semantic.enabled: true`` and a stubbed embedder.
+    """A wiki with a *built* semantic index and a stubbed embedder.
 
-    Patches :func:`outmem.semantic.build_embedder` so no API call is
-    made. The fake :class:`EmbedderHandle` is otherwise plugged into a
-    real :class:`VectorStore`.
+    Semantic has no on/off flag — it's active once the index exists, so
+    the fixture builds it (``reindex_all``). Patches
+    :func:`outmem.semantic.build_embedder` so no API call is made; the
+    fake :class:`EmbedderHandle` is plugged into a real
+    :class:`VectorStore`.
     """
     root = tmp_path / "wiki-root"
     store = WikiStore.init(root)
     yaml_path = root / "config.yaml"
     text = yaml_path.read_text()
-    text = text.replace(
-        "semantic:\n  enabled: false",
-        "semantic:\n  enabled: true",
-    )
     # Lower threshold so the fake bag-of-words embedder still ranks
     # paraphrased matches above it (real openai embeddings hit 0.8
     # easily; deterministic test embeddings have less semantic mass).
@@ -509,10 +507,10 @@ def wiki_with_semantic(
         lambda _model: make_handle(),
         raising=False,
     )
-    # Re-open so the YAML flip takes effect (the original store was
-    # created before the flip).
     store.close()
-    return WikiStore.open(root)
+    store = WikiStore.open(root)
+    store.semantic_reindex_all()  # build the index → semantic_available() True
+    return store
 
 
 def test_vector_store_open_is_single_under_concurrency(
@@ -527,13 +525,6 @@ def test_vector_store_open_is_single_under_concurrency(
 
     root = tmp_path / "w"
     store = WikiStore.init(root)
-    yaml_path = root / "config.yaml"
-    yaml_path.write_text(
-        yaml_path.read_text().replace(
-            "semantic:\n  enabled: false", "semantic:\n  enabled: true"
-        ),
-        encoding="utf-8",
-    )
     store.close()
     store = WikiStore.open(root)
 
@@ -630,7 +621,7 @@ class TestWikiStoreSemanticIntegration:
         from outmem.exceptions import OutmemError
 
         store = WikiStore.init(tmp_path / "off")
-        assert store.semantic_enabled() is False
+        assert store.semantic_available() is False
         with pytest.raises(OutmemError):
             store.semantic_find_similar("anything")
 
@@ -707,11 +698,11 @@ class TestCliSimilar:
         # — what matters is `alpha` is not in the result list.
         assert "wiki/pages/alpha.md" not in out
 
-    def test_similar_disabled_returns_error(self, tmp_path: Path) -> None:
+    def test_similar_without_index_returns_error(self, tmp_path: Path) -> None:
         store = WikiStore.init(tmp_path / "off")
         rc, _, err = _run_cli(["similar", "x"], store=store)
         assert rc == 1
-        assert "disabled" in err
+        assert "not built" in err
 
 
 class TestCliReindex:

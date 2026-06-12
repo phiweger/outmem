@@ -165,7 +165,7 @@ staying consistent — a fact updated on page A but stale on page B
 is worse than not updating at all. Don't speculate; only touch
 pages where the connection is explicit (a wikilink in either
 direction, or a shared concrete fact).
-{% if semantic_enabled %}
+{% if semantic_available %}
 
 **Semantic duplicate check.** Before calling `write_page` for a new
 slug, call `find_similar` with the body you intend to write (or its

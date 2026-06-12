@@ -568,7 +568,7 @@ def _prewarm_query_cache(
     index is empty (the agent will surface that per-config instead), and a
     per-question embed failure is swallowed — it'll resurface, attributed,
     in the real eval."""
-    if not store.semantic_enabled():
+    if not store.semantic_available():
         return
     try:
         if store.semantic_index_is_empty():

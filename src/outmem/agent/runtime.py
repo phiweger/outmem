@@ -61,7 +61,7 @@ def render_system_prompt(
     - ``recent_human_commits`` — phase-1 steering signal (list of
       :class:`outmem.git_ops.CommitInfo`), if ``include_steering=True``
       and a last-run marker exists; otherwise an empty list
-    - ``semantic_enabled`` — bool, true if the wiki has the vector
+    - ``semantic_available`` — bool, true once the wiki has a built vector
       index turned on (controls a small "duplicate check" paragraph
       in the prompt)
     - ``agents_md`` — the body of ``wiki/AGENTS.md`` (user-editable
@@ -96,7 +96,7 @@ def render_system_prompt(
         agent_name=store.config.agent_identity.name,
         agent_email=store.config.agent_identity.email,
         recent_human_commits=recent_human_commits,
-        semantic_enabled=store.semantic_enabled(),
+        semantic_available=store.semantic_available(),
         agents_md=store.read_agents_md(),
         skills=skills,
     )

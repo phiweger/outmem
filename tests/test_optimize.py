@@ -346,7 +346,7 @@ def test_rerank_block_uses_configured_source(
                             similarity=0.81, content="…"),
         ]
 
-    monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+    monkeypatch.setattr(store, "semantic_available", lambda: True)
     monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
     monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
@@ -380,7 +380,7 @@ class TestSemanticBlock:
     ) -> None:
         # Enabled but never reindexed → a clear "run outmem reindex" error,
         # not a silent empty result that looks like a useless retriever.
-        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_available", lambda: True)
         monkeypatch.setattr(store, "semantic_index_is_empty", lambda: True)
         with pytest.raises(OutmemError, match="reindex"):
             SemanticRetriever(store).retrieve("anything", k=3)
@@ -402,7 +402,7 @@ class TestSemanticBlock:
                                 similarity=0.75, content="…"),
             ]
 
-        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_available", lambda: True)
         monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
         monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
@@ -425,7 +425,7 @@ class TestSemanticBlock:
                                 similarity=0.7, content="…"),
             ]
 
-        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_available", lambda: True)
         monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
         monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
@@ -451,7 +451,7 @@ class TestHybridBlock:
                                 similarity=0.7, content="…"),
             ]
 
-        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_available", lambda: True)
         monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
         monkeypatch.setattr(store, "semantic_find_similar", fake_find)
 
@@ -467,7 +467,7 @@ class TestHybridBlock:
         self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         prefix = f"{store.config.wiki_dir}/pages/"
-        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_available", lambda: True)
         monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
         monkeypatch.setattr(
             store, "semantic_find_similar",
@@ -511,7 +511,7 @@ class TestHydeBlock:
         self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
     ) -> str:
         prefix = f"{store.config.wiki_dir}/pages/"
-        monkeypatch.setattr(store, "semantic_enabled", lambda: True)
+        monkeypatch.setattr(store, "semantic_available", lambda: True)
         monkeypatch.setattr(store, "semantic_index_is_empty", lambda: False)
         monkeypatch.setattr(
             store, "semantic_find_similar",
@@ -1224,7 +1224,7 @@ def test_prewarm_query_cache_warms_every_question() -> None:
 
     seen: list[str] = []
     store = SimpleNamespace(
-        semantic_enabled=lambda: True,
+        semantic_available=lambda: True,
         semantic_index_is_empty=lambda: False,
         semantic_find_similar=lambda text, top_k, threshold: seen.append(text),
     )
@@ -1242,7 +1242,7 @@ def test_prewarm_query_cache_noop_when_semantic_off() -> None:
 
     called: list[int] = []
     store = SimpleNamespace(
-        semantic_enabled=lambda: False,
+        semantic_available=lambda: False,
         semantic_find_similar=lambda *a, **k: called.append(1),
     )
     bank = QuestionBank(answerable=[Question(question="q1")])
