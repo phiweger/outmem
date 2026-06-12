@@ -54,8 +54,8 @@ def _by_name(tools: list, name: str):
 def test_wiki_tools_returns_expected_set(seeded_store: WikiStore) -> None:
     names = [t.__name__ for t in wiki_tools(seeded_store)]
     assert set(names) == {
-        "find_pages",
         "search_wiki",
+        "grep_wiki",
         "read_page",
         "list_pages",
         "find_backlinks",
@@ -71,11 +71,11 @@ def test_wiki_tools_returns_expected_set(seeded_store: WikiStore) -> None:
     }
 
 
-def test_search_wiki_returns_slug_keyed_rows(seeded_store: WikiStore) -> None:
+def test_grep_wiki_returns_slug_keyed_rows(seeded_store: WikiStore) -> None:
     """``scope="wiki"`` rows lead with the slug, not the on-disk path,
     so the agent can pass the leading token straight to ``read_page``."""
     tools = wiki_tools(seeded_store)
-    out = _by_name(tools, "search_wiki")(pattern="cost-plus")
+    out = _by_name(tools, "grep_wiki")(pattern="cost-plus")
     # No `.md` and no `/` in the slug-shaped leading token.
     first_line = out.splitlines()[0]
     leading = first_line.split(":")[0]
@@ -83,14 +83,14 @@ def test_search_wiki_returns_slug_keyed_rows(seeded_store: WikiStore) -> None:
     assert ".md" not in first_line.split(":", 2)[0]
 
 
-def test_search_wiki_emits_namespaced_slug(tmp_path: Path) -> None:
+def test_grep_wiki_emits_namespaced_slug(tmp_path: Path) -> None:
     """Hits in a nested page (``wiki/pages/abx/penicillin.md``) come back
     as ``abx:penicillin:line:text`` — slug, not path."""
     from outmem.store import WikiStore
 
     store = WikiStore.init(tmp_path / "w")
     store.write_page("abx:penicillin", title="P", body="A beta-lactam.")
-    out = _by_name(wiki_tools(store), "search_wiki")(pattern="beta-lactam")
+    out = _by_name(wiki_tools(store), "grep_wiki")(pattern="beta-lactam")
     first = out.splitlines()[0]
     assert first.startswith("abx:penicillin:")
     # The middle is the line number, then ``:`` separator, then content.
@@ -100,7 +100,7 @@ def test_search_wiki_emits_namespaced_slug(tmp_path: Path) -> None:
     assert parts[2].isdigit()  # line number
 
 
-def test_search_wiki_raw_scope_keeps_paths(tmp_path: Path) -> None:
+def test_grep_wiki_raw_scope_keeps_paths(tmp_path: Path) -> None:
     """Non-wiki scopes keep path-shaped output; only ``scope="wiki"``
     converts to slugs."""
     from outmem.store import WikiStore
@@ -109,12 +109,12 @@ def test_search_wiki_raw_scope_keeps_paths(tmp_path: Path) -> None:
     (store.raw_path / "deck.md").write_text(
         "Slide 3: cost-plus 35%.\n", encoding="utf-8"
     )
-    out = _by_name(wiki_tools(store), "search_wiki")(pattern="cost-plus", scope="raw")
+    out = _by_name(wiki_tools(store), "grep_wiki")(pattern="cost-plus", scope="raw")
     assert "deck.md" in out  # path preserved
 
 
-def test_search_wiki_no_match(seeded_store: WikiStore) -> None:
-    out = _by_name(wiki_tools(seeded_store), "search_wiki")(pattern="absent-token")
+def test_grep_wiki_no_match(seeded_store: WikiStore) -> None:
+    out = _by_name(wiki_tools(seeded_store), "grep_wiki")(pattern="absent-token")
     assert out == "(no matches)"
 
 
@@ -277,97 +277,10 @@ def test_wiki_read_tools_with_read_only_store_cannot_commit(
     tools = wiki_read_tools(ro)
     # Every survivor can be called without raising — they are all pure
     # retrieval and do not flow through `_commit_paths`.
-    _by_name(tools, "search_wiki")(pattern="cost-plus")
+    _by_name(tools, "grep_wiki")(pattern="cost-plus")
     _by_name(tools, "read_page")(slug="pricing")
     _by_name(tools, "list_pages")()
     assert ro.head() == head_before
-
-
-def _filter_model(selections: list[dict[str, str]]):
-    """FunctionModel emitting the relevance filter's structured output."""
-    from pydantic_ai.messages import ModelResponse, ToolCallPart
-    from pydantic_ai.models.function import FunctionModel
-
-    def respond(messages, info):  # type: ignore[no-untyped-def]
-        name = info.output_tools[0].name
-        return ModelResponse(
-            parts=[ToolCallPart(tool_name=name, args={"relevant": selections})]
-        )
-
-    return FunctionModel(respond)
-
-
-def test_relevance_swaps_search_wiki_only(seeded_store: WikiStore) -> None:
-    from outmem.relevance import RelevanceConfig
-
-    plain = wiki_read_tools(seeded_store)
-    cfg = RelevanceConfig(model=_filter_model([]))
-    ranked = wiki_read_tools(seeded_store, relevance=cfg)
-    # Same tool set, same order, exactly one search_wiki — the swap
-    # replaces only that entry; all other tools are present unchanged.
-    assert [t.__name__ for t in plain] == [t.__name__ for t in ranked]
-    assert [t.__name__ for t in ranked].count("search_wiki") == 1
-
-
-def test_relevance_on_filter_fires_once(seeded_store: WikiStore) -> None:
-    from outmem.relevance import FilterOutcome, RelevanceConfig
-
-    seen: list[FilterOutcome] = []
-    cfg = RelevanceConfig(
-        model=_filter_model([{"slug": "pricing-formula", "reason": "the formula"}]),
-        on_filter=seen.append,
-    )
-    search = _by_name(wiki_read_tools(seeded_store, relevance=cfg), "search_wiki")
-    out = search(pattern="cost-plus")
-    assert len(seen) == 1
-    assert seen[0].query == "cost-plus"
-    assert "pricing-formula  why: the formula" in out
-
-
-def test_relevance_callback_error_does_not_break_search(
-    seeded_store: WikiStore,
-) -> None:
-    from outmem.relevance import RelevanceConfig
-
-    def angry(_outcome: object) -> None:
-        raise ValueError("consumer tracing bug")
-
-    cfg = RelevanceConfig(
-        model=_filter_model([{"slug": "pricing-formula", "reason": "x"}]),
-        on_filter=angry,
-    )
-    search = _by_name(wiki_read_tools(seeded_store, relevance=cfg), "search_wiki")
-    out = search(pattern="cost-plus")  # must not raise
-    assert "pricing-formula" in out
-
-
-def test_relevance_raw_scope_unfiltered(seeded_store: WikiStore) -> None:
-    """Non-wiki scopes bypass the filter entirely (path-shaped output)."""
-    from outmem.relevance import FilterOutcome, RelevanceConfig
-
-    (seeded_store.raw_path / "deck.md").write_text(
-        "cost-plus pricing deck\n", encoding="utf-8"
-    )
-    seen: list[FilterOutcome] = []
-    cfg = RelevanceConfig(model=_filter_model([]), on_filter=seen.append)
-    search = _by_name(wiki_read_tools(seeded_store, relevance=cfg), "search_wiki")
-    out = search(pattern="cost-plus", scope="raw")
-    assert "deck.md" in out  # real path, not a slug
-    assert seen == []  # filter never ran for raw scope
-
-
-def test_relevance_config_block_enables_swap(tmp_path: Path) -> None:
-    """rerank=None + `relevance.enabled: true` in config ⇒ swap happens."""
-    store = WikiStore.init(tmp_path / "w")
-    store.write_page("pricing", title="Pricing", body="cost-plus 35%.\n")
-    # Flip the config flag on the open store.
-    store.config.outmem.relevance.enabled = True
-    store.config.outmem.relevance.model = "test"  # unused unless a search runs
-    tools = wiki_read_tools(store)  # no explicit relevance=
-    # The swapped search_wiki has a distinct closure identity vs a plain build.
-    store.config.outmem.relevance.enabled = False
-    plain = wiki_read_tools(store)
-    assert _by_name(tools, "search_wiki") is not _by_name(plain, "search_wiki")
 
 
 def test_build_consult_wiki_returns_callable(tmp_path: Path) -> None:
@@ -436,8 +349,8 @@ def test_build_consult_wiki_missing_path_raises(tmp_path: Path) -> None:
         build_consult_wiki(tmp_path / "nope", model=TestModel())
 
 
-def test_find_pages_uses_configured_strategy(seeded_store: WikiStore) -> None:
-    """``find_pages`` reads ``RetrievalSettings`` and ranks via the
+def test_search_wiki_uses_configured_strategy(seeded_store: WikiStore) -> None:
+    """``search_wiki`` reads ``RetrievalSettings`` and ranks via the
     configured pipeline. Returns slugs the agent can then ``read_page``
     on. Regression for the optimizer→production seam: the optim's picked
     config must actually change what the agent's search tool returns.
@@ -447,8 +360,8 @@ def test_find_pages_uses_configured_strategy(seeded_store: WikiStore) -> None:
     per query."""
     seeded_store.config.outmem.retrieval.strategy = "bm25"
     tools = wiki_read_tools(seeded_store)
-    find_pages = _by_name(tools, "find_pages")
-    out = find_pages(question="cost-plus pricing formula", k=3)
+    search_wiki = _by_name(tools, "search_wiki")
+    out = search_wiki(question="cost-plus pricing formula", k=3)
     # Returns slug-citation lines; the seeded fixture has a pricing page.
     assert "[[" in out and "]]" in out
 

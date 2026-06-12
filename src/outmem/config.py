@@ -48,7 +48,7 @@ DEFAULT_STALE_LOCK_SECONDS = 60
 DEFAULT_RETRY_ON_LOCK = True
 DEFAULT_AUTO_INSTALL_HOOK = True
 DEFAULT_RETRIEVAL_STRATEGY = "rerank(bm25)"
-# Production find_pages default: BM25 keyword shortlist, LLM-gated for
+# Production search_wiki default: BM25 keyword shortlist, LLM-gated for
 # relevance — one cheap Haiku call per query, but lifts recall on
 # paraphrase-heavy questions where plain term overlap misses the right
 # page. The bm25 source needs no semantic index. Run optimize_retrieval
@@ -69,13 +69,10 @@ DEFAULT_SEMANTIC_REINDEX_CONCURRENCY = 8  # in-flight embed calls during reindex
 
 DEFAULT_APPROVAL_REQUIRED_FOR_WRITES = False
 
-DEFAULT_RELEVANCE_ENABLED = False
+# The cheap gate model the rerank strategy uses, and the per-candidate
+# excerpt cap it feeds that model.
 DEFAULT_RELEVANCE_MODEL = "anthropic:claude-haiku-4-5"
-DEFAULT_RELEVANCE_MAX_RELEVANT = 8
-DEFAULT_RELEVANCE_MAX_CANDIDATES = 20
-DEFAULT_RELEVANCE_CONTEXT = "page"
 DEFAULT_RELEVANCE_CONTEXT_CHARS = 2000
-DEFAULT_RELEVANCE_CANDIDATE_MAX_BYTES = 64 * 1024
 
 # Defaults for the optional retrieval-tuning tool (outmem.optimize). It is an
 # API/script tool — not config.yaml-driven — but its defaults live here, the
@@ -118,12 +115,6 @@ SEMANTIC_DISABLED_HELP = (
     "semantic indexing is disabled — set `semantic.enabled: true` "
     "in config.yaml and `pip install outmem[semantic]`."
 )
-
-RELEVANCE_DISABLED_HELP = (
-    "relevance filtering is disabled — set `relevance.enabled: true` "
-    "in config.yaml (and `pip install outmem[agent]` for the triage model)."
-)
-
 
 @dataclass
 class SourceSettings:
@@ -176,44 +167,6 @@ class SemanticSettings:
     overlap_paragraphs: int = DEFAULT_SEMANTIC_OVERLAP_PARAGRAPHS
     similarity_threshold: float = DEFAULT_SEMANTIC_SIMILARITY_THRESHOLD
     top_k: int = DEFAULT_SEMANTIC_TOP_K
-
-
-@dataclass
-class RelevanceSettings:
-    """Knobs for the optional relevance filter (``outmem[agent]``).
-
-    A cheap-model gate between lexical ``search_wiki`` and the expensive
-    outer agent: it keeps only the candidate pages relevant to the
-    query (yes/no, no score) and lets the candidate net be wider than
-    what the outer agent should see. Off by default — opt-in, like
-    ``semantic``.
-
-    This is the config-driven default; a downstream consumer that needs
-    the ``on_filter`` observability hook constructs an explicit
-    :class:`outmem.relevance.RelevanceConfig` and passes it to the
-    adapter factories instead. When the adapter is given no explicit
-    config, it falls back to these settings (disabled ⇒ today's
-    ``search_wiki`` byte-for-byte).
-
-    Mirrors the YAML block::
-
-        relevance:
-          enabled: true
-          model: anthropic:claude-haiku-4-5
-          max_relevant: 8
-          max_candidates: 20
-          candidate_max_bytes: 65536      # width of the wide ripgrep net
-          context: page                 # "page" | "lines"
-          context_chars_per_page: 2000
-    """
-
-    enabled: bool = DEFAULT_RELEVANCE_ENABLED
-    model: str = DEFAULT_RELEVANCE_MODEL
-    max_relevant: int = DEFAULT_RELEVANCE_MAX_RELEVANT
-    max_candidates: int = DEFAULT_RELEVANCE_MAX_CANDIDATES
-    candidate_max_bytes: int = DEFAULT_RELEVANCE_CANDIDATE_MAX_BYTES
-    context: str = DEFAULT_RELEVANCE_CONTEXT
-    context_chars_per_page: int = DEFAULT_RELEVANCE_CONTEXT_CHARS
 
 
 @dataclass
@@ -330,7 +283,6 @@ class OutmemConfig:
     git: GitSettings = field(default_factory=GitSettings)
     sources: SourceSettings = field(default_factory=SourceSettings)
     semantic: SemanticSettings = field(default_factory=SemanticSettings)
-    relevance: RelevanceSettings = field(default_factory=RelevanceSettings)
     approval: ApprovalSettings = field(default_factory=ApprovalSettings)
     logfire: LogfireSettings = field(default_factory=LogfireSettings)
     retrieval: RetrievalSettings = field(default_factory=RetrievalSettings)
@@ -470,7 +422,6 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
         "git",
         "sources",
         "semantic",
-        "relevance",
         "approval",
         "logfire",
         "retrieval",
@@ -531,25 +482,6 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
             config.semantic.similarity_threshold = float(threshold)
         if isinstance(semantic_block.get("top_k"), int):
             config.semantic.top_k = semantic_block["top_k"]
-
-    relevance_block = data.get("relevance")
-    if isinstance(relevance_block, dict):
-        if isinstance(relevance_block.get("enabled"), bool):
-            config.relevance.enabled = relevance_block["enabled"]
-        if isinstance(relevance_block.get("model"), str):
-            config.relevance.model = relevance_block["model"]
-        if isinstance(relevance_block.get("max_relevant"), int):
-            config.relevance.max_relevant = relevance_block["max_relevant"]
-        if isinstance(relevance_block.get("max_candidates"), int):
-            config.relevance.max_candidates = relevance_block["max_candidates"]
-        if isinstance(relevance_block.get("candidate_max_bytes"), int):
-            config.relevance.candidate_max_bytes = relevance_block["candidate_max_bytes"]
-        if relevance_block.get("context") in ("page", "lines"):
-            config.relevance.context = relevance_block["context"]
-        if isinstance(relevance_block.get("context_chars_per_page"), int):
-            config.relevance.context_chars_per_page = relevance_block[
-                "context_chars_per_page"
-            ]
 
     approval_block = data.get("approval")
     if isinstance(approval_block, dict) and isinstance(
@@ -705,7 +637,7 @@ def starter_yaml(
         "  enabled: false     # true + a $LOGFIRE_TOKEN in the env sends traces;\n"
         "                     # the token (not this file) picks the project.\n"
         "\n"
-        "# Which pipeline the agent's `find_pages` search runs. `strategy` is\n"
+        "# Which pipeline the agent's `search_wiki` search runs. `strategy` is\n"
         "# a small DSL: lexical | bm25 | semantic | hyde | rerank(<source>)\n"
         "# | a+b[+c...] (RRF hybrid, e.g. bm25+semantic). Default is\n"
         "# rerank(bm25): BM25 keyword shortlist gated by one Haiku call per\n"

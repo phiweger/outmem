@@ -28,13 +28,7 @@ from outmem.exceptions import (
 )
 from outmem.frontmatter import ProvenanceEntry, WikiFrontmatter
 from outmem.observability import setup_logfire
-from outmem.relevance import (
-    FilterOutcome,
-    RelevanceConfig,
-    RelevantPage,
-    judge_relevance,
-    relevance_filter,
-)
+from outmem.relevance import RelevantPage, judge_relevance
 from outmem.search import SearchHit
 from outmem.store import AgentIdentity, WikiPage, WikiStore, WikiStoreConfig
 
@@ -48,13 +42,11 @@ except Exception:  # not installed (bare source checkout) — avoid hard failure
 __all__ = [
     "AgentIdentity",
     "ConflictError",
-    "FilterOutcome",
     "FrontmatterError",
     "GitOperationError",
     "IdentityWarning",
     "OutmemError",
     "ProvenanceEntry",
-    "RelevanceConfig",
     "RelevantPage",
     "SearchHit",
     "SlugError",
@@ -65,6 +57,5 @@ __all__ = [
     "WritebackError",
     "__version__",
     "judge_relevance",
-    "relevance_filter",
     "setup_logfire",
 ]

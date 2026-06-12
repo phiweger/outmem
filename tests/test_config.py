@@ -94,49 +94,6 @@ def test_logfire_enabled_flag(tmp_path: Path) -> None:
     assert cfg.logfire.enabled is True
 
 
-def test_relevance_disabled_by_default(tmp_path: Path) -> None:
-    (tmp_path / "config.yaml").write_text("model: x\n", encoding="utf-8")
-    cfg = load_yaml_config(tmp_path)
-    assert cfg.relevance.enabled is False
-
-
-def test_relevance_block_parsed(tmp_path: Path) -> None:
-    (tmp_path / "config.yaml").write_text(
-        "relevance:\n"
-        "  enabled: true\n"
-        "  model: anthropic:claude-haiku-4-5\n"
-        "  max_relevant: 5\n"
-        "  max_candidates: 30\n"
-        "  context: lines\n"
-        "  context_chars_per_page: 1500\n",
-        encoding="utf-8",
-    )
-    cfg = load_yaml_config(tmp_path)
-    assert cfg.relevance.enabled is True
-    assert cfg.relevance.model == "anthropic:claude-haiku-4-5"
-    assert cfg.relevance.max_relevant == 5
-    assert cfg.relevance.max_candidates == 30
-    assert cfg.relevance.context == "lines"
-    assert cfg.relevance.context_chars_per_page == 1500
-
-
-def test_relevance_candidate_max_bytes_parsed(tmp_path: Path) -> None:
-    (tmp_path / "config.yaml").write_text(
-        "relevance:\n  enabled: true\n  candidate_max_bytes: 131072\n", encoding="utf-8"
-    )
-    cfg = load_yaml_config(tmp_path)
-    assert cfg.relevance.candidate_max_bytes == 131072
-
-
-def test_relevance_bad_context_ignored(tmp_path: Path) -> None:
-    """An out-of-enum context value is rejected, keeping the default."""
-    (tmp_path / "config.yaml").write_text(
-        "relevance:\n  enabled: true\n  context: bogus\n", encoding="utf-8"
-    )
-    cfg = load_yaml_config(tmp_path)
-    assert cfg.relevance.context == "page"  # default preserved
-
-
 def test_load_yaml_malformed_returns_defaults(tmp_path: Path) -> None:
     (tmp_path / "config.yaml").write_text("model: [unterminated\n", encoding="utf-8")
     cfg = load_yaml_config(tmp_path)

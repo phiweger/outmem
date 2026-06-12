@@ -35,7 +35,6 @@ from outmem.exceptions import (
     SlugError,
     WritebackError,
 )
-from outmem.relevance import FilterOutcome, RelevanceConfig, relevance_filter
 from outmem.skills import bundled_registry
 from outmem.store import WikiStore
 
@@ -93,7 +92,7 @@ def _hit_leading(path: str, scope: str) -> str:
 
 def _format_hits(result: Any, scope: str) -> str:
     """Format a :class:`~outmem.search.SearchResult` as ``key:line:text``
-    rows — shared by the plain and relevance-filtered ``search_wiki``."""
+    rows — the ``grep_wiki`` output shape."""
     if not result.hits:
         return "(no matches)"
     lines = [
@@ -114,34 +113,37 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
     is the function body, not a string allowlist that could drift.
     """
 
-    def search_wiki(
+    def grep_wiki(
         pattern: str,
         scope: str = "wiki",
         case_insensitive: bool = False,
     ) -> str:
-        """Search the wiki / raw / log directories with ripgrep.
+        """Literal/regex **ripgrep** over the wiki, raw sources, or the log.
 
-        Use this as your first retrieval move. ``scope="wiki"`` (the
-        default, Tier 1) searches compiled pages and returns
-        ``slug:line:text`` rows — feed the slug straight to
-        ``read_page``. ``scope="raw"`` (Tier 2) falls through to source
-        material when the wiki did not contain the answer; raw / log
-        hits return path-shaped rows (``path:line:text``) since they
-        aren't slugs.
+        The precise-match counterpart to ``search_wiki``: use ``grep_wiki``
+        when you need the *exact line* a string appears on, or to search
+        material ``search_wiki`` can't — ``scope="raw"`` (the original
+        source documents under ``raw/``) and ``scope="log"`` (the gap log).
+        Returns ``slug:line:text`` rows for ``scope="wiki"`` (feed the slug
+        to ``read_page``) and ``path:line:text`` for raw/log hits.
+
+        For "which pages answer this question?" use ``search_wiki`` instead
+        — it ranks whole pages by relevance; this only finds literal matches.
 
         Example:
-            search_wiki(pattern="cost-plus", scope="wiki")
+            grep_wiki(pattern="cost-plus 35%", scope="wiki")
+            grep_wiki(pattern="penicillin", scope="raw")
 
         Args:
-            pattern: Regex pattern, or a literal string when ``case_insensitive`` does the job.
+            pattern: Regex pattern, or a literal string.
             scope: One of ``"wiki"``, ``"raw"``, ``"log"``, ``"all"``. Default ``"wiki"``.
             case_insensitive: ``True`` to ignore case (``rg -i``).
         """
-        _log_call("search_wiki", pattern=pattern, scope=scope, case_insensitive=case_insensitive)
+        _log_call("grep_wiki", pattern=pattern, scope=scope, case_insensitive=case_insensitive)
         try:
             result = store.search(pattern, scope=scope, case_insensitive=case_insensitive)
         except OutmemError as exc:
-            _log_error("search_wiki", exc)
+            _log_error("grep_wiki", exc)
             return f"(search failed: {exc})"
         return _format_hits(result, scope)
 
@@ -150,9 +152,9 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         (frontmatter + body) as a string.
 
         Use this after ``search_wiki`` has surfaced a candidate slug,
-        or when you already know which page you want. If the slug
-        names a raw source file rather than a wiki page, use
-        ``search_wiki`` with ``scope="raw"`` instead.
+        or when you already know which page you want. To read a raw
+        source document rather than a wiki page, use ``grep_wiki`` with
+        ``scope="raw"`` to locate it.
 
         Slugs may be flat (``pricing-formula``) or namespaced with
         ``:`` separators (``abx:penicillin``,
@@ -182,7 +184,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             _log_error("read_page", exc)
             return (
                 f"(no such wiki page: {slug!r} — try `list_pages` to see "
-                "what exists, or `search_wiki` with scope='raw' for source material)"
+                "what exists, or `grep_wiki` with scope='raw' for source material)"
             )
         return page.path.read_text(encoding="utf-8")
 
@@ -384,7 +386,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             )
         return "\n".join(lines)
 
-    # Cache the built retriever per strategy across find_pages calls. The
+    # Cache the built retriever per strategy across search_wiki calls. The
     # bm25 candidate net (used by the default rerank(bm25), and by bm25)
     # re-reads every page off disk and builds an FTS5 table — paying that
     # once per agent process instead of once per tool call is the
@@ -393,29 +395,28 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
     # store.config) transparently rebuilds.
     _retriever_cache: dict[str, Any] = {}
 
-    def find_pages(question: str, k: int = 5) -> str:
+    def search_wiki(question: str, k: int = 5) -> str:
         """Find the wiki pages most likely to answer a question.
 
-        The high-level "which pages should I read?" tool. Picks the
-        pipeline configured by the wiki's ``retrieval.strategy`` (the
-        ``retrieval:`` block in ``config.yaml``; defaults to
-        ``rerank(bm25)``). Returns a ranked list of slugs with a short
-        excerpt; call ``read_page`` on the interesting ones to read in full.
+        The primary search tool: ask a natural-language question, get back
+        the most relevant whole pages. Runs the pipeline configured by the
+        wiki's ``retrieval.strategy`` (the ``retrieval:`` block in
+        ``config.yaml``; default ``rerank(bm25)``). Returns a ranked list of
+        ``[[slug]]`` citations with a short excerpt; call ``read_page`` on
+        the interesting ones to read in full.
 
-        Prefer this over ``search_wiki``/``find_similar`` for
-        question-shaped queries — the configured strategy is the one
-        whose Hit@k was measured on this wiki's question bank. Use
-        ``search_wiki`` only when you need surgical keyword/line-level
-        matches.
+        Use this for question-shaped queries. For the *exact line* a literal
+        string appears on, or to search the raw source documents / the gap
+        log, use ``grep_wiki`` instead.
 
         Example:
-            find_pages(question="What's the dose of penicillin for endocarditis?")
+            search_wiki(question="What's the dose of penicillin for endocarditis?")
 
         Args:
             question: Natural-language question to retrieve pages for.
             k: Number of pages to return (default 5).
         """
-        _log_call("find_pages", question=question, k=k)
+        _log_call("search_wiki", question=question, k=k)
         strategy = store.config.outmem.retrieval.strategy
         try:
             from outmem.optimize.blocks import build_retriever_from_settings
@@ -426,22 +427,21 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 _retriever_cache[strategy] = retriever
             result = retriever.retrieve(question, k=k)
         except (OutmemError, ImportError) as exc:
-            # Expected, recoverable failures: a semantic strategy with the
-            # index disabled (OutmemError) or an optional extra not
-            # installed (ImportError). Surface as a tool result. Anything
-            # else (TypeError, AttributeError, …) is a real bug — let it
-            # propagate so tests and Logfire see it instead of the agent
-            # swallowing it as a string.
-            _log_error("find_pages", exc)
-            return f"(find_pages failed: {exc})"
+            # Expected, recoverable failures: a semantic strategy with no
+            # index built (OutmemError) or an optional extra not installed
+            # (ImportError). Surface as a tool result. Anything else
+            # (TypeError, …) is a real bug — let it propagate so tests and
+            # Logfire see it instead of the agent swallowing it as a string.
+            _log_error("search_wiki", exc)
+            return f"(search_wiki failed: {exc})"
         if not result.slugs:
             # Carry the retriever's diagnostic (e.g. a hyde generation
             # failure that forced a raw-question fallback) onto the
             # no-match path too, so the agent learns *why* it got nothing.
             note = f" ({result.note})" if result.note else ""
             return (
-                "(no pages matched — try rephrasing or `search_wiki` "
-                f"for surgical keyword matches){note}"
+                "(no pages matched — try rephrasing or `grep_wiki` "
+                f"for literal keyword matches){note}"
             )
         lines: list[str] = []
         for slug in result.slugs:
@@ -456,8 +456,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         return "\n".join(lines)
 
     tools: list[WikiTool] = [
-        find_pages,
         search_wiki,
+        grep_wiki,
         read_page,
         list_pages,
         find_backlinks,
@@ -691,65 +691,44 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
     return [write_page, extend_page, append_log, record_ingestion]
 
 
-def wiki_tools(
-    store: WikiStore, *, relevance: RelevanceConfig | None = None
-) -> list[WikiTool]:
-    """Return the v0.1 PydanticAI tool palette bound to ``store``.
+def wiki_tools(store: WikiStore) -> list[WikiTool]:
+    """Return the PydanticAI tool palette bound to ``store``.
 
-    Twelve tools (thirteen when ``semantic.enabled``): retrieval
-    (``search_wiki`` / ``read_page`` / ``list_pages``), graph
-    traversal (``find_backlinks`` / ``page_history``), the EXPANSION
-    helper (``topic_evolution``), source inspection (``list_sources``
-    / ``read_source`` / ``find_similar``), and the four writeback
-    paths (``write_page`` / ``extend_page`` / ``append_log`` /
+    Retrieval (``search_wiki`` — the strategy-driven page search;
+    ``grep_wiki`` — literal ripgrep over wiki/raw/log; ``read_page`` /
+    ``list_pages``), graph traversal (``find_backlinks`` /
+    ``page_history``), the EXPANSION helper (``topic_evolution``), source
+    inspection (``list_sources`` / ``read_source`` / ``find_similar`` when
+    the semantic index is available), and the four writeback paths
+    (``write_page`` / ``extend_page`` / ``append_log`` /
     ``record_ingestion``).
 
-    Each call is a closure over ``store`` so consumers don't need to
-    plumb a RunContext deps type — just pass ``tools=wiki_tools(store)``
-    and the model gets everything bound.
-
-    ``relevance`` (opt-in) inserts a cheap-model relevance filter
-    between ripgrep and the agent's reading step — see
-    :func:`wiki_read_tools` for the contract. ``None`` falls back to the
-    wiki's ``relevance:`` config block (disabled by default ⇒ today's
-    ``search_wiki`` byte-for-byte).
+    Each call is a closure over ``store`` so consumers don't need to plumb
+    a RunContext deps type — just pass ``tools=wiki_tools(store)`` and the
+    model gets everything bound.
 
     For consult-only / external agent integrations, use
-    :func:`wiki_read_tools` instead — it drops the write tools so the
-    model never sees a commit-producing API.
+    :func:`wiki_read_tools` instead — it drops the write tools so the model
+    never sees a commit-producing API.
     """
-    tools = _read_tools(store) + _write_tools(store)
-    return _maybe_apply_relevance(store, tools, relevance)
+    return _read_tools(store) + _write_tools(store)
 
 
-def wiki_read_tools(
-    store: WikiStore, *, relevance: RelevanceConfig | None = None
-) -> list[WikiTool]:
-    """Return the read-only subset of the v0.1 PydanticAI tool palette.
+def wiki_read_tools(store: WikiStore) -> list[WikiTool]:
+    """Return the read-only subset of the PydanticAI tool palette.
 
     Drops every commit-producing tool (``write_page``, ``extend_page``,
     ``append_log``, ``record_ingestion``). The survivors are pure
-    retrieval / inspection paths: ``search_wiki``, ``read_page``,
-    ``list_pages``, ``find_backlinks``, ``page_history``,
+    retrieval / inspection paths: ``search_wiki``, ``grep_wiki``,
+    ``read_page``, ``list_pages``, ``find_backlinks``, ``page_history``,
     ``topic_evolution``, ``list_sources``, ``read_source``, and
-    ``find_similar`` (when the semantic index is enabled).
+    ``find_similar`` (when the semantic index is available).
 
     Pair with ``WikiStore.open(path, read_only=True)`` when handing a
-    curated wiki to an external agent system as a consult-only tool —
-    the store's :meth:`~outmem.store.WikiStore._commit_paths` guard
-    rejects any write attempt anyway, but exposing only the read tools
-    means the model never even sees the write API and won't try to
-    use it.
-
-    ``relevance`` (opt-in): when set, the ``search_wiki`` entry is
-    swapped for a drop-in variant that runs a cheap-model relevance
-    filter (:func:`outmem.relevance.relevance_filter`) over a wider
-    ripgrep net and returns only the relevant pages, each with a
-    one-line why and its supporting lines — ``read_page(slug)`` is
-    still the next step. All other tools are returned unchanged. The
-    filter fires ``relevance.on_filter`` (guarded) once per wiki-scope
-    search. ``None`` falls back to the wiki's ``relevance:`` config
-    block; with it disabled (default) the tool is byte-for-byte today's.
+    curated wiki to an external agent system as a consult-only tool — the
+    store's :meth:`~outmem.store.WikiStore._commit_paths` guard rejects any
+    write attempt anyway, but exposing only the read tools means the model
+    never even sees the write API and won't try to use it.
 
     Example::
 
@@ -764,131 +743,7 @@ def wiki_read_tools(
             system_prompt="You answer from the wiki only. Cite [[slugs]].",
         )
     """
-    return _maybe_apply_relevance(store, _read_tools(store), relevance)
-
-
-def _resolve_relevance(
-    store: WikiStore, relevance: RelevanceConfig | None
-) -> RelevanceConfig | None:
-    """Explicit config wins; else build one from the wiki's ``relevance:``
-    block when enabled; else ``None`` (today's behaviour)."""
-    if relevance is not None:
-        return relevance
-    settings = store.config.outmem.relevance
-    if not settings.enabled:
-        return None
-    return RelevanceConfig(
-        model=settings.model,
-        max_relevant=settings.max_relevant,
-        max_candidates=settings.max_candidates,
-        candidate_max_bytes=settings.candidate_max_bytes,
-        context=settings.context,
-        context_chars_per_page=settings.context_chars_per_page,
-    )
-
-
-def _maybe_apply_relevance(
-    store: WikiStore, tools: list[WikiTool], relevance: RelevanceConfig | None
-) -> list[WikiTool]:
-    cfg = _resolve_relevance(store, relevance)
-    if cfg is None:
-        return tools
-    ranked = _ranked_search_wiki(store, cfg)
-    return [ranked if t.__name__ == "search_wiki" else t for t in tools]
-
-
-def _fire_on_filter(
-    callback: Callable[[FilterOutcome], None] | None, outcome: FilterOutcome
-) -> None:
-    """Fire the consumer's observability hook, swallowing any error — a
-    tracing bug must never break retrieval."""
-    if callback is None:
-        return
-    try:
-        callback(outcome)
-    except Exception as exc:  # consumer tracing bug — never propagate
-        log.warning("on_filter callback raised (%s); ignoring", exc)
-
-
-def _format_outcome(outcome: FilterOutcome) -> str:
-    """Render a :class:`FilterOutcome` for the agent: one ``slug  why: …``
-    header per kept page, its supporting lines indented beneath."""
-    if not outcome.kept:
-        if outcome.fell_back:
-            return "(no matches)"
-        return (
-            f"(no relevant pages — {outcome.candidates_considered} candidate(s) "
-            "considered; broaden or rephrase the search)"
-        )
-    blocks: list[str] = []
-    for page in outcome.kept:
-        header = page.slug if not page.reason else f"{page.slug}  why: {page.reason}"
-        rows = [header]
-        rows += [
-            f"  {_hit_leading(h.path, 'wiki')}:{h.line_number}:{h.text}"
-            for h in page.lines
-        ]
-        blocks.append("\n".join(rows))
-    return "\n".join(blocks)
-
-
-def _ranked_search_wiki(store: WikiStore, cfg: RelevanceConfig) -> WikiTool:
-    """Build the drop-in ``search_wiki`` that filters wiki-scope hits
-    through the relevance model. Non-wiki scopes behave exactly as the
-    plain tool (path-shaped rows, no model call)."""
-
-    def search_wiki(
-        pattern: str,
-        scope: str = "wiki",
-        case_insensitive: bool = False,
-    ) -> str:
-        """Search the wiki / raw / log directories with ripgrep, then —
-        for ``scope="wiki"`` — keep only the pages a cheap relevance
-        model judges relevant to ``pattern``. Returns ``slug  why: …``
-        headers with supporting lines; call ``read_page(slug)`` next for
-        full text. ``scope="raw"`` / ``"log"`` / ``"all"`` are plain
-        path-shaped searches (no filtering).
-
-        Example:
-            search_wiki(pattern="penicillin dosing", scope="wiki")
-
-        Args:
-            pattern: Regex / keyword, also used as the relevance query.
-            scope: One of ``"wiki"``, ``"raw"``, ``"log"``, ``"all"``. Default ``"wiki"``.
-            case_insensitive: ``True`` to ignore case (``rg -i``).
-        """
-        _log_call(
-            "search_wiki", pattern=pattern, scope=scope, case_insensitive=case_insensitive
-        )
-        if scope != "wiki":
-            try:
-                result = store.search(
-                    pattern, scope=scope, case_insensitive=case_insensitive
-                )
-            except OutmemError as exc:
-                _log_error("search_wiki", exc)
-                return f"(search failed: {exc})"
-            return _format_hits(result, scope)
-        try:
-            outcome = relevance_filter(
-                store,
-                query=pattern,
-                scope="wiki",
-                model=cfg.model,
-                max_relevant=cfg.max_relevant,
-                max_candidates=cfg.max_candidates,
-                candidate_max_bytes=cfg.candidate_max_bytes,
-                context=cfg.context,
-                context_chars_per_page=cfg.context_chars_per_page,
-                case_insensitive=case_insensitive,
-            )
-        except OutmemError as exc:
-            _log_error("search_wiki", exc)
-            return f"(search failed: {exc})"
-        _fire_on_filter(cfg.on_filter, outcome)
-        return _format_outcome(outcome)
-
-    return search_wiki
+    return _read_tools(store)
 
 
 # Inner system prompt for the read-only consult subagent. Deliberately

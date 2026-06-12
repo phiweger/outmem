@@ -20,31 +20,31 @@ Tool calls below show the primary API (PydanticAI tools attached to
 the agent). The equivalent CLI is shown alongside for the
 human-driven workflow.
 
-1. **Search the wiki first.** Always.
+1. **Search the wiki first.** Always. Ask a natural-language question:
 
    ```python
-   search_wiki(pattern="cost-plus", scope="wiki")
+   search_wiki(question="What is our cost-plus pricing formula?")
    ```
 
-   Returns `path:line:text` rows, one per match. Hits in `wiki/`
-   mean we already have a compiled answer; read the page and you're
-   done.
+   Returns the most relevant whole pages as `[[slug]]` citations with a
+   short excerpt, ranked by the wiki's configured retrieval strategy.
+   This is the primary recall move — `read_page` the interesting hits.
 
-   Equivalent CLI: `outmem search "<pattern>" --scope wiki`.
-
-2. **If the wiki is silent, fall through to raw sources.**
+2. **Need an exact line, or to search raw sources / the log?** Use
+   `grep_wiki` — literal/regex ripgrep, not relevance ranking:
 
    ```python
-   search_wiki(pattern="cost-plus", scope="raw")
+   grep_wiki(pattern="cost-plus 35%", scope="wiki")   # exact line in a page
+   grep_wiki(pattern="cost-plus", scope="raw")         # the raw/ source documents
+   grep_wiki(pattern="...", scope="log")               # the gap log
    ```
 
-   Tier 2. Raw files are uncompiled source material — useful, but
-   slower to read and less authoritative than a wiki page on the same
-   topic. If you find an answer here, that's a strong signal you
-   should also write the compacted version back to the wiki at the
-   end of the turn (see the `write` skill).
+   `scope="raw"` is Tier 2: uncompiled source material — slower to read
+   and less authoritative than a wiki page. If you find an answer there,
+   that's a strong signal to write the compacted version back to the
+   wiki at the end of the turn (see the `write` skill).
 
-   Equivalent CLI: `outmem search "<pattern>" --scope raw`.
+   Equivalent CLI: `outmem search "<pattern>" --scope wiki|raw|log`.
 
 3. **Read the candidate page.**
 

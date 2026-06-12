@@ -638,15 +638,15 @@ def test_tool_calls_emit_log_records(seeded: WikiStore, caplog: pytest.LogCaptur
     from outmem.adapters.pydantic_ai import wiki_tools
 
     tools = wiki_tools(seeded)
-    search_wiki = next(t for t in tools if t.__name__ == "search_wiki")
+    grep_wiki = next(t for t in tools if t.__name__ == "grep_wiki")
     read_page = next(t for t in tools if t.__name__ == "read_page")
 
     with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
-        search_wiki(pattern="cost-plus")
+        grep_wiki(pattern="cost-plus")
         read_page(slug="pricing-formula")
 
     messages = [r.getMessage() for r in caplog.records]
-    assert any("search_wiki" in m for m in messages)
+    assert any("grep_wiki" in m for m in messages)
     assert any("read_page" in m and "pricing-formula" in m for m in messages)
 
 
