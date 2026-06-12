@@ -84,9 +84,10 @@ prune false positives from a high-recall semantic shortlist — the right
 pick when the question paraphrases the page rather than naming it.
 
 To tune with `semantic` / `hyde` / `hybrid` (any block or fuse-leg that
-hits the vector index): `pip install "outmem[semantic]"`, set
-`semantic.enabled: true`, then **build the index once with `outmem reindex`**
-— it is not built on the fly. If the index is missing/empty the optimizer
+hits the vector index): `pip install "outmem[semantic]"`, then **build the
+index once with `outmem reindex`** — it is not built on the fly (there's
+no enable flag; the index existing is what turns semantic on). If the
+index is missing/empty the optimizer
 skips those strategies with a clear "run `outmem reindex`" in `result.log`,
 rather than scoring an empty (useless-looking) retriever.
 
@@ -197,7 +198,7 @@ for line in result.log:                          # errors/fallbacks during the r
 `result.log` is the post-hoc record of anything that went wrong — a config
 whose rerank model refused (with the reason and how many questions),
 an unavailable strategy, etc. — so you don't have to scrape stderr. (At
-the per-call level, `relevance_filter`'s `FilterOutcome` carries `.error`
+the per-call level, the rerank gate logs a one-line reason on
 plus the `.query`/`.candidates_considered` it was processing.)
 
 ### Picking a winner
@@ -226,7 +227,7 @@ rows, not repeats.
 
 `save` replaces *only* the `retrieval:` block in `config.yaml` (every
 other setting and comment is left intact); that block is what the agent's
-wiki search reads next time via `find_pages` — see
+wiki search reads next time via `search_wiki` — see
 `docs/configuration.md`. A `git diff` then shows the wiki was tuned and
 which pipeline it picked. `result.pick(rank)` returns the raw
 `RetrievalConfig` if you prefer to write the block yourself.

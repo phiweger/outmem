@@ -16,12 +16,10 @@ from outmem import (
     FrontmatterError,
     GitOperationError,
     ConflictError,
-    # Relevance filter (optional; see docs/features.md):
-    RelevanceConfig,    # the config object a consumer passes to the adapter
-    FilterOutcome,      # what on_filter receives per search
-    RelevantPage,       # one kept page: slug + reason + supporting SearchHits
     SearchHit,          # a single ripgrep hit (path, line_number, text)
-    relevance_filter,   # standalone core fn (non-PydanticAI consumers / tests)
+    # The LLM relevance gate the rerank retrieval strategy uses:
+    RelevantPage,       # one kept page: slug + reason
+    judge_relevance,    # gate over (slug, excerpt) candidates → kept slugs
 )
 ```
 
@@ -213,11 +211,13 @@ agent = Agent(
 result = await agent.run("what did we decide about pricing?")
 ```
 
-The tools — twelve, plus `find_similar` when `semantic.enabled` (thirteen):
+The tools — twelve, plus `find_similar` when the semantic index is built
+(thirteen):
 
 | Tool | Required args | Purpose |
 |------|---------------|---------|
-| `search_wiki(pattern, scope, case_insensitive)` | 1 | Ripgrep over wiki / raw / log / all |
+| `search_wiki(question, k)` | 1 | Strategy-driven page search → ranked `[[slug]]` citations |
+| `grep_wiki(pattern, scope, case_insensitive)` | 1 | Ripgrep over wiki / raw / log / all |
 | `read_page(slug)` | 1 | Full file (frontmatter + body) |
 | `list_pages()` | 0 | Every slug, one per line |
 | `find_backlinks(slug)` | 1 | Pages linking *to* slug |
@@ -229,7 +229,7 @@ The tools — twelve, plus `find_similar` when `semantic.enabled` (thirteen):
 | `extend_page(slug, body)` | **2** | Replace body → commit `extend: <slug>` |
 | `append_log(topic, content)` | **2** | Append entry → commit `log: <topic>` |
 | `record_ingestion(rel_path, prompt, pages_touched)` | 1 | Note a source as ingested |
-| `find_similar(text, top_k, exclude_slug)` | 1 | Vector search — only when `semantic.enabled` |
+| `find_similar(text, top_k, exclude_slug)` | 1 | Vector search — only when the index is built |
 
 ## Read-only consult — wiki as a tool in someone else's agent
 

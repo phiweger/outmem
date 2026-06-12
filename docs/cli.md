@@ -172,7 +172,7 @@ page can't silently disappear from a question bank or search:
 
 | When | What happens | Persists to disk? |
 | --- | --- | --- |
-| **On read** (`store.read`, so `generate_bank`, `find_pages`, the agent) | repaired *in memory*, logged at WARNING — you get usable content, never a silent skip | no (read has no side effects) |
+| **On read** (`store.read`, so `generate_bank`, `search_wiki`, the agent) | repaired *in memory*, logged at WARNING — you get usable content, never a silent skip | no (read has no side effects) |
 | **Pre-commit hook** (manual `git commit`) | repaired + re-staged into the commit | yes |
 | **On demand** (`store.repair_pages(dry_run=False)`) | walks all pages, repairs, commits | yes |
 
@@ -215,7 +215,7 @@ $/M-tokens to get cost. When Logfire is enabled, the same numbers land on
 an `outmem.reindex` span. `--path` reindexes one repo-relative *file*;
 `--root` selects the wiki (after the subcommand).
 
-Set `semantic.enabled: true` in `config.yaml` first. Detailed
+Build the index first: `outmem reindex`. Detailed
 behaviour: [features.md](features.md#semantic-index).
 
 ## Dashboard (requires `outmem[dashboard]`)

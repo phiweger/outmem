@@ -83,9 +83,11 @@ git:
   retry_on_lock: true            # retry git ops once on transient index.lock failures
   auto_install_hook: true        # ensure the pre-commit hook on open (see below)
 
-# Optional — requires `pip install outmem[semantic]`.
+# Vector index (`pip install outmem[semantic]`). No on/off flag — it's
+# active once built (`outmem reindex`); a semantic/hyde/*+semantic
+# retrieval strategy or `find_similar` needs it. These keys configure how
+# it's built and queried.
 semantic:
-  enabled: false                          # flip to true to turn the vector index on
   embedding_model: openai:text-embedding-3-small
   db_filename: .vectors.db                # tracked in git, sibling of wiki/
   chunk_size: 2000                        # target characters per chunk
@@ -93,16 +95,6 @@ semantic:
   overlap_paragraphs: 1                   # paragraphs of overlap between chunks
   similarity_threshold: 0.80              # min cosine sim for find_similar
   top_k: 5
-
-# Optional — relevance filter over lexical search; requires `pip install outmem[agent]`. See features.md.
-relevance:
-  enabled: false                          # cheap-model gate; swaps the search_wiki tool
-  model: anthropic:claude-haiku-4-5
-  max_relevant: 8                         # cap on pages kept per search
-  max_candidates: 20                      # distinct pages sent to the filter
-  candidate_max_bytes: 65536              # width of the wide ripgrep net (bytes)
-  context: page                           # "page" (cap below) | "lines"
-  context_chars_per_page: 2000
 
 # Optional — HITL gate around write_page / extend_page. See features.md.
 approval:
@@ -115,7 +107,7 @@ logfire:
 
 ### `retrieval:` — what the agent's wiki search runs
 
-The `retrieval:` block of `config.yaml` configures `find_pages` in
+The `retrieval:` block of `config.yaml` configures `search_wiki` in
 `wiki_read_tools`. `OptimizeResult.save(rank, store)` rewrites *this block*
 (leaving the rest of `config.yaml` and its comments intact); you can also
 hand-edit it.
@@ -156,7 +148,7 @@ source can be written inline (`strategy: rerank(semantic)`) or as a
 sibling field (`strategy: rerank` + `rerank_source: semantic`).
 
 Note `retrieval.semantic_top_k` is distinct from `semantic.top_k` (which
-governs the `find_similar` tool): `find_pages` with a `semantic`/`hyde`
+governs the `find_similar` tool): `search_wiki` with a `semantic`/`hyde`
 strategy uses `retrieval.semantic_top_k`.
 
 ## Sample `.env`

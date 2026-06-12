@@ -283,7 +283,7 @@ The out-of-box default is **`rerank(bm25)`** — a free BM25 keyword
 shortlist gated by one Haiku call per query (lifts recall on paraphrased
 questions; ~1.5 s/query, needs `ANTHROPIC_API_KEY`). Want zero model cost?
 Set `strategy: bm25` for plain keyword ranking. `semantic`/`hyde` need
-`semantic.enabled: true` + `outmem reindex`.
+a built index (`outmem reindex`).
 
 **Composing two (or more).** There are two ways to combine blocks:
 
@@ -319,7 +319,7 @@ without burning an eval. (To cap the *number* of trials instead, lower
 `save(rank, store)` rewrites the **`retrieval:` block of your
 `config.yaml`** in place (every other setting and comment left intact),
 tagged `from_optimization: true` so a `git diff` shows the wiki was tuned.
-From then on the agent's `find_pages` tool runs that pipeline. You can also
+From then on the agent's `search_wiki` tool runs that pipeline. You can also
 just edit the block by hand — `strategy` is the composed string from above:
 
 ```yaml
@@ -504,7 +504,7 @@ agent = Agent(
 
 - [`docs/cli.md`](docs/cli.md) — every subcommand with examples.
 - [`docs/search.md`](docs/search.md) — the search & retrieval workflow:
-  `search_wiki` → `read_page`, scopes, and the lexical / relevance /
+  `search_wiki` (strategy-driven) + `grep_wiki` (literal), and the
   semantic tiers (when to reach for each).
 - [`docs/python-api.md`](docs/python-api.md) — `WikiStore` + the
   PydanticAI adapter + the standalone agent runtime.
@@ -512,7 +512,7 @@ agent = Agent(
   the log + lint signals to figure out what to ingest next.
 - [`docs/configuration.md`](docs/configuration.md) — `wiki/AGENTS.md`,
   `config.yaml`, `.env`, environment variables, system requirements.
-- [`docs/features.md`](docs/features.md) — semantic index, relevance
+- [`docs/features.md`](docs/features.md) — semantic index,
   filter, retrieval tuning, write approval, Logfire, dashboard (all opt-in).
 - [`docs/autoresearch.md`](docs/autoresearch.md) — making outmem improve
   its own retrieval: generate a question bank, let an agent tune the
