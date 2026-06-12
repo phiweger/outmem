@@ -781,3 +781,66 @@ class TestReadOnly:
         store = WikiStore.open(seed.root)
         store.backlinks("b")
         assert (seed.root / ".outmem" / "backlinks.json").exists()
+
+
+class TestRepairPages:
+    """End-to-end of `WikiStore.repair_pages` — detects malformed-frontmatter
+    pages, reports them in dry_run mode, repairs + commits them otherwise.
+
+    The targeted shape: a top-level scalar containing an unquoted ': ',
+    which YAML rejects with 'mapping values are not allowed here'.
+    """
+
+    def _seed_broken_page(self, store: WikiStore, slug: str, title: str) -> Path:
+        """Write a page bypassing serialize_wiki_page (which auto-quotes), so
+        we land an actually-broken file on disk — the shape we see in real
+        imports. Uses the conftest's unsigned git runner so the
+        signing-by-default sandbox doesn't poison the test."""
+        from outmem.slug import slug_to_relpath
+        from tests.conftest import _run_git
+
+        path = store.pages_path / slug_to_relpath(slug)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntitle: {title}\nslug: {slug}\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        _run_git(["add", str(path)], cwd=store.root)
+        _run_git(["commit", "-m", f"seed broken {slug}"], cwd=store.root)
+        return path
+
+    def test_dry_run_reports_without_writing(self, fresh_store: WikiStore) -> None:
+        fresh_store.write_page("good", title="Good page", body="ok\n")
+        path = self._seed_broken_page(
+            fresh_store, "rki:flu",
+            "Influenza (Teil 1): Erkrankungen durch saisonale Influenza",
+        )
+        before = path.read_text(encoding="utf-8")
+
+        report = fresh_store.repair_pages(dry_run=True)
+        assert [slug for slug, _ in report] == ["rki:flu"]
+        assert path.read_text(encoding="utf-8") == before  # untouched
+
+    def test_repairs_and_commits(self, fresh_store: WikiStore) -> None:
+        self._seed_broken_page(
+            fresh_store, "rki:flu",
+            "Influenza (Teil 1): Erkrankungen durch saisonale Influenza",
+        )
+        head_before = current_head(fresh_store.root)
+
+        report = fresh_store.repair_pages(dry_run=False)
+        assert [slug for slug, _ in report] == ["rki:flu"]
+        # Page now reads cleanly and preserves the original title text.
+        page = fresh_store.read("rki:flu")
+        assert page.title == (
+            "Influenza (Teil 1): Erkrankungen durch saisonale Influenza"
+        )
+        # A new commit landed for the repair.
+        assert current_head(fresh_store.root) != head_before
+
+    def test_returns_empty_when_nothing_to_repair(
+        self, fresh_store: WikiStore
+    ) -> None:
+        fresh_store.write_page("good", title="Good", body="ok\n")
+        assert fresh_store.repair_pages(dry_run=True) == []
+        assert fresh_store.repair_pages(dry_run=False) == []

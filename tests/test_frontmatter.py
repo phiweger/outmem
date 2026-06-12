@@ -140,3 +140,93 @@ def test_serialise_omits_empty_optional_fields() -> None:
     assert "tags" not in rendered
     assert "created" not in rendered
     assert "updated" not in rendered
+
+
+class TestRepairWikiPage:
+    """`repair_wiki_page` for the imported-data failure mode: a top-level
+    scalar value (most often `title:`) contains an unquoted `: ` and the
+    file won't parse. The repair single-quotes such values; conservative
+    on everything else."""
+
+    def test_repairs_unquoted_colon_space_in_title(self) -> None:
+        from outmem.frontmatter import parse_wiki_page, repair_wiki_page
+
+        # Exact shape from the failing wiki: imported title contains "(Teil 1): "
+        broken = (
+            "---\n"
+            "title: Influenza (Teil 1): Erkrankungen durch saisonale Influenza\n"
+            "slug: rki:ratgeber:grippe\n"
+            "---\n\nbody\n"
+        )
+        from outmem.exceptions import FrontmatterError
+
+        with pytest.raises(FrontmatterError):
+            parse_wiki_page(broken)  # the original failure
+
+        fixed = repair_wiki_page(broken)
+        assert fixed is not None
+        fm, body = parse_wiki_page(fixed)  # round-trips cleanly
+        assert fm.title == "Influenza (Teil 1): Erkrankungen durch saisonale Influenza"
+        assert fm.slug == "rki:ratgeber:grippe"
+        assert body.strip() == "body"
+
+    def test_returns_none_when_already_parses(self) -> None:
+        """A well-formed page is left untouched (repair is opt-in)."""
+        from outmem.frontmatter import repair_wiki_page
+
+        ok = "---\ntitle: Fine\nslug: ok\n---\n\nbody\n"
+        assert repair_wiki_page(ok) is None
+
+    def test_returns_none_when_no_frontmatter(self) -> None:
+        from outmem.frontmatter import repair_wiki_page
+
+        assert repair_wiki_page("just body text\n") is None
+
+    def test_leaves_quoted_values_alone(self) -> None:
+        """A value that's already single- or double-quoted is not re-wrapped
+        (broken page must contain SOME unquoted ': ' to fire)."""
+        from outmem.frontmatter import repair_wiki_page
+
+        # Frontmatter has a bad line AND a correctly-quoted one — the quoted
+        # line must come through unmodified.
+        broken = (
+            "---\n"
+            'title: "Already: Quoted"\n'
+            "subtitle: Bad: unquoted\n"
+            "slug: x\n"
+            "---\n\nbody\n"
+        )
+        fixed = repair_wiki_page(broken)
+        assert fixed is not None
+        assert 'title: "Already: Quoted"' in fixed  # untouched
+
+    def test_escapes_embedded_single_quotes(self) -> None:
+        """Single-quote YAML escape is doubling — verify the round-trip."""
+        from outmem.frontmatter import parse_wiki_page, repair_wiki_page
+
+        broken = (
+            "---\n"
+            "title: Bob's note: a thing\n"
+            "slug: x\n"
+            "---\n\nbody\n"
+        )
+        fixed = repair_wiki_page(broken)
+        assert fixed is not None
+        fm, _ = parse_wiki_page(fixed)
+        assert fm.title == "Bob's note: a thing"
+
+    def test_returns_none_when_repair_doesnt_help(self) -> None:
+        """An indentation / structural break isn't in scope — the repair
+        returns None rather than emitting something that still won't parse."""
+        from outmem.frontmatter import repair_wiki_page
+
+        # Mis-indented mapping under a key — repair won't touch this shape.
+        broken = (
+            "---\n"
+            "title: T\n"
+            "slug: x\n"
+            "tags:\n"
+            "[oops, this is wrong, no closing\n"
+            "---\n\nbody\n"
+        )
+        assert repair_wiki_page(broken) is None

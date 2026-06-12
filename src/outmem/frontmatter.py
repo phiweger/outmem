@@ -85,6 +85,70 @@ def parse_wiki_page(content: str) -> tuple[WikiFrontmatter, str]:
     return _frontmatter_from_dict(data), body
 
 
+# Matches a top-level frontmatter line `<key>: <value>` where <value> is a
+# bare scalar (no leading list/anchor/quote, no block indicator). The
+# repair pass only touches lines like these — nested keys, lists, and
+# already-quoted values are passed through verbatim.
+_TOPLEVEL_SCALAR_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_-]*):[ \t]+([^>|\n][^\n]*)$"
+)
+
+
+def repair_wiki_page(content: str) -> str | None:
+    """Best-effort repair of a frontmatter block YAML can't load.
+
+    Targets the single failure mode we see in imported wikis: a top-level
+    scalar value (most often ``title:``) that contains an unquoted
+    ``: `` — ``title: Influenza (Teil 1): Erkrankungen…`` — which YAML
+    interprets as a nested mapping and rejects with "mapping values are
+    not allowed here". The repair single-quotes such values and only
+    accepts the result if it now parses cleanly. Leaves nested structures
+    and already-quoted lines alone.
+
+    Returns the repaired full page text on success; ``None`` if the
+    repair didn't fire (file already parses) or didn't help (file is
+    broken in a way we don't pretend to fix — e.g. mis-indented blocks,
+    truncated frontmatter). Conservative on purpose: silently rewriting
+    arbitrary YAML risks masking other bugs."""
+    match = _FRONTMATTER_RE.match(content)
+    if not match:
+        return None
+    raw_yaml = match.group(1)
+    body = match.group(2)
+
+    # Already-parseable file: no repair needed.
+    try:
+        yaml.safe_load(raw_yaml)
+        return None
+    except yaml.YAMLError:
+        pass
+
+    lines = raw_yaml.split("\n")
+    changed = False
+    for i, line in enumerate(lines):
+        m = _TOPLEVEL_SCALAR_RE.match(line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).rstrip()
+        # Only quote if the value contains the trigger and isn't already quoted.
+        if ": " not in value:
+            continue
+        if value.startswith(("'", '"')):
+            continue
+        escaped = value.replace("'", "''")  # YAML single-quote escape
+        lines[i] = f"{key}: '{escaped}'"
+        changed = True
+    if not changed:
+        return None
+
+    repaired_yaml = "\n".join(lines)
+    try:
+        yaml.safe_load(repaired_yaml)
+    except yaml.YAMLError:
+        return None  # didn't fix it; leave the file alone
+    return f"---\n{repaired_yaml}\n---\n\n{body.lstrip(chr(10))}"
+
+
 def serialize_wiki_page(frontmatter: WikiFrontmatter, body: str) -> str:
     """Render a frontmatter + body pair back to the on-disk file form.
 

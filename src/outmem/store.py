@@ -51,6 +51,7 @@ from outmem.frontmatter import (
     ProvenanceEntry,
     WikiFrontmatter,
     parse_wiki_page,
+    repair_wiki_page,
     serialize_wiki_page,
     touch_updated,
 )
@@ -408,6 +409,48 @@ class WikiStore:
             relpath_to_slug(p.relative_to(self.pages_path))
             for p in editorial_pages(self.pages_path)
         )
+
+    def repair_pages(
+        self, *, dry_run: bool = True, commit_subject: str | None = None
+    ) -> list[tuple[str, str]]:
+        """Walk every wiki page; repair the ones whose frontmatter won't parse.
+
+        Targets the imported-data failure mode where a top-level scalar
+        value contains an unquoted ``: `` (colon-space) and YAML reads it
+        as a malformed nested mapping. See
+        :func:`outmem.frontmatter.repair_wiki_page` for the exact shape
+        repaired. Returns ``[(slug, summary), …]`` for every page touched
+        (or that would be touched, with ``dry_run=True``); pages already
+        parsing — or broken in a way the repair doesn't address — are
+        silently skipped.
+
+        ``dry_run=True`` (default) reports only — call again with
+        ``dry_run=False`` to write the fixes back and commit them as one
+        ``fix: repair frontmatter…`` commit (``commit_subject`` overrides
+        the subject). Read-only stores refuse the write step.
+        """
+        from outmem.slug import relpath_to_slug
+
+        repaired: list[tuple[str, str]] = []
+        if not self.pages_path.is_dir():
+            return repaired
+        for path in editorial_pages(self.pages_path):
+            slug = relpath_to_slug(path.relative_to(self.pages_path))
+            text = path.read_text(encoding="utf-8")
+            fixed = repair_wiki_page(text)
+            if fixed is None:
+                continue
+            summary = "quoted scalar values containing ': '"
+            if not dry_run:
+                path.write_text(fixed, encoding="utf-8")
+            repaired.append((slug, summary))
+        if not dry_run and repaired:
+            rels = [str(self._page_path(s).relative_to(self.root)) for s, _ in repaired]
+            subject = commit_subject or (
+                f"fix: repair frontmatter on {len(repaired)} page(s)"
+            )
+            self._commit_paths(rels, subject=subject)
+        return repaired
 
     def search(
         self,

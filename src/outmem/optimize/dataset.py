@@ -114,13 +114,24 @@ def generate_bank(
     # Read pages up front (cheap, sequential); skip unreadable ones so one
     # malformed page can't abort the bank.
     pages: list[tuple[str, str, str, str | None]] = []
+    skipped = 0
     for slug in page_slugs:
         try:
             page = store.read(slug)
         except OutmemError as exc:
+            skipped += 1
             log.warning("skipping unreadable page %r (%s)", slug, exc)
             continue
         pages.append((slug, page.title, page.body, _first_source(page.frontmatter)))
+    if skipped:
+        # Point at the recovery path: most skips are imported pages whose
+        # frontmatter title contains an unquoted ': '; store.repair_pages()
+        # auto-fixes the known shape.
+        log.warning(
+            "skipped %d unreadable page(s); try `store.repair_pages(dry_run=True)` "
+            "to see fixable ones, then `dry_run=False` to repair + commit",
+            skipped,
+        )
 
     # Generate for all pages concurrently — the slow, I/O-bound part. One
     # parent span nests the per-page "agent run" children in the trace.
