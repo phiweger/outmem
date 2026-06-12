@@ -222,11 +222,11 @@ plain `git`) interoperates.
 
 ### Tune retrieval to your wiki
 
-Which retrieval strategy wins (keyword, BM25, semantic, hybrid, LLM
-rerank) depends on *your* corpus and how questions are phrased. outmem
-can measure it: an agent generates a question bank from your pages, then
-tries strategies and keeps the one with the best Hit@k. This is a
-Python/API tool (not a CLI subcommand) — run it from a script or REPL:
+Which retrieval strategy wins depends on *your* corpus and how questions
+are phrased. outmem can measure it: an agent generates a question bank
+from your pages, then tries strategies and keeps the one with the best
+Hit@k. This is a Python/API tool (not a CLI subcommand) — run it from a
+script or REPL:
 
 ```python
 from outmem import WikiStore
@@ -238,32 +238,73 @@ bank = generate_bank(store, model="anthropic:claude-haiku-4-5")   # one-time, ~1
 result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-4-6")
 result.print_summary()      # ranked leaderboard → stderr
 #  #  config                 score  hit@k  abst   ms/q (p95)
-#  1  bm25+semantic          0.93   0.93   0.00    59 ( 78)
-#  2  semantic               0.93   0.93   0.00   329 (520)
-#  3  bm25                   0.80   0.80   0.00     2 (  3)
+#  1  rerank(semantic)       0.97   0.97   0.00  2112 (3194)
+#  2  bm25+semantic          0.93   0.93   0.00    59 (  78)
+#  3  bm25                   0.80   0.80   0.00     2 (   3)
 
 result.save(1, store)       # write <wiki>/retrieval.yaml from row 1
 ```
 
+#### The strategies (blocks)
+
+A strategy is one of six **atomic blocks**, optionally composed:
+
+| block | what it does | cost |
+| --- | --- | --- |
+| `lexical` | ripgrep keyword search, ranked by how often query terms appear | free, no index |
+| `bm25` | SQLite FTS5 **BM25** keyword ranking — better term weighting than `lexical` (**the default**) | free, no index |
+| `semantic` | vector cosine over the embedding index — finds pages that *mean* the same thing with no shared words | 1 embedding call / query |
+| `hyde` | writes a hypothetical answer with a cheap model, then `semantic`-searches on *that* (closer in vector space than a terse question) | 1 model call / query |
+| `rerank` | pulls a wide candidate shortlist, then an LLM yes/no-gates each for relevance — highest precision | **1 model call / query** |
+| `hybrid` | **R**eciprocal **R**ank **F**usion: blends the rankings of 2+ atomic blocks | sum of its legs |
+
+`semantic`/`hyde` need `semantic.enabled: true` + `outmem reindex`.
+
+**Composing two (or more).** There are two ways to combine blocks:
+
+- **Gate over a source** — `rerank(<source>)`: rerank fed by another
+  block's shortlist. `rerank(semantic)` (rerank **+** semantic) is the
+  recall-then-precision pairing that usually wins on paraphrase-heavy
+  banks; bare `rerank` = `rerank(lexical)`.
+- **Fuse legs** — `a+b[+c…]`: RRF over 2+ atomic legs, e.g.
+  `bm25+semantic` (keyword precision **+** vector recall) or
+  `lexical+bm25+semantic`. Legs must be atomic
+  (`lexical`/`bm25`/`semantic`/`hyde`); `rerank` is not a fuse leg.
+
+**Restrict what the optimizer tries** with `allowed_strategies` — the
+biggest cost lever, since `rerank`/`hyde` are the only blocks that make a
+model call *per question*:
+
+```python
+result = optimize_retrieval(
+    store, bank, optimizer_model="anthropic:claude-sonnet-4-6",
+    allowed_strategies=["lexical", "bm25", "semantic"],   # skip rerank/hyde entirely
+)
+```
+
+It takes the **block names** above (not the composed strings) — to let
+the agent explore rerank-over-semantic, allow `["rerank", "semantic"]`. A
+disabled config is bounced without burning an eval. (To cap the *number*
+of trials instead, lower `max_evals`.)
+
+#### Persisting the winner
+
 `save(rank, store)` writes a **separate `retrieval.yaml`** next to
 `config.yaml` (it never rewrites your hand-curated config), tagged
 `from_optimization: true` so a `git diff` shows the wiki was tuned. From
-then on the agent's `find_pages` tool runs that pipeline.
-
-You can also just write the file by hand — `strategy` is a small
-controlled vocabulary (unsupported strings error at load, no silent
-fallback):
+then on the agent's `find_pages` tool runs that pipeline. You can also
+write it by hand — `strategy` is the composed string from above
+(unsupported values error at load, no silent fallback):
 
 ```yaml
 # retrieval.yaml
 retrieval:
-  strategy: bm25+semantic       # lexical | bm25 | semantic | hyde |
-                                # rerank(<source>) | a+b[+c…] (RRF hybrid)
+  strategy: rerank(semantic)    # or bm25+semantic, semantic, bm25, …
   from_optimization: false
 ```
 
-Default when no file exists: `bm25`. Full strategy table, knobs, and
-cost notes in [docs/configuration.md](docs/configuration.md#retrievalyaml--what-the-agents-wiki-search-runs)
+Default when no file exists: `bm25`. Full knobs and cost notes in
+[docs/configuration.md](docs/configuration.md#retrievalyaml--what-the-agents-wiki-search-runs)
 and [docs/autoresearch.md](docs/autoresearch.md).
 
 ---
