@@ -283,7 +283,22 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 **Logfire.** If `logfire.enabled` is set in `config.yaml`, the generation,
 optimizer, and per-question rerank calls are traced in Pydantic Logfire
 automatically — the same `instrument_pydantic_ai` wiring `outmem ask`
-uses (`pip install 'outmem[logfire]'`). No extra setup in your script.
+uses (`pip install 'outmem[logfire]'`). No extra setup in your script. The
+up-front query-embedding prewarm is wrapped in a single parent span, so
+its per-question embed calls group under one line rather than scattering
+across the timeline.
+
+**Interrupting a run (Ctrl+C).** Evals run their per-question retrieval
+across a thread pool. On interrupt, queued (not-yet-started) calls are
+cancelled immediately, but a model call already in flight in a worker
+thread **cannot be killed** — Python can't interrupt a thread blocked on a
+synchronous HTTP request. So up to `eval_concurrency` in-flight calls
+(e.g. ~10 rerank judges) finish before the run stops; with `rerank`/`hyde`
+each call is multi-second, so abort isn't instant. Cost is *bounded* (it
+won't churn through the rest of the bank), but if a snappy Ctrl+C matters
+to you, run with a lower `eval_concurrency`, or `allowed_strategies`
+without `rerank`/`hyde` (lexical/bm25/semantic evals make no per-question
+model call, so there's nothing slow to wait on).
 
 ---
 
