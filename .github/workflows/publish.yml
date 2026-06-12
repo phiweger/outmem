@@ -37,6 +37,11 @@ jobs:
       - name: Install package with dev extras (for tests)
         run: python -m pip install -e ".[dev,agent,dashboard,semantic]"
 
+      - name: Configure git identity (some tests create local commits)
+        run: |
+          git config --global user.name "outmem CI"
+          git config --global user.email "ci@outmem.invalid"
+
       - name: Run tests
         run: python -m pytest -q
 
