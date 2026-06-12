@@ -147,14 +147,22 @@ outmem index rebuild       # → `index: rebuild` commit (no-op if in sync)
 outmem reindex             # full semantic walk; skip-if-hash-unchanged
 ```
 
-Or install the pre-commit hook once and forget about both —
-manual `git commit` of wiki pages will regenerate `index.md` AND
-the vector DB into the same commit:
+Or install the pre-commit hook once and forget about it — a manual
+`git commit` of wiki pages will, in the same commit: **repair** any
+staged page whose frontmatter won't parse (e.g. an externally pasted
+title with an unquoted `: `), regenerate `index.md`, and update the
+vector DB:
 
 ```bash
 outmem hook install        # → .git/hooks/pre-commit
 outmem hook uninstall
 ```
+
+The repair only rewrites a page that *currently* fails to parse (it's a
+no-op on well-formed pages) and prints `repaired frontmatter in <path>`
+so the fix is visible in the commit output, not silent. For pages
+already committed (e.g. pulled from a remote), repair on demand with
+`store.repair_pages(dry_run=False)` from the Python API.
 
 ## Semantic search (requires `outmem[semantic]`)
 

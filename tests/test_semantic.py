@@ -772,6 +772,60 @@ class TestCliReindexStaged:
       3. Asserting the vector DB was mutated and is in the staged tree.
     """
 
+    def test_staged_repairs_broken_frontmatter(
+        self, wiki_with_pages: WikiStore
+    ) -> None:
+        """A staged page with unparseable frontmatter (unquoted ': ' in the
+        title — the external-import failure mode) is repaired in place and
+        re-staged by the pre-commit hook, so it never enters the repo
+        broken and indexes cleanly."""
+        from outmem.frontmatter import parse_wiki_page
+
+        broken = wiki_with_pages.pages_path / "rki.md"
+        broken.write_text(
+            "---\ntitle: Influenza (Teil 1): Erkrankungen durch saisonale\n"
+            "slug: rki\n---\n\nInfluenza body.\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "add", "--", "wiki/pages/rki.md"],
+            cwd=wiki_with_pages.root, check=True,
+        )
+
+        rc, _, err = _run_cli(["reindex", "--staged"], store=wiki_with_pages)
+        assert rc == 0
+        assert "repaired frontmatter" in err
+
+        # File on disk now parses, preserving the original title text.
+        fm, _body = parse_wiki_page(broken.read_text(encoding="utf-8"))
+        assert fm.title == "Influenza (Teil 1): Erkrankungen durch saisonale"
+
+        # The repaired file is staged into this commit.
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=wiki_with_pages.root, check=True, capture_output=True, text=True,
+        ).stdout.split()
+        assert "wiki/pages/rki.md" in staged
+
+    def test_staged_leaves_valid_page_untouched(
+        self, wiki_with_pages: WikiStore
+    ) -> None:
+        """The repair pass must not rewrite a well-formed staged page."""
+        good = wiki_with_pages.pages_path / "gamma.md"
+        good.write_text(
+            "---\ntitle: Gamma\nslug: gamma\n---\n\nGamma body.\n",
+            encoding="utf-8",
+        )
+        before = good.read_text(encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "--", "wiki/pages/gamma.md"],
+            cwd=wiki_with_pages.root, check=True,
+        )
+        rc, _, err = _run_cli(["reindex", "--staged"], store=wiki_with_pages)
+        assert rc == 0
+        assert "repaired frontmatter" not in err
+        assert good.read_text(encoding="utf-8") == before  # byte-identical
+
     def test_staged_indexes_and_stages_db(self, wiki_with_pages: WikiStore) -> None:
         # External edit: drop a page into wiki/ without going through the
         # WikiStore. This is the Obsidian workflow.

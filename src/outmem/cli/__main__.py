@@ -307,6 +307,7 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
     commit. Exits 0 even on per-file errors — pre-commit hooks
     should not block commits over indexing issues.
     """
+    from outmem.frontmatter import repair_wiki_page
     from outmem.git_ops import add as git_add
     from outmem.git_ops import staged_changes
     from outmem.index import INDEX_FILENAME
@@ -316,6 +317,37 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 0  # do not block the commit
+
+    wiki_prefix = f"{store.config.wiki_dir}/"
+    index_rel = f"{wiki_prefix}{INDEX_FILENAME}"
+
+    def _is_staged_page(rel: str) -> bool:
+        return rel.startswith(wiki_prefix) and rel.endswith(".md") and rel != index_rel
+
+    # --- frontmatter repair ----------------------------------------------
+    # An externally edited / pasted page can carry frontmatter YAML can't
+    # parse (most often a title with an unquoted ': '). Repair the staged
+    # ones in place BEFORE indexing — so they don't enter the repo broken,
+    # and the reindex below sees a parseable file — then re-stage each fix
+    # into this commit. `repair_wiki_page` only touches files that currently
+    # fail to parse, so a well-formed page is never modified.
+    for rel in added:
+        if not _is_staged_page(rel):
+            continue
+        page_path = store.root / rel
+        try:
+            fixed = repair_wiki_page(page_path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if fixed is None:
+            continue
+        page_path.write_text(fixed, encoding="utf-8")
+        try:
+            git_add(store.root, [rel])
+        except OutmemError as exc:
+            print(f"outmem: could not re-stage repaired {rel}: {exc}", file=sys.stderr)
+        else:
+            print(f"outmem: repaired frontmatter in {rel}", file=sys.stderr)
 
     # --- semantic index --------------------------------------------------
     for rel in deleted:
@@ -341,14 +373,7 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
     # regenerate the index and re-stage it so it lands in the same
     # commit as the manual edit. `commit=False` because we're inside
     # the pre-commit hook — the human's commit IS the commit.
-    wiki_prefix = f"{store.config.wiki_dir}/"
-    index_rel = f"{wiki_prefix}{INDEX_FILENAME}"
-    touched_wiki = any(
-        rel.startswith(wiki_prefix)
-        and rel.endswith(".md")
-        and rel != index_rel
-        for rel in (*added, *deleted)
-    )
+    touched_wiki = any(_is_staged_page(rel) for rel in (*added, *deleted))
     if touched_wiki:
         try:
             store.rebuild_index(commit=False)
@@ -363,9 +388,10 @@ HOOK_NAME = "pre-commit"
 HOOK_MARKER = "# outmem pre-commit hook"
 HOOK_SCRIPT = f"""#!/bin/sh
 {HOOK_MARKER}
-# Keeps the semantic vector DB in lockstep with externally edited wiki
-# pages (Obsidian, etc.). Installed by `outmem hook install`. Safe to
-# remove: `outmem hook uninstall`.
+# For externally edited wiki pages (Obsidian, etc.): repairs unparseable
+# frontmatter, keeps wiki/index.md current, and keeps the semantic vector
+# DB in lockstep — re-staging each into the commit. Installed by
+# `outmem hook install`. Safe to remove: `outmem hook uninstall`.
 set -e
 exec outmem reindex --staged
 """

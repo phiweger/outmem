@@ -30,9 +30,11 @@ outmem hook uninstall      # remove
 ```
 
 The hook calls `outmem reindex --staged`, which walks the git index
-for staged wiki pages and source files, reindexes them in the vector
-DB, regenerates `wiki/index.md` if any wiki page changed, and stages
-both so the commit carries everything in lockstep.
+for staged wiki pages and source files, repairs any whose frontmatter
+won't parse (e.g. an externally pasted title containing `: `; a no-op
+on well-formed pages), reindexes them in the vector DB, regenerates
+`wiki/index.md` if any wiki page changed, and stages everything so the
+commit carries it all in lockstep.
 
 Tools the agent gains when semantic is on (added to its PydanticAI
 palette automatically):
