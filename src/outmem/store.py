@@ -252,6 +252,9 @@ class WikiStore:
             read_only=config.read_only,
         )
         self._contributors: Contributors | None = None
+        # Slugs already warned-about by read()'s frontmatter self-heal, so
+        # repeated reads of one broken page log once, not per read.
+        self._healed_slugs: set[str] = set()
         # Lazily-opened resources holding sqlite connections.
         self._vector_store: VectorStore | None = None
         self._source_registry: SourceRegistry | None = None
@@ -405,11 +408,18 @@ class WikiStore:
             repaired = repair_wiki_page(text)
             if repaired is None:
                 raise  # not a shape we can mend — surface it loudly
-            log.warning(
-                "self-healed unparseable frontmatter in %r (in memory; "
-                "persist with the pre-commit hook or store.repair_pages())",
-                slug,
-            )
+            # Warn ONCE per slug per process: an eval reads a candidate page
+            # for many questions, so logging every read floods the console
+            # with the same line dozens of times. One warning is enough to
+            # tell the user to persist the fix.
+            if slug not in self._healed_slugs:
+                self._healed_slugs.add(slug)
+                log.warning(
+                    "self-healed unparseable frontmatter in %r (in memory; "
+                    "persist with `store.repair_pages(dry_run=False)` or the "
+                    "pre-commit hook)",
+                    slug,
+                )
             frontmatter, body = parse_wiki_page(repaired)
         return WikiPage(slug=slug, frontmatter=frontmatter, body=body, path=path)
 

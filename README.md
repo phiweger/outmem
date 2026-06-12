@@ -303,10 +303,12 @@ result = optimize_retrieval(
 )
 ```
 
-It takes the **block names** above (not the composed strings) — to let
-the agent explore rerank-over-semantic, allow `["rerank", "semantic"]`. A
-disabled config is bounced without burning an eval. (To cap the *number*
-of trials instead, lower `max_evals`.)
+It takes the **block names** above (not composed strings), and the
+restriction covers **rerank sources and hybrid legs too** — so
+`["rerank", "semantic"]` permits `rerank(semantic)` but *bounces*
+`rerank(lexical)` (lexical wasn't allowed). A disallowed config is bounced
+without burning an eval. (To cap the *number* of trials instead, lower
+`max_evals`.)
 
 #### Persisting the winner
 

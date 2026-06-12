@@ -280,16 +280,18 @@ def optimize_retrieval(
     the full bank so the reported score is honest. See
     ``docs/autoresearch.md`` for the full run + logging recipe.
 
-    ``allowed_strategies`` restricts which top-level strategies the agent
-    may score — e.g. ``["lexical", "bm25", "semantic"]`` to skip the
-    per-question LLM cost of ``rerank``/``hyde`` entirely, the single
-    biggest cost lever on a run. A ``run_eval`` for a disabled strategy is
-    bounced without consuming an eval, and the agent is told the allowed
-    set up front. Valid names: lexical, bm25, semantic, hyde, rerank,
-    hybrid (unknown names raise). Note a ``hybrid`` allowed here can still
-    fuse a semantic leg; exclude ``semantic``/``hyde``/``hybrid`` together
-    to avoid all embedding work. To cap the *number* of configs instead of
-    the kinds, lower ``max_evals``.
+    ``allowed_strategies`` restricts which retrieval *blocks* the agent may
+    use — e.g. ``["lexical", "bm25", "semantic"]`` to skip the per-question
+    LLM cost of ``rerank``/``hyde`` entirely, the single biggest cost lever
+    on a run. The restriction covers the blocks a config *uses*, not just
+    its top-level name: a ``rerank``'s candidate source and a ``hybrid``'s
+    fuse legs must also be in the set. So ``["rerank", "semantic"]`` permits
+    ``rerank(semantic)`` but bounces ``rerank(lexical)`` (lexical wasn't
+    allowed). A config using a disabled block is bounced without consuming
+    an eval, and the agent is told the allowed set up front. Valid names:
+    lexical, bm25, semantic, hyde, rerank, hybrid (unknown names raise).
+    To cap the *number* of configs instead of the kinds, lower
+    ``max_evals``.
 
     ``on_eval(EvalEvent)`` fires once per scored eval — an epoch-style
     progress hook carrying the config just tried, its metrics, and the
@@ -384,13 +386,20 @@ def optimize_retrieval(
             if fuse is not None:
                 cfg_dict["fuse"] = fuse
             cfg = RetrievalConfig.from_dict(cfg_dict)
-            if allowed is not None and cfg.strategy not in allowed:
-                # Caller restricted the palette (e.g. to skip the per-question
-                # LLM cost of rerank/hyde). Bounce without burning an eval.
-                return (
-                    f"strategy {cfg.strategy!r} is disabled for this run; "
-                    f"choose from {sorted(allowed)}. Evals left unchanged."
-                )
+            if allowed is not None:
+                # Restriction is over the *blocks a config uses*, not just its
+                # top-level name: rerank's candidate source and a hybrid's fuse
+                # legs count too. So allowed=["rerank","semantic"] permits
+                # rerank(semantic) but bounces rerank(lexical) — lexical wasn't
+                # allowed. Bounce without burning an eval.
+                bad = _disallowed_blocks(cfg, allowed)
+                if bad:
+                    return (
+                        f"config uses disabled block(s) {sorted(bad)}; this run "
+                        f"is restricted to {sorted(allowed)} (which includes "
+                        "rerank sources and hybrid legs). Pick another. Evals "
+                        "left unchanged."
+                    )
             fingerprint = _config_fingerprint(cfg)
             if fingerprint in seen:
                 prior_card = seen[fingerprint][1]
@@ -615,25 +624,46 @@ def _normalise_allowed_strategies(
     return names
 
 
+def _disallowed_blocks(cfg: RetrievalConfig, allowed: frozenset[str]) -> set[str]:
+    """Blocks ``cfg`` uses that aren't in the ``allowed`` set.
+
+    A config "uses" its top-level strategy plus, for ``rerank``, its
+    candidate source, and for ``hybrid``, its fuse legs. Empty set ⇒ the
+    config is fully within the allowed palette."""
+    used = {cfg.strategy}
+    if cfg.strategy == "rerank":
+        used.add(cfg.rerank_source)
+    elif cfg.strategy == "hybrid":
+        used.update(cfg.fuse)
+    return used - allowed
+
+
 def _initial_prompt(
     bank: QuestionBank,
     k: int,
     max_evals: int,
     allowed_strategies: frozenset[str] | None = None,
 ) -> str:
-    restriction = ""
-    if allowed_strategies is not None:
-        restriction = (
-            f" This run is restricted to these strategies ONLY: "
-            f"{sorted(allowed_strategies)} — do not try any others."
+    if allowed_strategies is None:
+        opening = (
+            "Start with the lexical baseline, diagnose its failures by reading "
+            "gold pages, then improve."
+        )
+    else:
+        opening = (
+            f"This run is restricted to these blocks ONLY: "
+            f"{sorted(allowed_strategies)} — and the restriction covers rerank "
+            f"sources and hybrid legs, so e.g. `rerank` must use a source from "
+            f"that set (rerank's default source is lexical; set `rerank_source` "
+            f"to an allowed block). Start with the cheapest allowed strategy, "
+            f"read gold pages of its failures, then improve within the set."
         )
     return (
         f"Wiki bank: {len(bank.answerable)} answerable + "
         f"{len(bank.unanswerable)} unanswerable questions. Metric (maximise, "
         f"0..1): mean of [answerable: gold page in top-{k}] and "
         f"[unanswerable: retriever returned empty]. You have up to "
-        f"{max_evals} `run_eval` calls. Start with the lexical baseline, "
-        f"diagnose its failures by reading gold pages, then improve.{restriction}"
+        f"{max_evals} `run_eval` calls. {opening}"
     )
 
 

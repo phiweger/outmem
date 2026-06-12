@@ -704,6 +704,46 @@ def test_allowed_strategies_rejects_unknown_name(
         )
 
 
+def test_allowed_strategies_gates_rerank_source(
+    store: WikiStore, bank: QuestionBank
+) -> None:
+    """Regression for 'why does it try lexical?': allowed=['rerank','bm25']
+    must BOUNCE rerank(lexical) (lexical not allowed) but ACCEPT
+    rerank(bm25). (bm25 source needs no semantic index.)"""
+    state = {"n": 0}
+
+    def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
+        state["n"] += 1
+        if state["n"] == 1:  # rerank over lexical → bounced (lexical not allowed)
+            return ModelResponse(parts=[ToolCallPart(tool_name="run_eval",
+                args={"strategy": "rerank", "rerank_source": "lexical"})])
+        if state["n"] == 2:  # rerank over bm25 → allowed
+            return ModelResponse(parts=[ToolCallPart(tool_name="run_eval",
+                args={"strategy": "rerank", "rerank_source": "bm25"})])
+        return ModelResponse(parts=[TextPart("done")])
+
+    result = optimize_retrieval(
+        store, bank, optimizer_model=FunctionModel(optimizer),
+        k=1, max_evals=5, rerank_model=_rerank_model([]),
+        allowed_strategies=["rerank", "bm25"],
+    )
+    sources = [cfg["rerank_source"] for cfg, _ in result.trace]
+    assert sources == ["bm25"]  # lexical bounced, bm25 scored
+
+
+def test_disallowed_blocks() -> None:
+    from outmem.optimize.optimizer import _disallowed_blocks
+
+    allowed = frozenset({"rerank", "semantic"})
+    rerank_lex = RetrievalConfig(strategy="rerank", rerank_source="lexical")
+    rerank_sem = RetrievalConfig(strategy="rerank", rerank_source="semantic")
+    assert _disallowed_blocks(rerank_lex, allowed) == {"lexical"}
+    assert _disallowed_blocks(rerank_sem, allowed) == set()
+    # hybrid legs are gated too
+    hyb = RetrievalConfig(strategy="hybrid", fuse=("bm25", "semantic"))
+    assert _disallowed_blocks(hyb, frozenset({"hybrid", "semantic"})) == {"bm25"}
+
+
 def test_normalise_allowed_strategies() -> None:
     from outmem.optimize.optimizer import _normalise_allowed_strategies
 
