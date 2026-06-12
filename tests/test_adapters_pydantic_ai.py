@@ -438,10 +438,14 @@ def test_build_consult_wiki_missing_path_raises(tmp_path: Path) -> None:
 
 def test_find_pages_uses_configured_strategy(seeded_store: WikiStore) -> None:
     """``find_pages`` reads ``RetrievalSettings`` and ranks via the
-    configured pipeline (default: bm25). Returns slugs the agent can
-    then ``read_page`` on. Regression for the optimizer→production
-    seam: the optim's picked config must actually change what the
-    agent's search tool returns."""
+    configured pipeline. Returns slugs the agent can then ``read_page``
+    on. Regression for the optimizer→production seam: the optim's picked
+    config must actually change what the agent's search tool returns.
+
+    Pinned to ``bm25`` so the test is model-free and deterministic — the
+    out-of-box default is ``rerank(bm25)``, which would make a Haiku call
+    per query."""
+    seeded_store.config.outmem.retrieval.strategy = "bm25"
     tools = wiki_read_tools(seeded_store)
     find_pages = _by_name(tools, "find_pages")
     out = find_pages(question="cost-plus pricing formula", k=3)

@@ -1095,13 +1095,13 @@ def test_retrieval_block_read_from_config_yaml(tmp_path: Path) -> None:
 def test_config_yaml_bad_strategy_is_lenient(tmp_path: Path) -> None:
     """A bad strategy in config.yaml's retrieval block follows the
     forgiving-load contract: warn + keep the default, NOT crash the open."""
-    from outmem.config import load_yaml_config
+    from outmem.config import DEFAULT_RETRIEVAL_STRATEGY, load_yaml_config
 
     (tmp_path / "config.yaml").write_text(
         "retrieval:\n  strategy: not-a-strategy\n", encoding="utf-8",
     )
     settings = load_yaml_config(tmp_path).retrieval  # must not raise
-    assert settings.strategy == "bm25"  # default preserved
+    assert settings.strategy == DEFAULT_RETRIEVAL_STRATEGY  # default preserved
 
 
 def test_retrieval_numeric_knobs_reject_bool(tmp_path: Path) -> None:

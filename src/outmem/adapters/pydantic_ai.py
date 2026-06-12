@@ -384,12 +384,13 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             )
         return "\n".join(lines)
 
-    # Cache the built retriever per strategy across find_pages calls. For
-    # bm25 (the default) construction re-reads every page off disk and
-    # builds an FTS5 table — paying that once per agent process instead of
-    # once per tool call is the difference between O(turns·N) and O(N)
-    # page reads. Keyed by strategy so a mid-session config.yaml retrieval
-    # save (which updates store.config) transparently rebuilds.
+    # Cache the built retriever per strategy across find_pages calls. The
+    # bm25 candidate net (used by the default rerank(bm25), and by bm25)
+    # re-reads every page off disk and builds an FTS5 table — paying that
+    # once per agent process instead of once per tool call is the
+    # difference between O(turns·N) and O(N) page reads. Keyed by strategy
+    # so a mid-session config.yaml retrieval save (which updates
+    # store.config) transparently rebuilds.
     _retriever_cache: dict[str, Any] = {}
 
     def find_pages(question: str, k: int = 5) -> str:
@@ -397,9 +398,9 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
 
         The high-level "which pages should I read?" tool. Picks the
         pipeline configured by the wiki's ``retrieval.strategy`` (the
-        ``retrieval:`` block in ``config.yaml``; defaults to ``bm25``).
-        Returns a ranked list of slugs with a short excerpt; call
-        ``read_page`` on the interesting ones to read in full.
+        ``retrieval:`` block in ``config.yaml``; defaults to
+        ``rerank(bm25)``). Returns a ranked list of slugs with a short
+        excerpt; call ``read_page`` on the interesting ones to read in full.
 
         Prefer this over ``search_wiki``/``find_similar`` for
         question-shaped queries — the configured strategy is the one

@@ -47,7 +47,13 @@ DEFAULT_REMOVE_STALE_LOCK = True
 DEFAULT_STALE_LOCK_SECONDS = 60
 DEFAULT_RETRY_ON_LOCK = True
 DEFAULT_AUTO_INSTALL_HOOK = True
-DEFAULT_RETRIEVAL_STRATEGY = "bm25"  # production find_pages default (no index needed)
+DEFAULT_RETRIEVAL_STRATEGY = "rerank(bm25)"
+# Production find_pages default: BM25 keyword shortlist, LLM-gated for
+# relevance — one cheap Haiku call per query, but lifts recall on
+# paraphrase-heavy questions where plain term overlap misses the right
+# page. The bm25 source needs no semantic index. Run optimize_retrieval
+# and `result.save(rank, store)` to swap in a measured winner
+# (rerank(semantic), bm25+semantic, …).
 
 DEFAULT_SOURCE_MAX_CHARS = 200_000  # cap on `read_source` tool returns
 
@@ -247,7 +253,9 @@ class RetrievalSettings:
     * ``a+b[+c…]`` (≥2 atomic legs) — RRF-fused hybrid
 
     A bad ``strategy`` warns and falls back (config.yaml's forgiving-load
-    contract), it doesn't crash the open. Default is ``bm25``.
+    contract), it doesn't crash the open. Default is ``rerank(bm25)`` (a
+    BM25 keyword shortlist gated by one cheap model call per query); set
+    ``bm25`` for free, model-free keyword ranking.
 
     ``from_optimization`` is purely a marker: ``true`` when the block was
     written by ``OptimizeResult.save(...)``, ``false`` for a hand-edit. It
@@ -699,10 +707,14 @@ def starter_yaml(
         "\n"
         "# Which pipeline the agent's `find_pages` search runs. `strategy` is\n"
         "# a small DSL: lexical | bm25 | semantic | hyde | rerank(<source>)\n"
-        "# | a+b[+c...] (RRF hybrid, e.g. bm25+semantic). semantic/hyde need\n"
-        "# semantic.enabled + `outmem reindex`. Tune empirically with\n"
-        "# `outmem.optimize.optimize_retrieval`, then `result.save(rank,\n"
-        "# store)` rewrites this block. See docs/configuration.md.\n"
+        "# | a+b[+c...] (RRF hybrid, e.g. bm25+semantic). Default is\n"
+        "# rerank(bm25): BM25 keyword shortlist gated by one Haiku call per\n"
+        "# query (~1.5 s/query, lifts recall on paraphrases). For free/fast\n"
+        "# plain keyword ranking with no model call, set strategy: bm25.\n"
+        "# semantic/hyde/<...>+semantic need semantic.enabled + `outmem\n"
+        "# reindex`. Tune empirically with `outmem.optimize.optimize_retrieval`,\n"
+        "# then `result.save(rank, store)` rewrites this block. See\n"
+        "# docs/configuration.md.\n"
         "retrieval:\n"
         f"  strategy: {DEFAULT_RETRIEVAL_STRATEGY}\n"
         "  from_optimization: false   # true once written by an optimize run\n"

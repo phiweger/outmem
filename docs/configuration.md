@@ -123,7 +123,7 @@ hand-edit it.
 ```yaml
 # config.yaml
 retrieval:
-  strategy: bm25                    # the DSL (see below); default bm25
+  strategy: rerank(bm25)            # the DSL (see below); default rerank(bm25)
   from_optimization: false          # true ⇒ written by an optimize run
   semantic_top_k: 8                 # chunks fetched per semantic/hyde call
   rrf_k: 60                         # Reciprocal Rank Fusion constant (hybrid)
@@ -141,11 +141,12 @@ doesn't crash the open:
 | string | pipeline |
 | --- | --- |
 | `lexical` | ripgrep, ranked by hit frequency |
-| `bm25` | SQLite FTS5 BM25 (the default) |
+| `bm25` | SQLite FTS5 BM25 (free, no model) |
 | `semantic` | vector cosine over the index |
 | `hyde` | LLM hypothetical answer → semantic search |
 | `rerank` | shortcut for `rerank(lexical)` |
 | `rerank(<source>)` | LLM yes/no gate over `<source>` candidates |
+| `rerank(bm25)` | **the default** — BM25 shortlist, Haiku-gated (1 model call/query) |
 | `a+b[+c…]` | Reciprocal Rank Fusion of the named atomic legs |
 
 Examples: `bm25+semantic`, `lexical+semantic`, `rerank(semantic)`,

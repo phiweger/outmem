@@ -273,13 +273,17 @@ A strategy is one of six **atomic blocks**, optionally composed:
 | block | what it does | cost |
 | --- | --- | --- |
 | `lexical` | ripgrep keyword search, ranked by how often query terms appear | free, no index |
-| `bm25` | SQLite FTS5 **BM25** keyword ranking — better term weighting than `lexical` (**the default**) | free, no index |
+| `bm25` | SQLite FTS5 **BM25** keyword ranking — better term weighting than `lexical` | free, no index |
 | `semantic` | vector cosine over the embedding index — finds pages that *mean* the same thing with no shared words | 1 embedding call / query |
 | `hyde` | writes a hypothetical answer with a cheap model, then `semantic`-searches on *that* (closer in vector space than a terse question) | 1 model call / query |
 | `rerank` | pulls a wide candidate shortlist, then an LLM yes/no-gates each for relevance — highest precision | **1 model call / query** |
 | `hybrid` | **R**eciprocal **R**ank **F**usion: blends the rankings of 2+ atomic blocks | sum of its legs |
 
-`semantic`/`hyde` need `semantic.enabled: true` + `outmem reindex`.
+The out-of-box default is **`rerank(bm25)`** — a free BM25 keyword
+shortlist gated by one Haiku call per query (lifts recall on paraphrased
+questions; ~1.5 s/query, needs `ANTHROPIC_API_KEY`). Want zero model cost?
+Set `strategy: bm25` for plain keyword ranking. `semantic`/`hyde` need
+`semantic.enabled: true` + `outmem reindex`.
 
 **Composing two (or more).** There are two ways to combine blocks:
 
@@ -325,8 +329,8 @@ retrieval:
   from_optimization: false
 ```
 
-Default `strategy` is `bm25`; a bad value warns and falls back (no crash).
-Full knobs and cost notes in
+Default `strategy` is `rerank(bm25)`; a bad value warns and falls back (no
+crash). Full knobs and cost notes in
 [docs/configuration.md](docs/configuration.md#retrieval--what-the-agents-wiki-search-runs)
 and [docs/autoresearch.md](docs/autoresearch.md).
 
