@@ -24,9 +24,22 @@ def _run_git(args: list[str], *, cwd: Path) -> str:
     """Test-only git runner. Mirrors outmem.git_ops but lives here so the
     fixture is independent of the code under test. Pins
     ``commit.gpgsign=false`` so signing-by-default sandboxes don't
-    poison the suite."""
+    poison the suite, and a default ``user.name``/``user.email`` so a
+    raw ``commit`` works on a CI runner with no global git identity (the
+    GitHub Actions runner has none — exit 128 otherwise). Callers that
+    care about authorship pass their own ``-c user.name=…`` in ``args``;
+    those come after these and win (git uses the last ``-c`` per key)."""
     result = subprocess.run(
-        ["git", "-c", "commit.gpgsign=false", *args],
+        [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.com",
+            *args,
+        ],
         cwd=str(cwd),
         check=True,
         capture_output=True,
