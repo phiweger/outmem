@@ -113,16 +113,17 @@ logfire:
   enabled: false                          # true + LOGFIRE_TOKEN in env → traces
 ```
 
-### `retrieval.yaml` — what the agent's wiki search runs
+### `retrieval:` — what the agent's wiki search runs
 
-Sits next to `config.yaml`. Auto-written by
-`OptimizeResult.save(rank, store)` (see `docs/autoresearch.md`); can also
-be hand-edited. Drives `find_pages` in `wiki_read_tools`.
+The `retrieval:` block of `config.yaml` configures `find_pages` in
+`wiki_read_tools`. `OptimizeResult.save(rank, store)` rewrites *this block*
+(leaving the rest of `config.yaml` and its comments intact); you can also
+hand-edit it.
 
 ```yaml
-# retrieval.yaml
+# config.yaml
 retrieval:
-  strategy: bm25                    # the DSL (see below)
+  strategy: bm25                    # the DSL (see below); default bm25
   from_optimization: false          # true ⇒ written by an optimize run
   semantic_top_k: 8                 # chunks fetched per semantic/hyde call
   rrf_k: 60                         # Reciprocal Rank Fusion constant (hybrid)
@@ -133,10 +134,9 @@ retrieval:
   case_insensitive: true
 ```
 
-`strategy` is a controlled-vocabulary DSL string — unsupported values
-raise at load time (in `retrieval.yaml`; a bad value in a `config.yaml`
-`retrieval:` block warns and falls back instead, per that file's
-forgiving-load contract):
+`strategy` is a controlled-vocabulary DSL string. A bad value warns and
+falls back to the default (config.yaml's forgiving-load contract), it
+doesn't crash the open:
 
 | string | pipeline |
 | --- | --- |
@@ -154,14 +154,7 @@ Examples: `bm25+semantic`, `lexical+semantic`, `rerank(semantic)`,
 source can be written inline (`strategy: rerank(semantic)`) or as a
 sibling field (`strategy: rerank` + `rerank_source: semantic`).
 
-**`retrieval.yaml` is authoritative and self-contained.** When it exists
-it *fully replaces* any `retrieval:` block in `config.yaml` (it does not
-merge) — a field you omit reverts to the default, not to the config.yaml
-value. Delete the file to fall back to config.yaml / defaults. It's kept
-separate so an `outmem optimize` save doesn't rewrite user-curated config,
-and so the file's mere existence signals the wiki was tuned.
-
-Note `semantic_top_k` here is distinct from `semantic.top_k` (which
+Note `retrieval.semantic_top_k` is distinct from `semantic.top_k` (which
 governs the `find_similar` tool): `find_pages` with a `semantic`/`hyde`
 strategy uses `retrieval.semantic_top_k`.
 

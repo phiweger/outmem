@@ -233,17 +233,38 @@ from outmem import WikiStore
 from outmem.optimize import generate_bank, optimize_retrieval
 
 store = WikiStore.open("/srv/wiki")
-bank = generate_bank(store, model="anthropic:claude-haiku-4-5")   # one-time, ~1 Q/page
 
-result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-4-6")
+# Build a question bank (defaults to ~1 question per page — cap big wikis).
+bank = generate_bank(
+    store,
+    model="anthropic:claude-haiku-4-5",
+    max_pages=60,          # sample at most 60 pages → ~60 questions (omit = all pages)
+)
+
+result = optimize_retrieval(
+    store, bank,
+    optimizer_model="anthropic:claude-sonnet-4-6",
+    eval_sample=30,        # score each config on 30 questions, not the whole bank
+    #                        (the winner is re-scored on the full bank, so it's honest).
+    #                        THE cost lever: rerank/hyde make 1 model call PER question,
+    #                        so a full 700-question bank = 700 calls per eval.
+    # allowed_strategies=["bm25", "semantic"],   # also skip rerank/hyde entirely
+)
 result.print_summary()      # ranked leaderboard → stderr
 #  #  config                 score  hit@k  abst   ms/q (p95)
 #  1  rerank(semantic)       0.97   0.97   0.00  2112 (3194)
 #  2  bm25+semantic          0.93   0.93   0.00    59 (  78)
 #  3  bm25                   0.80   0.80   0.00     2 (   3)
 
-result.save(1, store)       # write <wiki>/retrieval.yaml from row 1
+result.save(1, store)       # rewrite config.yaml's retrieval: block from row 1
 ```
+
+> **Watch the cost on big wikis.** Without `eval_sample`, *every* eval
+> scores the *whole* bank — and a `rerank`/`hyde` eval makes one model
+> call per question, so a 700-page wiki means ~700 calls per eval, ×12
+> evals. Set `eval_sample` (per-eval question cap) and `max_pages`
+> (bank size) to bound it; `allowed_strategies` without `rerank`/`hyde`
+> removes the per-question model calls altogether.
 
 #### The strategies (blocks)
 
@@ -289,22 +310,22 @@ of trials instead, lower `max_evals`.)
 
 #### Persisting the winner
 
-`save(rank, store)` writes a **separate `retrieval.yaml`** next to
-`config.yaml` (it never rewrites your hand-curated config), tagged
-`from_optimization: true` so a `git diff` shows the wiki was tuned. From
-then on the agent's `find_pages` tool runs that pipeline. You can also
-write it by hand — `strategy` is the composed string from above
-(unsupported values error at load, no silent fallback):
+`save(rank, store)` rewrites the **`retrieval:` block of your
+`config.yaml`** in place (every other setting and comment left intact),
+tagged `from_optimization: true` so a `git diff` shows the wiki was tuned.
+From then on the agent's `find_pages` tool runs that pipeline. You can also
+just edit the block by hand — `strategy` is the composed string from above:
 
 ```yaml
-# retrieval.yaml
+# config.yaml
 retrieval:
   strategy: rerank(semantic)    # or bm25+semantic, semantic, bm25, …
   from_optimization: false
 ```
 
-Default when no file exists: `bm25`. Full knobs and cost notes in
-[docs/configuration.md](docs/configuration.md#retrievalyaml--what-the-agents-wiki-search-runs)
+Default `strategy` is `bm25`; a bad value warns and falls back (no crash).
+Full knobs and cost notes in
+[docs/configuration.md](docs/configuration.md#retrieval--what-the-agents-wiki-search-runs)
 and [docs/autoresearch.md](docs/autoresearch.md).
 
 ---

@@ -213,7 +213,7 @@ result.print_summary()        # one-row-per-config table → stderr, ranked by s
 #  2  hybrid[bm25+semantic rrf=60] 0.833  0.833  0.200    59 ( 78)
 #  3  bm25                         0.600  0.600  0.200    55 ( 81)
 
-picked = result.save(2, store)   # write <wiki>/retrieval.yaml (from_optimization: true)
+picked = result.save(2, store)   # rewrite config.yaml's retrieval: block
 ```
 
 The `abst` (abstention) column appears only when the bank has unanswerable
@@ -224,11 +224,12 @@ precision, not just its recall. Config labels carry the tuned knobs
 (`cand=`/`keep=`, `rrf=`, `k=`) so tuning one family reads as distinct
 rows, not repeats.
 
-`retrieval.yaml` is the file the agent's wiki search reads next time
-(via `find_pages`); see `docs/configuration.md`. Keep it under version
-control so a `git diff` shows that the wiki was tuned and which pipeline
-it picked. `result.pick(rank)` returns the raw `RetrievalConfig` if you
-prefer to write the file yourself.
+`save` replaces *only* the `retrieval:` block in `config.yaml` (every
+other setting and comment is left intact); that block is what the agent's
+wiki search reads next time via `find_pages` — see
+`docs/configuration.md`. A `git diff` then shows the wiki was tuned and
+which pipeline it picked. `result.pick(rank)` returns the raw
+`RetrievalConfig` if you prefer to write the block yourself.
 
 ### Cost, scale & logging
 

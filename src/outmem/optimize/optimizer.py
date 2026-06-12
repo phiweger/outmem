@@ -27,6 +27,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import sys
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -49,7 +50,6 @@ from outmem.config import (
     DEFAULT_OPTIMIZE_SEMANTIC_TOP_K,
     DEFAULT_OPTIMIZE_STRATEGY,
     DEFAULT_RELEVANCE_MODEL,
-    RETRIEVAL_FILENAME,
 )
 from outmem.exceptions import OutmemError
 from outmem.optimize.bench import Scorecard, evaluate
@@ -157,18 +157,17 @@ class OptimizeResult:
         *,
         path: Path | None = None,
     ) -> Path:
-        """Write the picked config to ``<wiki>/retrieval.yaml`` as a
-        ``retrieval:`` block with ``from_optimization: true``.
+        """Write the picked config into ``config.yaml``'s ``retrieval:``
+        block (``from_optimization: true``). Returns the path written.
 
-        Overwrites the file wholesale — ``retrieval.yaml`` is a
-        machine-owned artefact, so any hand-edits or comments in a prior
-        copy are replaced. Returns the absolute path written.
+        Replaces *only* the ``retrieval:`` block — every other setting,
+        and the surrounding comments, are left byte-for-byte intact. If
+        ``config.yaml`` has no ``retrieval:`` block yet, one is appended;
+        if the file is missing, it's created with just that block.
 
-        The write is atomic (temp file + ``os.replace``) and creates the
-        parent directory, so an interrupted save can't leave a truncated
-        file that the next load would reject. A read-only store, or any
-        OS-level write failure, raises :class:`OutmemError` rather than
-        leaking a bare ``OSError``.
+        The write is atomic (temp file + ``os.replace``); a read-only
+        store, or any OS-level write failure, raises :class:`OutmemError`
+        rather than leaking a bare ``OSError``.
 
         Unless ``path=`` overrides the destination, the in-memory
         ``store.config.outmem.retrieval`` is refreshed to match what was
@@ -176,27 +175,28 @@ class OptimizeResult:
         ``store`` picks up the new pipeline without a reopen. With a custom
         ``path=`` (e.g. in tests) the store is left untouched.
         """
+        from outmem.config import CONFIG_FILENAME, load_yaml_config
+
         cfg = self.pick(rank)
         default_dest = path is None
-        target = path or (store.root / RETRIEVAL_FILENAME)
+        target = path or (store.root / CONFIG_FILENAME)
         if default_dest and store.config.read_only:
             raise OutmemError(
-                "cannot save retrieval.yaml: store was opened read_only"
+                "cannot save: store was opened read_only"
             )
-        text = _render_retrieval_yaml(cfg)
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        updated = _upsert_retrieval_block(existing, _render_retrieval_block(cfg))
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp = target.with_name(f"{target.name}.tmp")
-            tmp.write_text(text, encoding="utf-8")
+            tmp.write_text(updated, encoding="utf-8")
             os.replace(tmp, target)
         except OSError as exc:
             raise OutmemError(f"failed to write {target}: {exc}") from exc
         if default_dest:
             # Keep the live store consistent with what's now on disk. Reload
-            # from the file (single source of truth) rather than mirroring
-            # the render, so this can't drift from `load_yaml_config`.
-            from outmem.config import load_yaml_config
-
+            # (single source of truth) rather than mirroring the render, so
+            # this can't drift from `load_yaml_config`.
             store.config.outmem.retrieval = load_yaml_config(store.root).retrieval
         return target
 
@@ -768,22 +768,22 @@ def _format_summary_table(rows: list[EvalRow]) -> str:
             "answer with nothing) to test abstention precision."
         )
     lines.append(
-        "\nPick a row with `result.save(rank, store)` — writes "
-        f"{RETRIEVAL_FILENAME} (from_optimization: true)."
+        "\nPick a row with `result.save(rank, store)` — rewrites the "
+        "`retrieval:` block in config.yaml (from_optimization: true)."
     )
     return "\n".join(lines)
 
 
-def _render_retrieval_yaml(cfg: RetrievalConfig) -> str:
-    """Dump a picked :class:`RetrievalConfig` as ``retrieval.yaml`` text.
+def _render_retrieval_block(cfg: RetrievalConfig) -> str:
+    """Render a picked :class:`RetrievalConfig` as a ``retrieval:`` YAML
+    block to inject into ``config.yaml``.
 
-    The body goes through ``yaml.safe_dump`` (``sort_keys=False`` to keep
-    the field order stable under git diff) so any scalar that needs
-    quoting — a model id that parses as a YAML keyword/number, a value
-    with a colon — is escaped correctly rather than emitted raw and
-    silently dropped on reload. ``strategy`` is the DSL string a human
-    would type (``bm25+semantic``, not the expanded ``{strategy: hybrid,
-    fuse: [...]}``). A leading comment records provenance."""
+    Goes through ``yaml.safe_dump`` (``sort_keys=False`` to keep field
+    order stable under git diff) so any scalar that needs quoting — a
+    model id that parses as a YAML keyword/number, a value with a colon —
+    is escaped rather than emitted raw and silently dropped on reload.
+    ``strategy`` is the DSL string a human would type (``bm25+semantic``,
+    not the expanded ``{strategy: hybrid, fuse: [...]}``)."""
     from outmem.optimize.dsl import format_strategy
 
     block = {
@@ -799,13 +799,44 @@ def _render_retrieval_yaml(cfg: RetrievalConfig) -> str:
             "case_insensitive": cfg.case_insensitive,
         }
     }
-    header = (
-        "# Written by `outmem.optimize.OptimizeResult.save(...)`.\n"
-        "# Loaded by `outmem.config.load_yaml_config`; when present this\n"
-        "# file fully defines retrieval. Delete it to revert to config.yaml's\n"
-        "# retrieval block / defaults.\n"
-    )
-    body = yaml.safe_dump(
+    return yaml.safe_dump(
         block, sort_keys=False, default_flow_style=False, allow_unicode=True
     )
-    return header + body
+
+
+_RETRIEVAL_KEY_RE = re.compile(r"^retrieval\s*:")
+
+
+def _upsert_retrieval_block(config_text: str, block_text: str) -> str:
+    """Return ``config.yaml`` text with its top-level ``retrieval:`` block
+    replaced by ``block_text`` (itself ``retrieval:\\n  …``).
+
+    Surgical: every other line — settings and comments — is preserved
+    verbatim, including any explanatory comment sitting *above* the
+    ``retrieval:`` key (it's before the replaced region). Appends the
+    block (after a blank line) when the file has none; returns just the
+    block when the file is empty."""
+    if not block_text.endswith("\n"):
+        block_text += "\n"
+    if not config_text.strip():
+        return block_text
+    lines = config_text.splitlines(keepends=True)
+    start = next(
+        (i for i, ln in enumerate(lines) if _RETRIEVAL_KEY_RE.match(ln)), None
+    )
+    if start is None:
+        sep = "" if config_text.endswith("\n") else "\n"
+        return f"{config_text}{sep}\n{block_text}"
+    # The block runs from `retrieval:` through its indented lines; trailing
+    # blank lines stay with the tail so the separator before the next block
+    # isn't eaten.
+    last = start
+    for j in range(start + 1, len(lines)):
+        ln = lines[j]
+        if ln.strip() == "":
+            continue
+        if ln[:1].isspace():  # indented → still inside the block
+            last = j
+            continue
+        break  # column-0 content → next top-level key
+    return "".join(lines[:start]) + block_text + "".join(lines[last + 1:])

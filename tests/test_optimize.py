@@ -896,9 +896,9 @@ def test_optimize_result_summary_table_and_save(
 ) -> None:
     """End-to-end of the post-run UX: the result carries one EvalRow per
     scored eval, summary_table renders them, pick(rank) returns the
-    config at that rank, save(rank, store) writes retrieval.yaml that
-    a subsequent load_yaml_config picks up."""
-    from outmem.config import RETRIEVAL_FILENAME, load_yaml_config
+    config at that rank, save(rank, store) writes config.yaml's retrieval
+    block that a subsequent load_yaml_config picks up."""
+    from outmem.config import CONFIG_FILENAME, load_yaml_config
 
     state = {"n": 0}
 
@@ -926,10 +926,10 @@ def test_optimize_result_summary_table_and_save(
     assert {top.strategy, second.strategy} == {"lexical", "bm25"}
 
     written = result.save(2, store)
-    assert written.name == RETRIEVAL_FILENAME
+    assert written.name == CONFIG_FILENAME
     assert "from_optimization: true" in written.read_text()
 
-    # The loader picks the file up as an overlay; settings now carry the
+    # The loader reads config.yaml's retrieval block; settings now carry the
     # picked strategy as the DSL string.
     fresh = load_yaml_config(store.root).retrieval
     assert fresh.from_optimization is True
@@ -1039,16 +1039,11 @@ def test_epoch_line_omits_abstain_without_unanswerables() -> None:
     assert "abstain=" in line_yes
 
 
-def test_retrieval_yaml_overlay_overrides_config(tmp_path: Path) -> None:
-    """A ``retrieval.yaml`` next to ``config.yaml`` takes precedence over
-    the in-config block — the optimizer's output wins without rewriting
-    user-curated ``config.yaml``."""
+def test_retrieval_block_read_from_config_yaml(tmp_path: Path) -> None:
+    """The ``retrieval:`` block in config.yaml drives the settings."""
     from outmem.config import load_yaml_config
 
     (tmp_path / "config.yaml").write_text(
-        "retrieval:\n  strategy: lexical\n", encoding="utf-8",
-    )
-    (tmp_path / "retrieval.yaml").write_text(
         "retrieval:\n  strategy: bm25+semantic\n  from_optimization: true\n",
         encoding="utf-8",
     )
@@ -1057,23 +1052,9 @@ def test_retrieval_yaml_overlay_overrides_config(tmp_path: Path) -> None:
     assert settings.from_optimization is True
 
 
-def test_retrieval_yaml_rejects_bad_strategy_loudly(tmp_path: Path) -> None:
-    """A typo in ``retrieval.strategy`` raises at load-time instead of
-    silently falling back — the user's intent (a tuned pipeline) must
-    not be silently replaced with the default."""
-    from outmem.config import load_yaml_config
-
-    (tmp_path / "retrieval.yaml").write_text(
-        "retrieval:\n  strategy: bm25+rerank\n", encoding="utf-8",
-    )
-    with pytest.raises(OutmemError):
-        load_yaml_config(tmp_path)
-
-
 def test_config_yaml_bad_strategy_is_lenient(tmp_path: Path) -> None:
     """A bad strategy in config.yaml's retrieval block follows the
-    forgiving-load contract: warn + keep the default, NOT crash the open
-    (unlike the retrieval.yaml overlay, which is loud)."""
+    forgiving-load contract: warn + keep the default, NOT crash the open."""
     from outmem.config import load_yaml_config
 
     (tmp_path / "config.yaml").write_text(
@@ -1088,7 +1069,7 @@ def test_retrieval_numeric_knobs_reject_bool(tmp_path: Path) -> None:
     subclass). The knob keeps its default."""
     from outmem.config import load_yaml_config
 
-    (tmp_path / "retrieval.yaml").write_text(
+    (tmp_path / "config.yaml").write_text(
         "retrieval:\n  strategy: bm25\n  semantic_top_k: true\n"
         "  max_candidates: false\n",
         encoding="utf-8",
@@ -1103,7 +1084,7 @@ def test_retrieval_rerank_source_field_folds_into_strategy(tmp_path: Path) -> No
     pipeline as `strategy: rerank(semantic)` instead of being dropped."""
     from outmem.config import load_yaml_config
 
-    (tmp_path / "retrieval.yaml").write_text(
+    (tmp_path / "config.yaml").write_text(
         "retrieval:\n  strategy: rerank\n  rerank_source: semantic\n",
         encoding="utf-8",
     )
@@ -1115,29 +1096,10 @@ def test_retrieval_strategy_canonicalised_on_load(tmp_path: Path) -> None:
     """A hand-written `bm25 + semantic` (spaces) is stored canonical."""
     from outmem.config import load_yaml_config
 
-    (tmp_path / "retrieval.yaml").write_text(
+    (tmp_path / "config.yaml").write_text(
         "retrieval:\n  strategy: BM25 + Semantic\n", encoding="utf-8",
     )
     assert load_yaml_config(tmp_path).retrieval.strategy == "bm25+semantic"
-
-
-def test_retrieval_yaml_overlay_is_full_replace(tmp_path: Path) -> None:
-    """retrieval.yaml fully replaces config.yaml's retrieval block — a
-    stale `from_optimization: true` or tuned knob in config.yaml does NOT
-    leak through a fresh overlay that omits it."""
-    from outmem.config import load_yaml_config
-
-    (tmp_path / "config.yaml").write_text(
-        "retrieval:\n  from_optimization: true\n  semantic_top_k: 12\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "retrieval.yaml").write_text(
-        "retrieval:\n  strategy: bm25\n", encoding="utf-8",
-    )
-    settings = load_yaml_config(tmp_path).retrieval
-    assert settings.strategy == "bm25"
-    assert settings.from_optimization is False  # did not leak from config.yaml
-    assert settings.semantic_top_k == 8  # default, did not leak
 
 
 def test_save_refreshes_in_memory_store(
@@ -1165,11 +1127,21 @@ def test_save_refreshes_in_memory_store(
     assert store.config.outmem.retrieval.strategy == result.pick(1).strategy
 
 
-def test_save_atomic_creates_parent(
+def test_save_preserves_other_config_and_comments(
     store: WikiStore, bank: QuestionBank, tmp_path: Path
 ) -> None:
-    """save() to a nested path creates the parent dir (no FileNotFoundError)
-    and leaves no .tmp sidecar behind."""
+    """save() replaces ONLY the retrieval: block in config.yaml, leaving
+    other settings and comments byte-intact; creates parent + no .tmp."""
+    dest = tmp_path / "nested" / "config.yaml"
+    dest.parent.mkdir(parents=True)
+    dest.write_text(
+        "model: anthropic:claude-sonnet-4-6\n\n"
+        "# my notes\n"
+        "retrieval:\n  strategy: lexical\n\n"
+        "logfire:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+
     def optimizer(messages: object, info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart("done")])
 
@@ -1177,16 +1149,21 @@ def test_save_atomic_creates_parent(
         store, bank, optimizer_model=FunctionModel(optimizer),
         k=1, max_evals=1,
     )
-    dest = tmp_path / "nested" / "sub" / "retrieval.yaml"
     written = result.save(1, store, path=dest)
-    assert written == dest and dest.exists()
+    assert written == dest
+    text = dest.read_text(encoding="utf-8")
+    assert "model: anthropic:claude-sonnet-4-6" in text  # untouched
+    assert "# my notes" in text  # comment preserved
+    assert "logfire:\n  enabled: true" in text  # later block intact
+    assert "from_optimization: true" in text  # new block written
+    assert text.count("retrieval:") == 1
     assert not (dest.parent / f"{dest.name}.tmp").exists()
 
 
 def test_save_rejects_unparseable_roundtrip_via_format_guard() -> None:
     """format_strategy refuses to render a hybrid whose legs aren't DSL
     atomics (e.g. a 'rerank' leg) — so save() can never write a
-    retrieval.yaml that the next load would reject."""
+    retrieval block that the next load would reject."""
     from outmem.optimize.dsl import format_strategy
 
     with pytest.raises(OutmemError):

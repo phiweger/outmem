@@ -36,7 +36,6 @@ from dotenv import find_dotenv, load_dotenv
 log = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "config.yaml"
-RETRIEVAL_FILENAME = "retrieval.yaml"
 
 DEFAULT_MODEL = "anthropic:claude-sonnet-4-6"
 DEFAULT_AGENT_NAME = "outmem agent"
@@ -48,6 +47,7 @@ DEFAULT_REMOVE_STALE_LOCK = True
 DEFAULT_STALE_LOCK_SECONDS = 60
 DEFAULT_RETRY_ON_LOCK = True
 DEFAULT_AUTO_INSTALL_HOOK = True
+DEFAULT_RETRIEVAL_STRATEGY = "bm25"  # production find_pages default (no index needed)
 
 DEFAULT_SOURCE_MAX_CHARS = 200_000  # cap on `read_source` tool returns
 
@@ -235,6 +235,10 @@ class LogfireSettings:
 class RetrievalSettings:
     """How the agent's wiki search picks which pages to read.
 
+    Lives in the ``retrieval:`` block of ``config.yaml`` like every other
+    setting. ``OptimizeResult.save(...)`` writes it there too (replacing
+    just that block); there is no separate file.
+
     ``strategy`` names the pipeline via a small controlled vocabulary
     (see :mod:`outmem.optimize.dsl`):
 
@@ -242,30 +246,21 @@ class RetrievalSettings:
     * ``rerank`` or ``rerank(<source>)`` — LLM yes/no gate over a source
     * ``a+b[+c…]`` (≥2 atomic legs) — RRF-fused hybrid
 
-    Unsupported combinations (``foo``, ``bm25+rerank``, …) raise at load
-    time so a typo doesn't quietly fall back to the default.
+    A bad ``strategy`` warns and falls back (config.yaml's forgiving-load
+    contract), it doesn't crash the open. Default is ``bm25``.
 
     ``from_optimization`` is purely a marker: ``true`` when the block was
-    written by ``OptimizeResult.save(...)``, ``false`` for a hand-edited
-    file. It surfaces in ``git diff`` so a teammate can see whether the
-    current pipeline came from an empirical run or a guess.
-
-    Lives in a separate ``retrieval.yaml`` next to ``config.yaml`` (not
-    in ``config.yaml`` itself) so an ``outmem optimize`` write doesn't
-    touch user-curated config and so the existence of the file is itself
-    a signal that the wiki has been tuned. When ``retrieval.yaml`` is
-    present it is authoritative and self-contained — it fully replaces any
-    ``retrieval:`` block in ``config.yaml`` rather than merging with it, so
-    a field you omit reverts to the default, not to the config.yaml value.
+    written by ``OptimizeResult.save(...)``, ``false`` for a hand-edit. It
+    surfaces in ``git diff`` so a teammate can see whether the current
+    pipeline came from an empirical run or a guess.
 
     For ``rerank``, the source can be written either inline in the
     strategy (``strategy: rerank(semantic)``) or as a sibling field
     (``strategy: rerank`` + ``rerank_source: semantic``) — both resolve to
     the same pipeline.
 
-    Mirrors the YAML block::
+    Mirrors the ``config.yaml`` block::
 
-        # retrieval.yaml
         retrieval:
           strategy: bm25
           from_optimization: false
@@ -273,7 +268,7 @@ class RetrievalSettings:
           rrf_k: 60
     """
 
-    strategy: str = "bm25"
+    strategy: str = DEFAULT_RETRIEVAL_STRATEGY
     from_optimization: bool = False
     semantic_top_k: int = DEFAULT_OPTIMIZE_SEMANTIC_TOP_K
     rrf_k: int = DEFAULT_OPTIMIZE_RRF_K
@@ -416,34 +411,17 @@ def load_dotenv_if_present(path: Path | None = None) -> bool:
 
 
 def load_yaml_config(wiki_root: Path) -> OutmemConfig:
-    """Parse ``<wiki_root>/config.yaml`` (+ optional ``retrieval.yaml``
-    overlay) into an :class:`OutmemConfig`.
+    """Parse ``<wiki_root>/config.yaml`` into an :class:`OutmemConfig`.
 
     Returns the all-defaults config when ``config.yaml`` is missing or
     malformed. Logs a warning on malformed YAML so the user knows the
-    file was ignored.
-
-    ``retrieval.yaml`` is the home of the optimizer-written
-    ``retrieval:`` block (see :class:`RetrievalSettings`). Kept in a
-    separate file so an ``outmem optimize`` save doesn't rewrite hand-
-    edited ``config.yaml`` and so the file's mere existence is itself
-    a signal that the wiki has been tuned.
+    file was ignored. The ``retrieval:`` block (see
+    :class:`RetrievalSettings`) — what the agent's wiki search runs, and
+    what ``OptimizeResult.save`` writes — lives in ``config.yaml`` like
+    every other setting.
     """
     raw = _read_yaml_mapping(wiki_root / CONFIG_FILENAME)
-    config = _config_from_dict(raw) if raw is not None else OutmemConfig()
-
-    overlay = _read_yaml_mapping(wiki_root / RETRIEVAL_FILENAME)
-    if overlay is not None:
-        block = overlay.get("retrieval")
-        if isinstance(block, dict):
-            # retrieval.yaml is authoritative and self-contained: reset to
-            # defaults first so the file fully defines the pipeline and
-            # nothing (e.g. a stale `from_optimization: true` or a tuned
-            # `semantic_top_k`) leaks in from config.yaml's retrieval block.
-            # strict=True: a typo in the optimizer's own home is loud.
-            config.retrieval = RetrievalSettings()
-            _apply_retrieval_block(config.retrieval, block, strict=True)
-    return config
+    return _config_from_dict(raw) if raw is not None else OutmemConfig()
 
 
 def _read_yaml_mapping(path: Path) -> dict[str, Any] | None:
@@ -451,8 +429,7 @@ def _read_yaml_mapping(path: Path) -> dict[str, Any] | None:
 
     Returns ``None`` on missing / empty / malformed / non-mapping content
     (each case logged), so the caller falls back to defaults instead of
-    raising. Used for both ``config.yaml`` and ``retrieval.yaml`` — they
-    have the same shape and the same forgiving-load contract.
+    raising — the forgiving-load contract for ``config.yaml``.
     """
     if not path.exists():
         return None
@@ -580,9 +557,7 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
 
     retrieval_block = data.get("retrieval")
     if isinstance(retrieval_block, dict):
-        # config.yaml follows the forgiving-load contract — a bad strategy
-        # here warns and falls back rather than crashing the open.
-        _apply_retrieval_block(config.retrieval, retrieval_block, strict=False)
+        _apply_retrieval_block(config.retrieval, retrieval_block)
 
     return config
 
@@ -598,22 +573,13 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _apply_retrieval_block(
-    target: RetrievalSettings, block: dict[str, Any], *, strict: bool = True
-) -> None:
-    """Mutate ``target`` with values from a YAML ``retrieval:`` block.
+def _apply_retrieval_block(target: RetrievalSettings, block: dict[str, Any]) -> None:
+    """Mutate ``target`` with values from ``config.yaml``'s ``retrieval:`` block.
 
-    ``strict`` selects how a bad ``strategy`` DSL string is handled:
-
-    * ``True`` — the ``retrieval.yaml`` overlay, the optimizer's home,
-      where a typo should be loud: re-raise the :class:`OutmemError`.
-    * ``False`` — a ``retrieval:`` block embedded in ``config.yaml``,
-      which follows that file's forgiving-load contract: log a warning
-      and leave ``strategy`` untouched rather than crash every
-      ``WikiStore.open`` on one typo.
-
-    Non-strategy knobs are always tolerant — a bad type is ignored so one
-    fat-fingered field doesn't take down the load.
+    Forgiving, like the rest of ``config.yaml``: a bad ``strategy`` DSL
+    string logs a warning and leaves ``strategy`` untouched rather than
+    crashing every ``WikiStore.open`` on one typo, and a bad-typed knob is
+    ignored so one fat-fingered field doesn't take down the load.
 
     A bare ``rerank_source:`` key is folded into ``strategy`` (``strategy:
     rerank`` + ``rerank_source: semantic`` ⇒ ``rerank(semantic)``), so the
@@ -635,8 +601,6 @@ def _apply_retrieval_block(
             # canonical form a save() would write.
             target.strategy = format_strategy(parse_strategy(spec))
         except OutmemError:
-            if strict:
-                raise
             log.warning(
                 "Ignoring invalid retrieval.strategy %r in config.yaml; "
                 "keeping %r",
@@ -732,6 +696,16 @@ def starter_yaml(
         "logfire:\n"
         "  enabled: false     # true + a $LOGFIRE_TOKEN in the env sends traces;\n"
         "                     # the token (not this file) picks the project.\n"
+        "\n"
+        "# Which pipeline the agent's `find_pages` search runs. `strategy` is\n"
+        "# a small DSL: lexical | bm25 | semantic | hyde | rerank(<source>)\n"
+        "# | a+b[+c...] (RRF hybrid, e.g. bm25+semantic). semantic/hyde need\n"
+        "# semantic.enabled + `outmem reindex`. Tune empirically with\n"
+        "# `outmem.optimize.optimize_retrieval`, then `result.save(rank,\n"
+        "# store)` rewrites this block. See docs/configuration.md.\n"
+        "retrieval:\n"
+        f"  strategy: {DEFAULT_RETRIEVAL_STRATEGY}\n"
+        "  from_optimization: false   # true once written by an optimize run\n"
     )
 
 

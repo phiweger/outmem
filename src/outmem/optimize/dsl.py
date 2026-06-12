@@ -84,9 +84,9 @@ def parse_strategy(spec: str) -> dict[str, Any]:
 def format_strategy(cfg_dict: dict[str, Any]) -> str:
     """Inverse of :func:`parse_strategy` — render a config dict as the DSL.
 
-    Used when the optimizer writes its winning config to
-    ``retrieval.yaml``; the file shows the same string a user would type
-    by hand, so a `git diff` is readable.
+    Used when the optimizer writes its winning config to the
+    ``retrieval:`` block of ``config.yaml``; it shows the same string a
+    user would type by hand, so a `git diff` is readable.
     """
     strategy = cfg_dict.get("strategy", "lexical")
     if strategy == "hybrid":
@@ -98,7 +98,7 @@ def format_strategy(cfg_dict: dict[str, Any]) -> str:
         # Defence-in-depth: a fused config whose legs aren't DSL atomics
         # (e.g. ``rerank`` as a leg) can't be rendered as a loadable
         # strategy string — fail loudly at save() rather than write a
-        # ``retrieval.yaml`` that ``parse_strategy`` would later reject and
+        # ``retrieval:`` block that ``parse_strategy`` would later reject and
         # brick the wiki. The real guard is in ``RetrievalConfig.from_dict``
         # (rerank is rejected as a fuse leg); this catches anything that
         # slips a non-DSL leg into a config some other way.
