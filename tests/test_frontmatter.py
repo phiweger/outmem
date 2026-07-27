@@ -91,10 +91,36 @@ def test_provenance_must_be_list() -> None:
         parse_wiki_page(text)
 
 
-def test_tags_must_be_strings() -> None:
-    text = "---\ntitle: X\nslug: x\ntags: [a, 1, b]\n---\n\nbody\n"
+def test_numeric_tags_are_coerced_not_rejected() -> None:
+    """An unquoted year / code in `tags:` is valid YAML and obviously
+    intended as a tag. Rejecting it used to make the semantic indexer drop
+    the whole page silently, so it is rendered as a string instead."""
+    text = "---\ntitle: X\nslug: x\ntags: [a, 1, b, 2026]\n---\n\nbody\n"
+    fm, _ = parse_wiki_page(text)
+    assert fm.tags == ["a", "1", "b", "2026"]
+
+
+def test_bool_tags_still_rejected_with_a_pointed_message() -> None:
+    """`yes`/`on` become True in YAML and there is no correct string form
+    (str(True) == 'True' would rewrite the author's tag), so this one
+    keeps raising — but says exactly what to do about it."""
+    text = "---\ntitle: X\nslug: x\ntags: [a, yes]\n---\n\nbody\n"
+    with pytest.raises(FrontmatterError, match="Quote the tag"):
+        parse_wiki_page(text)
+
+
+def test_non_scalar_tags_still_rejected() -> None:
+    text = "---\ntitle: X\nslug: x\ntags: [a, [nested]]\n---\n\nbody\n"
     with pytest.raises(FrontmatterError, match="strings"):
         parse_wiki_page(text)
+
+
+def test_date_only_timestamp_is_promoted_to_midnight_utc() -> None:
+    """PyYAML loads a bare `created: 2026-07-23` as a `date`, which is NOT
+    a `datetime`. Rejecting it silently cost imported wikis whole pages."""
+    text = "---\ntitle: X\nslug: x\ncreated: 2026-07-23\n---\n\nbody\n"
+    fm, _ = parse_wiki_page(text)
+    assert fm.created == datetime(2026, 7, 23, 0, 0, 0, tzinfo=UTC)
 
 
 def test_datetime_iso_with_z_suffix() -> None:

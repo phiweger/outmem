@@ -50,7 +50,7 @@ import logging
 import sqlite3
 import struct
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -259,16 +259,23 @@ class VectorStore:
         *,
         body: str,
         kind: Literal["wiki", "source"],
+        header: str = "",
         chunk_size: int = 2000,
         chunk_max: int = 8000,
         overlap_paragraphs: int = 1,
     ) -> ReindexResult:
         """Re-index a single file.
 
-        If ``hash_text(body)`` matches the stored ``content_hash`` for
+        If the content hash matches the stored ``content_hash`` for
         ``rel_path``, returns ``ReindexResult(skipped=True)`` without
         touching the DB. Otherwise deletes every chunk for the file,
         re-chunks, re-embeds, and inserts the new chunks.
+
+        ``header``, when set, is prepended to every chunk before embedding
+        (see :func:`outmem.semantic.chunker.chunk_text`) *and* folded into
+        the content hash — so turning ``semantic.embed_frontmatter`` on or
+        editing a page's title/tags invalidates that page and re-embeds it,
+        instead of silently keeping header-less chunks forever.
 
         Embedding happens *before* any DB mutation so a network failure
         leaves the index untouched. DB writes are then wrapped in a
@@ -277,7 +284,9 @@ class VectorStore:
         committed by the next caller and silently merge half-written
         state across files.
         """
-        prepared = self._prepare(rel_path, body, chunk_size, chunk_max, overlap_paragraphs)
+        prepared = self._prepare(
+            rel_path, body, chunk_size, chunk_max, overlap_paragraphs, header
+        )
         if prepared is None:  # content_hash matched → nothing to do
             return ReindexResult(rel_path, skipped=True, chunks_removed=0,
                                  chunks_added=0, embeddings_called=0)
@@ -289,11 +298,18 @@ class VectorStore:
 
     def _prepare(
         self, rel_path: str, body: str, chunk_size: int, chunk_max: int,
-        overlap_paragraphs: int,
+        overlap_paragraphs: int, header: str = "",
     ) -> tuple[str, list[Chunk]] | None:
         """Hash-check + chunk. Returns ``(content_hash, chunks)`` to embed,
-        or ``None`` when the stored hash matches (skip). Read-only on the DB."""
-        content_hash = hash_text(body)
+        or ``None`` when the stored hash matches (skip). Read-only on the DB.
+
+        ``header`` participates in the hash so a change to what gets
+        embedded — flipping ``semantic.embed_frontmatter``, or editing a
+        page's title/tags — counts as a content change. Hashing the body
+        alone would leave every existing index reporting ``skipped`` and
+        quietly serving stale, header-less chunks.
+        """
+        content_hash = hash_text(f"{header}\n\n{body}" if header else body)
         with self._lock:
             existing = self.con.execute(
                 "SELECT content_hash FROM files WHERE rel_path = ?", (rel_path,)
@@ -302,7 +318,7 @@ class VectorStore:
             return None
         chunks = chunk_text(
             body, chunk_size=chunk_size, chunk_max=chunk_max,
-            overlap_paragraphs=overlap_paragraphs,
+            overlap_paragraphs=overlap_paragraphs, header=header,
         )
         return content_hash, chunks
 
@@ -338,7 +354,7 @@ class VectorStore:
 
     def reindex_files(
         self,
-        files: list[tuple[str, str, Literal["wiki", "source"]]],
+        files: Sequence[tuple[str, str, Literal["wiki", "source"], str]],
         *,
         chunk_size: int = 2000,
         chunk_max: int = 8000,
@@ -346,7 +362,11 @@ class VectorStore:
         max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> list[ReindexResult]:
-        """Re-index a batch of ``(rel_path, body, kind)`` files.
+        """Re-index a batch of ``(rel_path, body, kind, header)`` files.
+
+        ``header`` is prepended to every chunk of that file before
+        embedding and folded into its content hash (see :meth:`_prepare`);
+        pass ``""`` for no header.
 
         Three phases: serial hash-check + chunk (read-only), then EMBED in
         parallel (the network bottleneck — at most ``max_concurrency`` in
@@ -361,8 +381,10 @@ class VectorStore:
         prepared: list[tuple[str, str, Literal["wiki", "source"], list[Chunk]]] = []
         results: list[ReindexResult] = []
         done = 0
-        for rel_path, body, kind in files:
-            p = self._prepare(rel_path, body, chunk_size, chunk_max, overlap_paragraphs)
+        for rel_path, body, kind, header in files:
+            p = self._prepare(
+                rel_path, body, chunk_size, chunk_max, overlap_paragraphs, header
+            )
             if p is None:
                 results.append(ReindexResult(rel_path, skipped=True, chunks_removed=0,
                                              chunks_added=0, embeddings_called=0))

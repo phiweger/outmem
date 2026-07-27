@@ -66,6 +66,17 @@ DEFAULT_SEMANTIC_SIMILARITY_THRESHOLD = 0.80
 DEFAULT_SEMANTIC_TOP_K = 5
 DEFAULT_SEMANTIC_REINDEX_CONCURRENCY = 8  # in-flight embed calls during reindex
 
+# What `outmem reindex` walks. `pages` keeps raw ingested sources out of the
+# vector store; `pages+sources` (the default, and the historical behaviour)
+# indexes both.
+SEMANTIC_INDEX_PAGES = "pages"
+SEMANTIC_INDEX_PAGES_AND_SOURCES = "pages+sources"
+SEMANTIC_INDEX_CHOICES = (SEMANTIC_INDEX_PAGES, SEMANTIC_INDEX_PAGES_AND_SOURCES)
+DEFAULT_SEMANTIC_INDEX = SEMANTIC_INDEX_PAGES_AND_SOURCES
+# Prepend "<title> — <tags>" to every chunk before embedding. Off by default:
+# flipping it re-embeds every page on the next reindex.
+DEFAULT_SEMANTIC_EMBED_FRONTMATTER = False
+
 DEFAULT_APPROVAL_REQUIRED_FOR_WRITES = False
 
 # The cheap gate model the rerank strategy uses, and the per-candidate
@@ -153,11 +164,27 @@ class SemanticSettings:
     *how* the index is built and queried when a ``semantic``/``hyde``/
     ``*+semantic`` retrieval strategy or ``find_similar`` needs it.
 
+    ``index`` scopes *what gets indexed*: ``pages+sources`` (default,
+    everything) or ``pages`` (curated wiki pages only). Raw sources are
+    near-duplicates of the pages distilled from them, and the vector
+    search takes a fixed-``k`` KNN before anything can filter by kind, so
+    on a source-heavy wiki they crowd curated pages out of the candidate
+    window. Narrowing to ``pages`` also prunes already-indexed source
+    chunks on the next ``outmem reindex``.
+
+    ``embed_frontmatter`` prepends ``"<title> — <tags>"`` to every chunk
+    before embedding. Off by default: turning it on changes what is
+    embedded, so the next reindex re-embeds every page (a real API cost,
+    but it is the only way for titles and tags to affect retrieval at all —
+    ``parse_wiki_page`` otherwise strips them before the chunker sees them).
+
     Mirrors the YAML block::
 
         semantic:
           embedding_model: openai:text-embedding-3-small
           db_filename: .vectors.db          # relative to wiki root
+          index: pages+sources              # or: pages
+          embed_frontmatter: false          # prepend "<title> — <tags>"
           chunk_size: 2000
           chunk_max: 8000
           overlap_paragraphs: 1
@@ -167,6 +194,8 @@ class SemanticSettings:
 
     embedding_model: str = DEFAULT_SEMANTIC_MODEL
     db_filename: str = DEFAULT_SEMANTIC_DB_FILENAME
+    index: str = DEFAULT_SEMANTIC_INDEX
+    embed_frontmatter: bool = DEFAULT_SEMANTIC_EMBED_FRONTMATTER
     chunk_size: int = DEFAULT_SEMANTIC_CHUNK_SIZE
     chunk_max: int = DEFAULT_SEMANTIC_CHUNK_MAX
     overlap_paragraphs: int = DEFAULT_SEMANTIC_OVERLAP_PARAGRAPHS
@@ -473,6 +502,22 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
             config.semantic.embedding_model = semantic_block["embedding_model"]
         if isinstance(semantic_block.get("db_filename"), str):
             config.semantic.db_filename = semantic_block["db_filename"]
+        index_scope = semantic_block.get("index")
+        if isinstance(index_scope, str):
+            candidate = index_scope.strip().lower()
+            if candidate in SEMANTIC_INDEX_CHOICES:
+                config.semantic.index = candidate
+            else:
+                # Forgiving like the rest of config.yaml: warn and keep the
+                # default rather than bricking the wiki on a typo.
+                log.warning(
+                    "config: semantic.index %r is not one of %s — using %r",
+                    index_scope,
+                    list(SEMANTIC_INDEX_CHOICES),
+                    config.semantic.index,
+                )
+        if isinstance(semantic_block.get("embed_frontmatter"), bool):
+            config.semantic.embed_frontmatter = semantic_block["embed_frontmatter"]
         if isinstance(semantic_block.get("chunk_size"), int):
             config.semantic.chunk_size = semantic_block["chunk_size"]
         if isinstance(semantic_block.get("chunk_max"), int):
@@ -619,6 +664,14 @@ def starter_yaml(
         "semantic:\n"
         f"  embedding_model: {DEFAULT_SEMANTIC_MODEL}\n"
         f"  db_filename: {DEFAULT_SEMANTIC_DB_FILENAME}\n"
+        "  # What to index: `pages+sources` (default) or `pages` to keep raw\n"
+        "  # ingested sources out of the vector store (they crowd curated\n"
+        "  # pages out of the candidate window on source-heavy wikis).\n"
+        f"  index: {DEFAULT_SEMANTIC_INDEX}\n"
+        "  # Prepend \"<title> - <tags>\" to every chunk before embedding, so\n"
+        "  # titles/tags affect retrieval. Turning this on re-embeds every\n"
+        "  # page on the next `outmem reindex`.\n"
+        f"  embed_frontmatter: {str(DEFAULT_SEMANTIC_EMBED_FRONTMATTER).lower()}\n"
         f"  chunk_size: {DEFAULT_SEMANTIC_CHUNK_SIZE}\n"
         f"  chunk_max: {DEFAULT_SEMANTIC_CHUNK_MAX}\n"
         f"  overlap_paragraphs: {DEFAULT_SEMANTIC_OVERLAP_PARAGRAPHS}\n"

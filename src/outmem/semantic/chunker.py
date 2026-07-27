@@ -49,6 +49,7 @@ def chunk_text(
     chunk_size: int = 2000,
     chunk_max: int = 8000,
     overlap_paragraphs: int = 1,
+    header: str = "",
 ) -> list[Chunk]:
     """Split ``body`` into paragraph-aware chunks.
 
@@ -61,6 +62,15 @@ def chunk_text(
     3. Overlap: include the last ``overlap_paragraphs`` paragraphs of
        chunk N at the start of chunk N+1. Setting it to ``0`` disables
        overlap.
+
+    ``header`` (e.g. ``"<title> — <tags>"``) is prepended to **every**
+    chunk's ``text``. Applying it per chunk rather than once per document
+    is the point: a continuation chunk otherwise carries no token of the
+    page it belongs to, which both hides it from a title/tag query and
+    starves the rerank gate of the context it needs to judge relevance.
+    It does not shift ``start_char``/``end_char``, which stay offsets into
+    ``body``, and it is excluded from the ``chunk_size``/``chunk_max``
+    budget so adding one cannot change how a body is split.
 
     Empty bodies return an empty list. A body with one short paragraph
     returns one chunk.
@@ -108,7 +118,7 @@ def chunk_text(
         chunks.append(
             Chunk(
                 index=len(chunks),
-                text=chunk_body,
+                text=f"{header}\n\n{chunk_body}" if header else chunk_body,
                 start_char=chunk_start,
                 end_char=chunk_end,
             )

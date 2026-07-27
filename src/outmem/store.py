@@ -854,15 +854,25 @@ class WikiStore:
         self,
         *,
         force: bool = False,
+        scope: str | None = None,
         max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
         """Walk every indexable file, sync the index, return a summary.
 
         Embeds files concurrently (≤ ``max_concurrency`` in flight);
-        ``on_progress(done, total)`` fires per file."""
+        ``on_progress(done, total)`` fires per file. ``scope`` overrides
+        ``semantic.index`` (``"pages"`` | ``"pages+sources"``) for this run.
+
+        The summary's ``dropped`` / ``dropped_paths`` report wiki pages
+        that exist on disk but could not be indexed — check them, they are
+        unreachable by search."""
         return _semantic.reindex_all(
-            self, force=force, max_concurrency=max_concurrency, on_progress=on_progress
+            self,
+            force=force,
+            scope=scope,
+            max_concurrency=max_concurrency,
+            on_progress=on_progress,
         )
 
     def _maybe_reindex_commit_paths(self, paths: Sequence[str]) -> str | None:

@@ -90,6 +90,8 @@ git:
 semantic:
   embedding_model: openai:text-embedding-3-small
   db_filename: .vectors.db                # tracked in git, sibling of wiki/
+  index: pages+sources                    # or `pages` — see below
+  embed_frontmatter: false                # prepend "<title> — <tags>" to chunks
   chunk_size: 2000                        # target characters per chunk
   chunk_max: 8000                         # hard ceiling for oversized paragraphs
   overlap_paragraphs: 1                   # paragraphs of overlap between chunks
@@ -104,6 +106,46 @@ approval:
 logfire:
   enabled: false                          # true + LOGFIRE_TOKEN in env → traces
 ```
+
+#### `semantic.index` — what gets embedded
+
+`pages+sources` (default) indexes both `wiki/pages/` and `wiki/sources/`.
+`pages` indexes only curated pages.
+
+Reach for `pages` on a source-heavy wiki. Raw sources are near-duplicates
+of the pages distilled from them, and the vector search takes a
+fixed-size KNN *before* anything can filter by kind — so a store that is
+half raw source spends roughly half its candidate window on material that
+is then discarded, pushing curated pages out of reach. Narrowing the
+scope also prunes already-indexed source chunks on the next
+`outmem reindex` (they show up in the `removed` count), and shrinks the
+committed `.vectors.db`.
+
+`outmem reindex --pages-only` does the same thing for a single run
+without editing config.
+
+Sources stay fully available either way — they are registered, readable
+via `read_source`, and greppable via `grep_wiki --scope raw`. Only the
+*vector* index is narrowed.
+
+#### `semantic.embed_frontmatter` — make titles and tags searchable
+
+Off by default. When on, each chunk is embedded with a
+`"<title> — <tags>"` line in front of it.
+
+This matters more than it sounds: `parse_wiki_page` splits frontmatter
+off before the chunker runs, so by default **a page's own title and tags
+are not in the embedded text at all**. A page whose body never repeats
+its own title is effectively unretrievable by that title, and the entire
+tag vocabulary contributes nothing to semantic search. The header is
+applied to *every* chunk, not just the first, so continuation chunks stay
+attributable to their page — which also gives the rerank gate the context
+it needs to judge them.
+
+Turning it on changes what is embedded, so the next `outmem reindex`
+re-embeds every page (the header participates in the content hash, so
+this happens automatically — no `--force` needed). That is a real
+embedding bill on a large wiki; budget for it.
 
 ### `retrieval:` — what the agent's wiki search runs
 

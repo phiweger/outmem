@@ -27,7 +27,7 @@ from pathlib import Path
 
 from outmem import __version__
 from outmem._progress import report_progress
-from outmem.config import SEMANTIC_UNAVAILABLE_HELP
+from outmem.config import SEMANTIC_INDEX_PAGES, SEMANTIC_UNAVAILABLE_HELP
 from outmem.exceptions import OutmemError
 from outmem.store import AgentIdentity, WikiStore
 
@@ -283,6 +283,7 @@ def cmd_reindex(args: argparse.Namespace) -> int:
 
         summary = store.semantic_reindex_all(
             force=args.force,
+            scope=SEMANTIC_INDEX_PAGES if args.pages_only else None,
             on_progress=lambda done, total: report_progress(
                 None, done, total, label="reindex", unit="files"
             ),
@@ -297,6 +298,21 @@ def cmd_reindex(args: argparse.Namespace) -> int:
         f"{summary['chunks_added']} chunks added, "
         f"{summary.get('embed_tokens', 0)} embed tokens"
     )
+    # A page on disk that didn't make it into the index is unreachable by
+    # search. Never let that pass as a clean run: report it on stderr and
+    # exit non-zero so CI notices.
+    dropped_paths: list[str] = summary.get("dropped_paths") or []
+    if dropped_paths:
+        print(
+            f"outmem: {len(dropped_paths)} page(s) NOT indexed — unreachable "
+            f"by search. Run `outmem lint` for details:",
+            file=sys.stderr,
+        )
+        for rel in dropped_paths[:20]:
+            print(f"  {rel}", file=sys.stderr)
+        if len(dropped_paths) > 20:
+            print(f"  … and {len(dropped_paths) - 20} more", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -910,6 +926,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Rebuild every entry even when its content hash matches.",
+    )
+    p_reindex.add_argument(
+        "--pages-only",
+        action="store_true",
+        help="Index only wiki/pages/, skipping wiki/sources/ (overrides "
+        "semantic.index for this run). Also prunes already-indexed sources.",
     )
     p_reindex.add_argument(
         "--staged",

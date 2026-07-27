@@ -13,9 +13,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from outmem.config import (
     DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
+    SEMANTIC_INDEX_PAGES,
     SEMANTIC_UNAVAILABLE_HELP,
 )
-from outmem.exceptions import OutmemError
+from outmem.exceptions import FrontmatterError, OutmemError
 from outmem.frontmatter import parse_wiki_page
 from outmem.index import RESERVED_WIKI_FILES, editorial_pages
 from outmem.slug import PAGES_DIR, slug_to_relpath
@@ -132,13 +133,14 @@ def reindex_path(store: WikiStore, rel_path: str) -> ReindexResult | None:
     load = load_for_index(store, rel_path)
     if load is None:
         return None
-    body, kind = load
+    body, kind, header = load
     vs = vector_store_or_open(store)
     settings = store.config.outmem.semantic
     return vs.reindex_file(
         rel_path,
         body=body,
         kind=kind,
+        header=header,
         chunk_size=settings.chunk_size,
         chunk_max=settings.chunk_max,
         overlap_paragraphs=settings.overlap_paragraphs,
@@ -156,6 +158,7 @@ def reindex_all(
     store: WikiStore,
     *,
     force: bool = False,
+    scope: str | None = None,
     max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
@@ -163,21 +166,36 @@ def reindex_all(
     index (creating its db). Embeds files concurrently (the network
     bottleneck), at most ``max_concurrency`` in flight; writes stay serial.
     ``on_progress(done, total)`` fires as each file completes. Raises if
-    the ``outmem[semantic]`` extra isn't installed."""
+    the ``outmem[semantic]`` extra isn't installed.
+
+    ``scope`` overrides ``semantic.index`` for this run (see
+    :func:`indexable_files_on_disk`).
+
+    The returned summary carries ``dropped`` / ``dropped_paths``: wiki
+    pages that exist on disk but could not be loaded. That count is the
+    reconciliation between what was discovered and what was indexed —
+    without it a page can silently vanish from retrieval."""
     vs = vector_store_or_open(store)
 
-    on_disk = indexable_files_on_disk(store)
+    on_disk = indexable_files_on_disk(store, scope=scope)
+    pages_prefix = f"{store.config.wiki_dir}/{PAGES_DIR}/"
     # Load bodies (skipping non-text/reserved files). force=True drops the
     # existing entry first so reindex_files re-embeds even on a hash match.
-    batch: list[tuple[str, str, WikiContentKind]] = []
+    batch: list[tuple[str, str, WikiContentKind, str]] = []
+    dropped_paths: list[str] = []
     for rel_path in on_disk:
         if force:
             vs.remove_file(rel_path)
         loaded = load_for_index(store, rel_path)
         if loaded is None:
+            # Sources/reserved files skip legitimately and quietly; a *page*
+            # that fails to load is data loss and load_for_index has already
+            # logged why. Surface it in the summary so the caller can act.
+            if rel_path.startswith(pages_prefix):
+                dropped_paths.append(rel_path)
             continue
-        body, kind = loaded
-        batch.append((rel_path, body, kind))
+        body, kind, header = loaded
+        batch.append((rel_path, body, kind, header))
 
     settings = store.config.outmem.semantic
     tokens_before = getattr(vs.embedder, "total_tokens", 0)
@@ -210,25 +228,63 @@ def reindex_all(
             vs.remove_file(rel_path)
             removed += 1
 
+    if dropped_paths:
+        log.warning(
+            "semantic: %d page(s) on disk were NOT indexed and are unreachable "
+            "by search: %s",
+            len(dropped_paths),
+            ", ".join(dropped_paths[:10])
+            + (" …" if len(dropped_paths) > 10 else ""),
+        )
+
     return {
         "reindexed": reindexed,
         "skipped": skipped,
         "removed": removed,
         "chunks_added": added_chunks,
         "embed_tokens": embed_tokens,
+        "dropped": len(dropped_paths),
+        "dropped_paths": dropped_paths,
     }
 
 
-def load_for_index(store: WikiStore, rel_path: str) -> tuple[str, WikiContentKind] | None:
-    """Return ``(body, kind)`` for an indexable file, or ``None`` to skip.
+def frontmatter_header(frontmatter: Any) -> str:
+    """The ``"<title> — <tags>"`` line prepended to every chunk of a page.
 
-    Skips:
+    Answers the retrieval problem that a page's own title and tags are not
+    in its body: ``parse_wiki_page`` splits them off, so without this the
+    entire tag vocabulary is invisible to the embedder and a page whose
+    body never repeats its own title is unretrievable by that title.
+    Opt-in via ``semantic.embed_frontmatter``.
+    """
+    title = (frontmatter.title or "").strip()
+    tags = [t.strip() for t in (frontmatter.tags or []) if t and t.strip()]
+    if title and tags:
+        return f"{title} — {', '.join(tags)}"
+    return title or (", ".join(tags) if tags else "")
+
+
+def load_for_index(
+    store: WikiStore, rel_path: str
+) -> tuple[str, WikiContentKind, str] | None:
+    """Return ``(body, kind, header)`` for an indexable file, or ``None``.
+
+    ``header`` is the per-chunk frontmatter line for wiki pages (empty
+    when ``semantic.embed_frontmatter`` is off, and always empty for
+    sources, which have no frontmatter).
+
+    Skips, all of which are legitimate and quiet:
 
     - ``wiki/index.md`` (auto-generated, indexing it is just noise)
     - ``wiki/AGENTS.md`` (agent-conventions doc, not content)
     - ``wiki/sources/.sources.db`` (registry, not content)
     - binary or undecodable source files (logged at INFO)
     - anything outside ``wiki/pages/`` or ``wiki/sources/``
+
+    A wiki page that fails to load is NOT quiet: it is logged at WARNING
+    and counted by :func:`reindex_all` as ``dropped``. Losing a page from
+    the index means losing it from retrieval entirely, so it must never
+    pass unnoticed.
     """
     wiki_prefix = f"{store.config.wiki_dir}/"
     pages_prefix = f"{wiki_prefix}{PAGES_DIR}/"
@@ -251,36 +307,68 @@ def load_for_index(store: WikiStore, rel_path: str) -> tuple[str, WikiContentKin
             return None
         except OSError:
             return None
-        return text, "source"
+        return text, "source", ""
 
     if rel_path.startswith(pages_prefix) and rel_path.endswith(".md"):
         try:
             raw = abs_path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError) as exc:
+            log.warning(
+                "semantic: page %s NOT indexed — unreadable: %s", rel_path, exc
+            )
             return None
         try:
-            _, body = parse_wiki_page(raw)
-        except Exception:
-            # Malformed frontmatter isn't indexed — lint surfaces it.
+            frontmatter, body = parse_wiki_page(raw)
+        except FrontmatterError as exc:
+            # Loud on purpose. This used to be a bare `except Exception:
+            # return None`, which silently deleted the page from the index
+            # (and therefore from retrieval) for something as small as an
+            # unquoted year in `tags:`.
+            log.warning(
+                "semantic: page %s NOT indexed — bad frontmatter: %s. "
+                "Fix the page or run `outmem lint`.",
+                rel_path,
+                exc,
+            )
             return None
-        return body, "wiki"
+        header = (
+            frontmatter_header(frontmatter)
+            if store.config.outmem.semantic.embed_frontmatter
+            else ""
+        )
+        return body, "wiki", header
 
     return None
 
 
-def indexable_files_on_disk(store: WikiStore) -> list[str]:
+def indexable_files_on_disk(store: WikiStore, *, scope: str | None = None) -> list[str]:
     """Every repo-relative path that would normally be indexed.
+
+    ``scope`` (default: ``semantic.index`` from config) is either
+    ``"pages+sources"`` or ``"pages"``. Scoping to ``pages`` keeps raw
+    ingested material out of the vector store: sources are near-duplicates
+    of the pages distilled from them, and because the vector search takes
+    a fixed-``k`` KNN before anything can filter by kind, they crowd
+    curated pages out of the candidate window.
+
+    This is the single place both trees are walked, so restricting here
+    also makes ``reindex_all``'s orphan sweep prune already-indexed source
+    chunks on the next run rather than stranding them.
 
     Iterates the on-disk tree without materialising an intermediate
     sorted list of every path under ``wiki/sources/`` — for a corpus
     with thousands of sources, that saved a non-trivial transient
     allocation per ``reindex_all``.
     """
+    if scope is None:
+        scope = store.config.outmem.semantic.index
     rels: list[str] = []
     if store.pages_path.is_dir():
         for path in editorial_pages(store.pages_path):
             rel = path.relative_to(store.pages_path).as_posix()
             rels.append(f"{store.config.wiki_dir}/{PAGES_DIR}/{rel}")
+    if scope == SEMANTIC_INDEX_PAGES:
+        return rels
     if store.sources_path.is_dir():
         for path in store.sources_path.rglob("*"):
             if not path.is_file():
@@ -327,13 +415,14 @@ def maybe_reindex_commit_paths(
         load = load_for_index(store, rel_path)
         if load is None:
             continue
-        body, kind = load
+        body, kind, header = load
         try:
             settings = store.config.outmem.semantic
             result = vs.reindex_file(
                 rel_path,
                 body=body,
                 kind=kind,
+                header=header,
                 chunk_size=settings.chunk_size,
                 chunk_max=settings.chunk_max,
                 overlap_paragraphs=settings.overlap_paragraphs,

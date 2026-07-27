@@ -9,6 +9,7 @@ runtime serves any PydanticAI-supported provider.
 
 from __future__ import annotations
 
+import inspect
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -218,9 +219,25 @@ def build_agent(
     )
 
     # Defaults the caller can override via agent_kwargs (e.g. tests
-    # pin tool_retries=0 to keep failures crisp).
-    agent_kwargs.setdefault("tool_retries", DEFAULT_TOOL_RETRIES)
-    agent_kwargs.setdefault("output_retries", DEFAULT_OUTPUT_RETRIES)
+    # pin the retry budget to 0 to keep failures crisp).
+    #
+    # PydanticAI v2 replaced the separate `tool_retries=` / `output_retries=`
+    # kwargs with a single `retries={'tools': N, 'output': M}` mapping and
+    # rejects the old names outright (TypeError, not a warning). We support
+    # `pydantic-ai>=0.1.0`, so pick the spelling the installed version
+    # actually accepts instead of pinning users to one major.
+    _agent_params = inspect.signature(Agent.__init__).parameters
+    if "tool_retries" in _agent_params:
+        agent_kwargs.setdefault("tool_retries", DEFAULT_TOOL_RETRIES)
+        agent_kwargs.setdefault("output_retries", DEFAULT_OUTPUT_RETRIES)
+    else:
+        # Fold any caller-supplied legacy kwargs into the v2 mapping so
+        # callers written against either API keep working.
+        tool_retries = agent_kwargs.pop("tool_retries", DEFAULT_TOOL_RETRIES)
+        output_retries = agent_kwargs.pop("output_retries", DEFAULT_OUTPUT_RETRIES)
+        agent_kwargs.setdefault(
+            "retries", {"tools": tool_retries, "output": output_retries}
+        )
     existing_settings: dict[str, Any] = agent_kwargs.get("model_settings") or {}
     merged_settings: dict[str, Any] = {**existing_settings}
     merged_settings.setdefault("max_tokens", DEFAULT_MAX_TOKENS)

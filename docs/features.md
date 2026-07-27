@@ -14,7 +14,19 @@ reindex`").
 When the index is built, outmem maintains a local `sqlite-vec` database at
 `<wiki>/.vectors.db` (tracked in git, sibling of `wiki/`) holding
 paragraph-aware chunks of every wiki page and every text source under
-`wiki/sources/`. Embeddings come from PydanticAI's `Embedder` — the
+`wiki/sources/`. Set `semantic.index: pages` (or run `outmem reindex
+--pages-only`) to index curated pages only — worth doing on a
+source-heavy wiki, where raw sources are near-duplicates of the pages
+distilled from them and crowd those pages out of the fixed-size candidate
+window. Set `semantic.embed_frontmatter: true` to put each page's
+`"<title> — <tags>"` in front of every chunk, without which titles and
+tags are invisible to semantic search. Both are covered in
+[configuration.md](configuration.md).
+
+A page whose frontmatter outmem can't parse is **not** indexed, and would
+otherwise vanish from search unnoticed. `outmem reindex` therefore names
+every such page on stderr and exits non-zero; `outmem lint` reports the
+offending field. Embeddings come from PydanticAI's `Embedder` — the
 default is `openai:text-embedding-3-small` (1536 dims, ~ $0.02 / M
 tokens). The DB is updated atomically with every write: `write_page`,
 `extend_page`, and `add_source` re-chunk the affected file, re-embed

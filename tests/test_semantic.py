@@ -237,9 +237,12 @@ def test_vector_store_concurrent_reads_dont_corrupt_rows(tmp_path: Path) -> None
 
 
 class TestVectorStoreReindexBatch:
-    def _files(self, n: int) -> list[tuple[str, str, str]]:
+    def _files(self, n: int) -> list[tuple[str, str, str, str]]:
+        # (rel_path, body, kind, header) — header is "" here; the
+        # frontmatter-header path has its own tests below.
         return [
-            (f"wiki/pages/p{i}.md", f"penicillin dosing endocarditis page {i} uniq{i}", "wiki")
+            (f"wiki/pages/p{i}.md", f"penicillin dosing endocarditis page {i} uniq{i}",
+             "wiki", "")
             for i in range(n)
         ]
 
@@ -248,8 +251,8 @@ class TestVectorStoreReindexBatch:
         # per-file reindex (same chunk counts, same files indexed).
         files = self._files(6)
         a = VectorStore.open(tmp_path / "a.db", embedder=make_handle())
-        for rel, body, kind in files:
-            a.reindex_file(rel, body=body, kind=kind)  # type: ignore[arg-type]
+        for rel, body, kind, header in files:
+            a.reindex_file(rel, body=body, kind=kind, header=header)  # type: ignore[arg-type]
         b = VectorStore.open(tmp_path / "b.db", embedder=make_handle())
         b.reindex_files(files)  # type: ignore[arg-type]
         assert {f[0] for f in a.list_indexed_files()} == {f[0] for f in b.list_indexed_files()}
@@ -896,3 +899,211 @@ class TestAdapterFindSimilar:
         result = tool("greek alphabet", 3, None)
         assert isinstance(result, str)
         assert "alpha" in result
+
+
+# ---------------------------------------------------------------------------
+# Index scope, frontmatter embedding, and the never-drop-a-page-silently
+# contract. Regression cover for the three reported production issues.
+# ---------------------------------------------------------------------------
+
+
+class TestIndexScope:
+    """`semantic.index: pages` keeps raw sources out of the vector store."""
+
+    def _wiki_with_a_source(self, tmp_path: Path) -> WikiStore:
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("pricing", title="Pricing", body="cost-plus 35%\n")
+        src = store.sources_path / "deck.md"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("raw pricing deck, cost-plus 35%\n", encoding="utf-8")
+        return store
+
+    def test_default_scope_indexes_pages_and_sources(self, tmp_path: Path) -> None:
+        from outmem._store.semantic import indexable_files_on_disk
+
+        store = self._wiki_with_a_source(tmp_path)
+        rels = indexable_files_on_disk(store)
+        assert any(r.endswith("pages/pricing.md") for r in rels)
+        assert any("sources/deck.md" in r for r in rels)
+
+    def test_pages_scope_excludes_sources(self, tmp_path: Path) -> None:
+        from outmem._store.semantic import indexable_files_on_disk
+
+        store = self._wiki_with_a_source(tmp_path)
+        rels = indexable_files_on_disk(store, scope="pages")
+        assert any(r.endswith("pages/pricing.md") for r in rels)
+        assert not any("sources/" in r for r in rels)
+
+    def test_scope_is_read_from_config(self, tmp_path: Path) -> None:
+        from outmem._store.semantic import indexable_files_on_disk
+
+        store = self._wiki_with_a_source(tmp_path)
+        store.config.outmem.semantic.index = "pages"
+        assert not any("sources/" in r for r in indexable_files_on_disk(store))
+
+    def test_bad_scope_value_warns_and_keeps_default(self, tmp_path: Path) -> None:
+        """config.yaml is forgiving — a typo must not brick the wiki."""
+        from outmem.config import load_yaml_config
+
+        root = tmp_path / "w"
+        WikiStore.init(root).close()
+        cfg_path = root / "config.yaml"
+        cfg_path.write_text(
+            cfg_path.read_text(encoding="utf-8").replace(
+                "index: pages+sources", "index: nonsense"
+            ),
+            encoding="utf-8",
+        )
+        assert load_yaml_config(root).semantic.index == "pages+sources"
+
+    def test_scope_round_trips_through_config_yaml(self, tmp_path: Path) -> None:
+        from outmem.config import load_yaml_config
+
+        root = tmp_path / "w"
+        WikiStore.init(root).close()
+        cfg_path = root / "config.yaml"
+        cfg_path.write_text(
+            cfg_path.read_text(encoding="utf-8").replace(
+                "index: pages+sources", "index: pages"
+            ),
+            encoding="utf-8",
+        )
+        cfg = load_yaml_config(root)
+        assert cfg.semantic.index == "pages"
+        assert cfg.semantic.embed_frontmatter is False  # default preserved
+
+
+class TestEmbedFrontmatter:
+    """`semantic.embed_frontmatter` puts title/tags in front of every chunk."""
+
+    def test_header_prepended_to_every_chunk(self) -> None:
+        from outmem.semantic.chunker import chunk_text
+
+        body = "\n\n".join(f"paragraph {i} " + "x" * 500 for i in range(6))
+        chunks = chunk_text(body, chunk_size=600, header="Malaria — abx, tropen")
+        assert len(chunks) > 1  # a continuation chunk exists
+        # EVERY chunk carries it, not just the first — that is the point.
+        assert all(c.text.startswith("Malaria — abx, tropen\n\n") for c in chunks)
+
+    def test_header_does_not_shift_offsets_or_split_points(self) -> None:
+        from outmem.semantic.chunker import chunk_text
+
+        body = "\n\n".join(f"paragraph {i} " + "x" * 500 for i in range(6))
+        plain = chunk_text(body, chunk_size=600)
+        headed = chunk_text(body, chunk_size=600, header="T — a, b")
+        assert [(c.start_char, c.end_char) for c in plain] == [
+            (c.start_char, c.end_char) for c in headed
+        ]
+
+    def test_header_changes_the_content_hash(self, tmp_path: Path) -> None:
+        """The upgrade hazard: hashing the body alone would make every
+        existing index report `skipped` and silently keep header-less
+        chunks. Flipping the flag must invalidate."""
+        vs = VectorStore.open(tmp_path / "v.db", embedder=make_handle())
+        first = vs.reindex_file("wiki/pages/a.md", body="alpha beta", kind="wiki")
+        assert not first.skipped
+        # Same body, no header -> correctly skipped.
+        assert vs.reindex_file("wiki/pages/a.md", body="alpha beta", kind="wiki").skipped
+        # Same body, NEW header -> must re-embed, not skip.
+        headed = vs.reindex_file(
+            "wiki/pages/a.md", body="alpha beta", kind="wiki", header="Alpha — greek"
+        )
+        assert not headed.skipped
+        assert "Alpha — greek" in vs.find_similar("alpha", top_k=1)[0].content
+
+    def test_load_for_index_supplies_header_only_when_enabled(
+        self, tmp_path: Path
+    ) -> None:
+        from outmem._store.semantic import load_for_index
+
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("malaria", title="Malaria", body="fever\n", tags=["abx"])
+        rel = f"{store.config.wiki_dir}/pages/malaria.md"
+
+        _, kind, header = load_for_index(store, rel)  # type: ignore[misc]
+        assert kind == "wiki" and header == ""  # off by default
+
+        store.config.outmem.semantic.embed_frontmatter = True
+        _, _, header = load_for_index(store, rel)  # type: ignore[misc]
+        assert header == "Malaria — abx"
+
+    def test_sources_never_get_a_header(self, tmp_path: Path) -> None:
+        from outmem._store.semantic import load_for_index
+
+        store = WikiStore.init(tmp_path / "w")
+        store.config.outmem.semantic.embed_frontmatter = True
+        src = store.sources_path / "deck.md"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("raw text\n", encoding="utf-8")
+        _, kind, header = load_for_index(  # type: ignore[misc]
+            store, f"{store.config.wiki_dir}/sources/deck.md"
+        )
+        assert kind == "source" and header == ""
+
+
+class TestNeverDropAPageSilently:
+    """A page on disk that doesn't reach the index is data loss."""
+
+    def _break_page(self, store: WikiStore, slug: str, tags_line: str) -> str:
+        rel = f"{store.config.wiki_dir}/pages/{slug}.md"
+        path = store.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntitle: T\nslug: {slug}\n{tags_line}\n---\n\nbody text here\n",
+            encoding="utf-8",
+        )
+        return rel
+
+    def test_unquoted_year_tag_no_longer_drops_the_page(
+        self, tmp_path: Path
+    ) -> None:
+        """The exact production regression: one unquoted `2026` in `tags:`
+        removed a whole page from retrieval with no error."""
+        from outmem._store.semantic import load_for_index
+
+        store = WikiStore.init(tmp_path / "w")
+        rel = self._break_page(store, "deqs", "tags: [regulatory, sepsis, 2026]")
+        loaded = load_for_index(store, rel)
+        assert loaded is not None, "page must still be indexed"
+        assert loaded[0].strip() == "body text here"
+
+    def test_unloadable_page_is_logged_and_counted(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A page that genuinely can't be parsed must be loud, and must
+        show up in the reindex summary as `dropped`."""
+        import logging
+
+        monkeypatch.setattr(
+            "outmem.semantic.build_embedder", lambda _model: make_handle()
+        )
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("good", title="Good", body="fine\n")
+        # `yes` -> bool: the one tag shape with no correct string form.
+        self._break_page(store, "broken", "tags: [a, yes]")
+
+        with caplog.at_level(logging.WARNING):
+            summary = store.semantic_reindex_all()
+
+        assert summary["dropped"] == 1
+        assert any("broken.md" in p for p in summary["dropped_paths"])
+        assert "NOT indexed" in caplog.text
+        # The healthy page still indexed — one bad page doesn't halt the run.
+        from outmem._store.semantic import vector_store_or_open
+
+        indexed = vector_store_or_open(store).list_indexed_files()
+        assert any("good.md" in f[0] for f in indexed)
+        assert not any("broken.md" in f[0] for f in indexed)
+
+    def test_clean_wiki_reports_zero_dropped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "outmem.semantic.build_embedder", lambda _model: make_handle()
+        )
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("a", title="A", body="alpha\n")
+        summary = store.semantic_reindex_all()
+        assert summary["dropped"] == 0
+        assert summary["dropped_paths"] == []

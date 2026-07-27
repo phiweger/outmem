@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import yaml
@@ -252,6 +252,13 @@ def _coerce_datetime(value: Any, *, field_name: str) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return ensure_utc(value)
+    # A bare ``created: 2026-07-23`` (no time) is loaded by PyYAML as a
+    # ``date``, which is NOT a ``datetime`` (the subclass relation runs the
+    # other way). Imported wikis write date-only stamps constantly, and the
+    # intent is unambiguous — promote to midnight UTC rather than rejecting
+    # the page. Checked before ``str`` since ``date`` is not a string.
+    if isinstance(value, date):
+        return ensure_utc(datetime(value.year, value.month, value.day))
     if isinstance(value, str):
         try:
             return parse_iso_z(value.strip())
@@ -271,9 +278,26 @@ def _coerce_tags(value: Any) -> list[str]:
         raise FrontmatterError(f"'tags' must be a list, got {type(value).__name__}.")
     out: list[str] = []
     for tag in value:
-        if not isinstance(tag, str):
-            raise FrontmatterError(f"Tags must be strings, got {type(tag).__name__}.")
-        out.append(tag)
+        if isinstance(tag, str):
+            out.append(tag)
+            continue
+        # An unquoted year / ICD code / indicator ID (``tags: [sepsis, 2026]``)
+        # is loaded as an int. It is valid YAML and obviously intended as a
+        # tag, so render it rather than dropping the whole page — a strict
+        # raise here is swallowed by the semantic indexer and the page
+        # silently disappears from retrieval.
+        if isinstance(tag, (int, float)) and not isinstance(tag, bool):
+            out.append(str(tag))
+            continue
+        # ``bool`` is deliberately NOT coerced: YAML turns ``yes``/``on``
+        # into True, and ``str(True)`` would silently rewrite the author's
+        # tag as "True". Quoting is the only correct fix, so say so.
+        if isinstance(tag, bool):
+            raise FrontmatterError(
+                f"Tags must be strings, got bool ({tag!r}) — YAML reads bare "
+                f"yes/no/on/off/true/false as booleans. Quote the tag."
+            )
+        raise FrontmatterError(f"Tags must be strings, got {type(tag).__name__}.")
     return out
 
 

@@ -199,6 +199,7 @@ outmem similar --slug pricing-formula             # use a page body, exclude its
 outmem similar --stdin                            # query on stdin
 outmem reindex                                    # walk wiki + sources, skip-if-unchanged
 outmem reindex --force                            # rebuild from scratch
+outmem reindex --pages-only                       # skip wiki/sources/ (and prune it)
 outmem reindex --path wiki/pages/foo.md           # specific files
 ```
 
@@ -213,7 +214,21 @@ reindex: 12 re-embedded, 334 unchanged, 0 removed, 47 chunks added, 18234 embed 
 The embedding-token count is the spend you can multiply by your provider's
 $/M-tokens to get cost. When Logfire is enabled, the same numbers land on
 an `outmem.reindex` span. `--path` reindexes one repo-relative *file*;
-`--root` selects the wiki (after the subcommand).
+`--root` selects the wiki (after the subcommand). `--pages-only` overrides
+`semantic.index` for one run — sources already in the index are pruned
+(they appear in `removed`).
+
+**Exit code.** A wiki page that exists on disk but could not be indexed is
+data loss — it becomes unreachable by `search_wiki`. `reindex` names every
+such page on stderr and **exits 1**, so a CI step notices:
+
+```
+outmem: 1 page(s) NOT indexed — unreachable by search. Run `outmem lint` for details:
+  wiki/pages/regulatory/deqs-rl-sepsis.md
+```
+
+The usual cause is frontmatter that YAML accepts but outmem rejects. Run
+`outmem lint` for the precise field.
 
 Build the index first: `outmem reindex`. Detailed
 behaviour: [features.md](features.md#semantic-index).
