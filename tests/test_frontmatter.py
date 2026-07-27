@@ -286,3 +286,45 @@ class TestRepairWikiPage:
             "---\n\nbody\n"
         )
         assert repair_wiki_page(broken) is None
+
+
+@pytest.mark.parametrize("bad_date", ["2026-02-30", "2026-13-01"])
+def test_repair_declines_instead_of_crashing_on_an_invalid_date(bad_date: str) -> None:
+    """`repair_wiki_page` probes with yaml.safe_load, which raises a bare
+    ValueError (not a YAMLError) on an out-of-range calendar date. Letting
+    that escape turned "this page needs repair" into a crash in every
+    caller of the repair path — read_page, the TOC, the backlink graph and
+    the semantic indexer all route through it."""
+    from outmem.frontmatter import repair_wiki_page
+
+    text = f"---\ntitle: T\nslug: t\ncreated: {bad_date}\n---\n\nbody\n"
+    assert repair_wiki_page(text) is None  # declines, does not raise
+
+
+def test_repair_never_returns_text_that_still_fails_to_load() -> None:
+    """A "repair" is only accepted if the result genuinely parses —
+    otherwise the crash just moves to the caller."""
+    from outmem.frontmatter import repair_wiki_page
+
+    # Needs repair (unquoted `: ` in title) AND has an invalid date, so the
+    # quoting fires but the result still won't load.
+    text = (
+        "---\ntitle: Influenza (Teil 1): Erkrankungen\nslug: t\n"
+        "created: 2026-02-30\n---\n\nbody\n"
+    )
+    assert repair_wiki_page(text) is None
+
+
+def test_load_page_text_never_raises_a_non_frontmatter_error() -> None:
+    """The contract every loader depends on: a bad page is a
+    FrontmatterError it can report, never an exception that kills the run."""
+    from outmem.index import load_page_text
+
+    for fm in (
+        "title: T\nslug: t\ncreated: 2026-02-30",
+        "title: T\nslug: t\ntags: [a, [nested]]",
+        "title: Influenza (Teil 1): X\nslug: t\ncreated: 2026-02-30",
+        "title: T",
+    ):
+        with pytest.raises(FrontmatterError):
+            load_page_text(f"---\n{fm}\n---\n\nbody\n")

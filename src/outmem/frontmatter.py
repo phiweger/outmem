@@ -122,11 +122,16 @@ def repair_wiki_page(content: str) -> str | None:
     raw_yaml = match.group(1)
     body = match.group(2)
 
-    # Already-parseable file: no repair needed.
+    # Already-parseable file: no repair needed. Catch broadly for the same
+    # reason parse_wiki_page does — PyYAML's timestamp constructor raises a
+    # bare ValueError on `created: 2026-02-30`, which is NOT a YAMLError.
+    # Letting it escape here turns "this page needs repair" into a crash in
+    # every caller of the repair path (read_page, the TOC, the backlink
+    # graph, the indexer).
     try:
         yaml.safe_load(raw_yaml)
         return None
-    except yaml.YAMLError:
+    except Exception:
         pass
 
     lines = raw_yaml.split("\n")
@@ -150,7 +155,11 @@ def repair_wiki_page(content: str) -> str | None:
     repaired_yaml = "\n".join(lines)
     try:
         yaml.safe_load(repaired_yaml)
-    except yaml.YAMLError:
+    except Exception:
+        # Broad on purpose: only accept a repair that genuinely loads. A
+        # narrow `except yaml.YAMLError` would let a page whose repaired
+        # YAML still raises (e.g. an invalid calendar date) be returned as
+        # "repaired", moving the crash to the caller instead of declining.
         return None  # didn't fix it; leave the file alone
     return f"---\n{repaired_yaml}\n---\n\n{body.lstrip(chr(10))}"
 
