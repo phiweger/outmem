@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from outmem.frontmatter import parse_wiki_page
 from outmem.index import (
     INDEX_FILENAME,
     INDEX_SLUG,
     index_page_text,
+    load_editorial_pages,
     navigate_index,
     render_index,
 )
@@ -312,3 +315,103 @@ def test_editorial_backlinks_still_work(tmp_path: Path) -> None:
     store.write_page("acme-msa", title="Acme", body="x")
     store.write_page("pricing", title="Pricing", body="See [[acme-msa]] for terms.")
     assert store.backlinks("acme-msa") == ("pricing",)
+
+
+# ---------------------------------------------------------------------------
+# load_editorial_pages — one discovery + failure contract for every loader
+# ---------------------------------------------------------------------------
+
+
+def _write(pages: Path, name: str, text: str) -> Path:
+    pages.mkdir(parents=True, exist_ok=True)
+    p = pages / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_load_editorial_pages_splits_successes_from_failures(tmp_path: Path) -> None:
+    pages = tmp_path / "wiki" / "pages"
+    _make_page(pages, "good", "Good")
+    _write(pages, "broken.md", "---\ntitle: T\nslug: broken\ntags: [a, [n]]\n---\n\nb\n")
+
+    loaded, failures = load_editorial_pages(pages)
+    assert [p.slug for p in loaded] == ["good"]
+    assert [f.slug for f in failures] == ["broken"]
+    assert failures[0].error  # carries the reason, for the caller to report
+
+
+def test_load_editorial_pages_self_heals_the_repairable_shape(tmp_path: Path) -> None:
+    """The imported-data case: an unquoted `: ` in the title. `read_page`
+    already heals it, so every other loader must see the page too."""
+    pages = tmp_path / "wiki" / "pages"
+    _write(
+        pages,
+        "flu.md",
+        "---\ntitle: Influenza (Teil 1): Erkrankungen\nslug: flu\n---\n\nbody\n",
+    )
+    loaded, failures = load_editorial_pages(pages)
+    assert failures == []
+    assert len(loaded) == 1
+    assert loaded[0].repaired is True
+    assert loaded[0].frontmatter.title.startswith("Influenza (Teil 1)")
+
+
+def test_render_index_includes_a_self_healed_page(tmp_path: Path) -> None:
+    """Regression: the TOC used to silently omit a page that read_page
+    could serve, so the page existed everywhere except the index."""
+    pages = tmp_path / "wiki" / "pages"
+    _write(
+        pages,
+        "flu.md",
+        "---\ntitle: Influenza (Teil 1): Erkrankungen\nslug: flu\n---\n\nbody\n",
+    )
+    assert "[[flu]]" in render_index(pages)
+
+
+def test_render_index_warns_instead_of_silently_dropping(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    pages = tmp_path / "wiki" / "pages"
+    _make_page(pages, "good", "Good")
+    _write(pages, "broken.md", "---\ntitle: T\nslug: broken\ntags: [a, [n]]\n---\n\nb\n")
+
+    with caplog.at_level(logging.WARNING):
+        out = render_index(pages)
+    assert "[[good]]" in out
+    assert "[[broken]]" not in out
+    assert "broken" in caplog.text  # no longer silent
+
+
+def test_every_loader_agrees_on_a_self_healed_page(tmp_path: Path) -> None:
+    """The altitude guarantee: one page, five readers, same verdict.
+
+    A page that `read_page` self-heals must also be in the TOC, the
+    backlink graph, the bm25 keyword net, and the semantic index — the
+    bug class this refactor exists to close was each loader deciding
+    independently.
+    """
+    from outmem._store.semantic import load_for_index
+    from outmem.backlinks import _build_graph
+    from outmem.optimize.blocks import _read_page_rows
+
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("target", title="Target", body="target body\n")
+    rel = f"{store.config.wiki_dir}/pages/flu.md"
+    (store.root / rel).write_text(
+        "---\ntitle: Influenza (Teil 1): Erkrankungen\nslug: flu\n---\n\n"
+        "see [[target]]\n",
+        encoding="utf-8",
+    )
+
+    # 1. read_page (the reference policy)
+    assert store.read("flu").title.startswith("Influenza")
+    # 2. the TOC
+    assert "[[flu]]" in render_index(store.pages_path)
+    # 3. the backlink graph — flu links to target
+    assert "flu" in _build_graph(store.pages_path).get("target", ())
+    # 4. the bm25 keyword net (backs the DEFAULT rerank(bm25) strategy)
+    assert "flu" in {slug for slug, _ in _read_page_rows(store)}
+    # 5. the semantic indexer
+    assert load_for_index(store, rel) is not None

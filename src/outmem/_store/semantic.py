@@ -17,8 +17,7 @@ from outmem.config import (
     SEMANTIC_UNAVAILABLE_HELP,
 )
 from outmem.exceptions import FrontmatterError, OutmemError
-from outmem.frontmatter import parse_wiki_page
-from outmem.index import RESERVED_WIKI_FILES, editorial_pages
+from outmem.index import RESERVED_WIKI_FILES, editorial_pages, load_page_text
 from outmem.slug import PAGES_DIR, slug_to_relpath
 from outmem.sources import REGISTRY_FILENAME, SOURCES_DIR
 
@@ -341,7 +340,12 @@ def load_for_index(
             )
             return None
         try:
-            frontmatter, body = parse_wiki_page(raw)
+            # Shared loader (same one `WikiStore.read` policy uses), so a
+            # page that is readable, greppable and bm25-indexable because
+            # its frontmatter self-heals is also indexed here. Reimplementing
+            # a stricter policy left such a page permanently absent from the
+            # index and permanently failing `outmem reindex`.
+            frontmatter, body, _ = load_page_text(raw)
         except FrontmatterError as exc:
             # Loud on purpose. This used to be a bare `except Exception:
             # return None`, which silently deleted the page from the index

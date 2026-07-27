@@ -151,7 +151,7 @@ def _build_graph(pages_dir: Path) -> dict[str, tuple[str, ...]]:
         return {}
 
     # Import lazily to avoid a frontmatter ↔ backlinks circular import.
-    from outmem.frontmatter import parse_wiki_page
+    from outmem.index import load_page_text
 
     # slug -> set of referrer slugs (set so duplicates collapse).
     inverse: dict[str, set[str]] = {}
@@ -163,9 +163,15 @@ def _build_graph(pages_dir: Path) -> dict[str, tuple[str, ...]]:
         except OSError:
             continue
         try:
-            frontmatter, body = parse_wiki_page(text)
+            # Shared loader, so a page that `read_page` can self-heal is
+            # also read correctly here — otherwise a repairable page falls
+            # to the raw-text branch below and its `generated: true` flag
+            # is missed, making every page it links to look non-orphaned.
+            frontmatter, body, _ = load_page_text(text)
         except Exception:
-            # Malformed page — fall back to scanning the full file as body.
+            # Genuinely unparseable — scan the whole file as body rather
+            # than dropping its links. Degraded, not silent: the same page
+            # is reported by lint and by `outmem reindex`.
             body = text
             frontmatter = None
         if frontmatter is not None and frontmatter.extra.get("generated"):

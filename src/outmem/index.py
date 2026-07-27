@@ -31,12 +31,20 @@ an orphan.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from outmem.frontmatter import parse_wiki_page
+from outmem.exceptions import FrontmatterError
+from outmem.frontmatter import parse_wiki_page, repair_wiki_page
 from outmem.slug import PAGES_DIR, relpath_to_slug
+
+if TYPE_CHECKING:
+    from outmem.frontmatter import WikiFrontmatter
+
+log = logging.getLogger(__name__)
 
 INDEX_SLUG = "index"
 INDEX_FILENAME = "index.md"
@@ -63,29 +71,111 @@ def editorial_pages(pages_dir: Path) -> list[Path]:
     return sorted(pages_dir.rglob("*.md"))
 
 
+@dataclass(frozen=True)
+class LoadedPage:
+    """One successfully-parsed editorial page."""
+
+    path: Path
+    slug: str
+    frontmatter: WikiFrontmatter
+    body: str
+    repaired: bool = False  # frontmatter was mended in memory to parse
+
+
+@dataclass(frozen=True)
+class PageLoadFailure:
+    """An editorial page on disk that could not be parsed.
+
+    Every consumer of :func:`load_editorial_pages` gets these; what
+    differs is only how each one *reports* them (lint makes a finding,
+    reindex sets an exit code, the index logs a warning). Losing a page
+    silently — which every loader used to do independently — is what this
+    type exists to prevent.
+    """
+
+    path: Path
+    slug: str
+    error: str
+
+
+def load_page_text(text: str) -> tuple[WikiFrontmatter, str, bool]:
+    """Parse one page's text, self-healing the repairable shape.
+
+    Returns ``(frontmatter, body, repaired)``. Mirrors what
+    :meth:`outmem.store.WikiStore.read` does, so "how outmem loads a
+    page" has one answer: a page that ``read_page`` can serve is a page
+    the index, the TOC and the backlink graph can also see. Raises
+    :class:`FrontmatterError` when the break isn't mechanically fixable.
+    """
+    try:
+        frontmatter, body = parse_wiki_page(text)
+    except FrontmatterError:
+        repaired_text = repair_wiki_page(text)
+        if repaired_text is None:
+            raise  # not a shape we can mend — surface it
+        frontmatter, body = parse_wiki_page(repaired_text)
+        return frontmatter, body, True
+    return frontmatter, body, False
+
+
+def load_editorial_pages(
+    pages_dir: Path,
+) -> tuple[list[LoadedPage], list[PageLoadFailure]]:
+    """Load every editorial page under ``pages_dir``.
+
+    The companion to :func:`editorial_pages`: that one answers *which*
+    files are editorial content, this one answers *what is in them* and
+    *which ones failed*. Returning both halves is the point — a loader
+    that only gets the successes has no way to notice a page vanished,
+    which is how the same silent-drop bug appeared independently in the
+    indexer, the TOC builder and the backlink graph.
+    """
+    pages: list[LoadedPage] = []
+    failures: list[PageLoadFailure] = []
+    for path in editorial_pages(pages_dir):
+        fallback_slug = relpath_to_slug(path.relative_to(pages_dir))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            failures.append(PageLoadFailure(path, fallback_slug, f"unreadable: {exc}"))
+            continue
+        try:
+            frontmatter, body, repaired = load_page_text(text)
+        except FrontmatterError as exc:
+            failures.append(PageLoadFailure(path, fallback_slug, str(exc)))
+            continue
+        pages.append(
+            LoadedPage(
+                path=path,
+                slug=frontmatter.slug or fallback_slug,
+                frontmatter=frontmatter,
+                body=body,
+                repaired=repaired,
+            )
+        )
+    return pages, failures
+
+
 def render_index(pages_dir: Path) -> str:
     """Build the index.md content from the current state of ``pages_dir``.
 
     Walks ``*.md`` files under ``pages_dir`` recursively, parses each
-    frontmatter, and emits an alphabetised list keyed by slug. Pages
-    with malformed frontmatter are silently skipped — ``outmem lint``
-    catches them separately so the index can render against a
-    partially-broken wiki without crashing.
+    frontmatter, and emits an alphabetised list keyed by slug. A page
+    whose frontmatter won't parse is logged at WARNING and left out, so
+    the index renders against a partially-broken wiki without crashing —
+    but never drops a page without saying so.
     """
+    pages, failures = load_editorial_pages(pages_dir)
+    for failure in failures:
+        log.warning(
+            "index: %s left out of index.md — %s", failure.slug, failure.error
+        )
     entries: list[tuple[str, str]] = []
-    for path in editorial_pages(pages_dir):
-        try:
-            frontmatter, _ = parse_wiki_page(path.read_text(encoding="utf-8"))
-        except Exception:
-            # Malformed page — skip; lint will surface it.
-            continue
-        slug = frontmatter.slug or relpath_to_slug(path.relative_to(pages_dir))
-        title = frontmatter.title
-        tags = frontmatter.tags
-        line = f"- [[{slug}]] — {title}"
-        if tags:
-            line += f" ({', '.join(tags)})"
-        entries.append((slug, line))
+    for page in pages:
+        line = f"- [[{page.slug}]] — {page.frontmatter.title}"
+        if page.frontmatter.tags:
+            line += f" ({', '.join(page.frontmatter.tags)})"
+        entries.append((page.slug, line))
 
     entries.sort(key=lambda e: e[0])
     body = "\n".join(line for _, line in entries) if entries else "_(no pages yet)_"
@@ -171,8 +261,12 @@ __all__ = [
     "PAGES_DIR",
     "RESERVED_WIKI_FILES",
     "IndexLevel",
+    "LoadedPage",
+    "PageLoadFailure",
     "editorial_pages",
     "index_page_text",
+    "load_editorial_pages",
+    "load_page_text",
     "navigate_index",
     "render_index",
 ]

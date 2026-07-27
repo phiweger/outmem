@@ -21,6 +21,7 @@ shared helper.
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import threading
@@ -46,6 +47,8 @@ from outmem.slug import PAGES_DIR, relpath_to_slug
 if TYPE_CHECKING:
     from outmem.config import RetrievalSettings
     from outmem.store import WikiStore
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -566,6 +569,7 @@ _HYDE_SYSTEM_PROMPT = (
 )
 
 
+
 def _hyde_document(model: Any, question: str) -> tuple[str | None, str | None]:
     """Generate a hypothetical answer passage for ``question``.
 
@@ -620,13 +624,22 @@ def _keywords(question: str, *, max_terms: int = 12) -> str:
 
 def _read_page_rows(store: WikiStore) -> list[tuple[str, str]]:
     """``(slug, body)`` for every readable wiki page. Built once; the FTS5
-    table is created from it per thread (see :class:`BM25Retriever`)."""
+    table is created from it per thread (see :class:`BM25Retriever`).
+
+    ``store.read`` self-heals repairable frontmatter, so only a genuinely
+    broken page is skipped — and that is logged, not swallowed. This net
+    backs the DEFAULT ``rerank(bm25)`` strategy, so a page missing here is
+    a page the agent cannot find on stock config; it must not be silent
+    just because the wiki has no semantic index to report it.
+    """
     rows: list[tuple[str, str]] = []
     for slug in store.list_slugs():
         try:
             rows.append((slug, store.read(slug).body))
-        except OutmemError:
-            continue  # skip an unreadable page rather than abort the index
+        except OutmemError as exc:
+            log.warning(
+                "bm25: page %r left out of the keyword index — %s", slug, exc
+            )
     return rows
 
 

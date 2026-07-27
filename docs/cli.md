@@ -183,6 +183,24 @@ parses before accepting it, so it can't make a page worse. Breaks it
 to surface loudly. outmem's own writes never produce this (the serializer
 quotes correctly); it only arises from external tools or manual edits.
 
+**One page, one verdict.** Every reader of `wiki/pages/` goes through the
+same loader (`outmem.index.load_editorial_pages` / `load_page_text`), so
+a page either works everywhere or fails everywhere:
+
+| Reader | Repairable page | Unfixable page |
+| --- | --- | --- |
+| `read_page` / `search_wiki` | served | `FrontmatterError` |
+| `wiki/index.md` (the TOC) | listed | omitted **+ WARNING** |
+| Backlink graph | full frontmatter honoured | links still scanned from raw text |
+| bm25 keyword net (backs the default `rerank(bm25)`) | indexed | omitted **+ WARNING** |
+| Semantic index | indexed | omitted **+ WARNING**, and `outmem reindex` exits 2 |
+| `outmem lint` | — | `frontmatter-invalid` error |
+
+Before this was shared, each reader decided independently and three of
+them dropped the page with no signal at all — so a page could be
+`read_page`-able yet missing from the TOC and from the default search
+path, with nothing in the repo detecting it.
+
 For pages already committed (e.g. pulled from a remote, which the hook
 won't have seen), repair on demand:
 
