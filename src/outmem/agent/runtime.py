@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import os
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,20 @@ DEFAULT_PROMPT_NAME = "system"
 DEFAULT_INJECTED_SKILLS: tuple[str, ...] = ("search", "evolution", "write", "ingest")
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "prompts"
+
+
+@cache
+def _agent_takes_output_retries() -> bool:
+    """True on PydanticAI 0.x/1.x, which take ``retries``/``output_retries``
+    as separate ints; False on 2.x, which takes one ``retries`` mapping.
+
+    Cached: the answer is fixed once the package is imported, and the
+    ``Agent`` import stays lazy so importing outmem doesn't require the
+    optional agent extra.
+    """
+    from pydantic_ai import Agent
+
+    return "output_retries" in inspect.signature(Agent.__init__).parameters
 
 
 def _jinja_env() -> Environment:
@@ -221,20 +236,24 @@ def build_agent(
     # Defaults the caller can override via agent_kwargs (e.g. tests
     # pin the retry budget to 0 to keep failures crisp).
     #
-    # PydanticAI v2 replaced the separate `tool_retries=` / `output_retries=`
-    # kwargs with a single `retries={'tools': N, 'output': M}` mapping and
-    # rejects the old names outright (TypeError, not a warning). We support
-    # `pydantic-ai>=0.1.0`, so pick the spelling the installed version
-    # actually accepts instead of pinning users to one major.
-    _agent_params = inspect.signature(Agent.__init__).parameters
-    if "tool_retries" in _agent_params:
-        agent_kwargs.setdefault("tool_retries", DEFAULT_TOOL_RETRIES)
-        agent_kwargs.setdefault("output_retries", DEFAULT_OUTPUT_RETRIES)
+    # The retry API changed shape across PydanticAI majors and we support
+    # `pydantic-ai>=0.1.0`, so ask the installed Agent which one it speaks:
+    #
+    #   0.x / 1.x  ->  retries: int  +  output_retries: int | None
+    #   2.x        ->  retries: int | AgentRetries | None  (a mapping),
+    #                  with output_retries removed entirely
+    #
+    # `output_retries` is the discriminator. (`tool_retries` is NOT — no
+    # released version ever exposed it, so probing for it would leave the
+    # legacy branch dead and hand 1.x a mapping where it wants an int,
+    # which fails deep in the agent graph at the first retry rather than
+    # at construction.)
+    tool_retries = agent_kwargs.pop("tool_retries", DEFAULT_TOOL_RETRIES)
+    output_retries = agent_kwargs.pop("output_retries", DEFAULT_OUTPUT_RETRIES)
+    if _agent_takes_output_retries():
+        agent_kwargs.setdefault("retries", tool_retries)
+        agent_kwargs.setdefault("output_retries", output_retries)
     else:
-        # Fold any caller-supplied legacy kwargs into the v2 mapping so
-        # callers written against either API keep working.
-        tool_retries = agent_kwargs.pop("tool_retries", DEFAULT_TOOL_RETRIES)
-        output_retries = agent_kwargs.pop("output_retries", DEFAULT_OUTPUT_RETRIES)
         agent_kwargs.setdefault(
             "retries", {"tools": tool_retries, "output": output_retries}
         )

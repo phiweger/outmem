@@ -854,23 +854,21 @@ class WikiStore:
         self,
         *,
         force: bool = False,
-        scope: str | None = None,
         max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
         """Walk every indexable file, sync the index, return a summary.
 
         Embeds files concurrently (≤ ``max_concurrency`` in flight);
-        ``on_progress(done, total)`` fires per file. ``scope`` overrides
-        ``semantic.index`` (``"pages"`` | ``"pages+sources"``) for this run.
+        ``on_progress(done, total)`` fires per file. What gets walked
+        follows ``semantic.index`` (``"pages"`` | ``"pages+sources"``).
 
-        The summary's ``dropped`` / ``dropped_paths`` report wiki pages
-        that exist on disk but could not be indexed — check them, they are
+        The summary's ``dropped_paths`` lists wiki pages that exist on disk
+        but did not make it into the index — check them, they are
         unreachable by search."""
         return _semantic.reindex_all(
             self,
             force=force,
-            scope=scope,
             max_concurrency=max_concurrency,
             on_progress=on_progress,
         )
@@ -963,11 +961,24 @@ class WikiStore:
         validate_slug(slug)
         return self.pages_path / slug_to_relpath(slug)
 
+    def pages_prefix(self) -> str:
+        """Repo-relative prefix every wiki page path starts with.
+
+        One definition of "lives under ``wiki/pages/``" — the layout is
+        configurable via ``wiki_dir``, so hand-rolling the f-string per
+        call site is how a layout change goes half-applied.
+        """
+        return f"{self.config.wiki_dir}/{PAGES_DIR}/"
+
+    def is_page_path(self, rel_path: str) -> bool:
+        """True if ``rel_path`` names a file under ``wiki/pages/``."""
+        return rel_path.startswith(self.pages_prefix())
+
     def _page_relpath(self, slug: str) -> str:
         """Repo-relative path string for ``slug`` (for ``git add`` etc)."""
         if slug == INDEX_SLUG:
             return f"{self.config.wiki_dir}/{INDEX_FILENAME}"
-        return f"{self.config.wiki_dir}/{PAGES_DIR}/{slug_to_relpath(slug).as_posix()}"
+        return f"{self.pages_prefix()}{slug_to_relpath(slug).as_posix()}"
 
     def _ensure_layout(self) -> None:
         for sub in (

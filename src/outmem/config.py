@@ -516,8 +516,20 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
                     list(SEMANTIC_INDEX_CHOICES),
                     config.semantic.index,
                 )
-        if isinstance(semantic_block.get("embed_frontmatter"), bool):
-            config.semantic.embed_frontmatter = semantic_block["embed_frontmatter"]
+        if "embed_frontmatter" in semantic_block:
+            flag = semantic_block["embed_frontmatter"]
+            if isinstance(flag, bool):
+                config.semantic.embed_frontmatter = flag
+            else:
+                # Warn rather than ignore: a quoted `"true"` looks correct,
+                # and silently keeping the default would leave the user
+                # concluding the feature is broken.
+                log.warning(
+                    "config: semantic.embed_frontmatter must be true/false, "
+                    "got %r — using %r",
+                    flag,
+                    config.semantic.embed_frontmatter,
+                )
         if isinstance(semantic_block.get("chunk_size"), int):
             config.semantic.chunk_size = semantic_block["chunk_size"]
         if isinstance(semantic_block.get("chunk_max"), int):
@@ -668,7 +680,7 @@ def starter_yaml(
         "  # ingested sources out of the vector store (they crowd curated\n"
         "  # pages out of the candidate window on source-heavy wikis).\n"
         f"  index: {DEFAULT_SEMANTIC_INDEX}\n"
-        "  # Prepend \"<title> - <tags>\" to every chunk before embedding, so\n"
+        "  # Prepend \"<title> \u2014 <tags>\" to every chunk before embedding, so\n"
         "  # titles/tags affect retrieval. Turning this on re-embeds every\n"
         "  # page on the next `outmem reindex`.\n"
         f"  embed_frontmatter: {str(DEFAULT_SEMANTIC_EMBED_FRONTMATTER).lower()}\n"

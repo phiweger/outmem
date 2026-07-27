@@ -251,11 +251,49 @@ def cmd_similar(args: argparse.Namespace) -> int:
     return 0
 
 
+_DROPPED_LIST_CAP = 20
+
+
+def _report_dropped_pages(dropped_paths: list[str]) -> int:
+    """Print pages that didn't reach the index, and return the exit code.
+
+    A page on disk that isn't in the index is unreachable by search, so
+    this must never pass as a clean run. Returns 2 (the repo's "there are
+    errors in your wiki" code, matching ``outmem lint``) so a caller can
+    still tell it apart from 1, which means the command itself failed.
+
+    ASCII only: this goes to stderr, which on a non-UTF-8 console (cp932,
+    latin-1, a redirected log) would raise UnicodeEncodeError on an em-dash
+    and replace the actionable list with a traceback.
+    """
+    if not dropped_paths:
+        return 0
+    print(
+        f"outmem: {len(dropped_paths)} page(s) NOT indexed and unreachable "
+        f"by search. `outmem lint` names the offending field:",
+        file=sys.stderr,
+    )
+    for rel in dropped_paths[:_DROPPED_LIST_CAP]:
+        print(f"  {rel}", file=sys.stderr)
+    if len(dropped_paths) > _DROPPED_LIST_CAP:
+        print(
+            f"  ... and {len(dropped_paths) - _DROPPED_LIST_CAP} more",
+            file=sys.stderr,
+        )
+    return 2
+
+
 def cmd_reindex(args: argparse.Namespace) -> int:
     # `reindex` is the opt-in that *builds* the semantic index — no
     # availability gate (it creates the db). The `outmem[semantic]` extra
     # missing surfaces as an OutmemError below.
     store = _open_store(args)
+    # Apply the scope override once, up front, so EVERY branch below honours
+    # it — including `--path` and `--staged`, which don't go through
+    # reindex_all. load_for_index reads the same setting, so a scoped run
+    # can't re-add sources through an incremental path either.
+    if args.pages_only:
+        store.config.outmem.semantic.index = SEMANTIC_INDEX_PAGES
     if args.staged:
         return _cmd_reindex_staged(store)
 
@@ -270,20 +308,27 @@ def cmd_reindex(args: argparse.Namespace) -> int:
                 )
                 return 1
             results = []
+            path_dropped: list[str] = []
             for rel in args.path:
                 if args.force:
                     store.semantic_remove_path(rel)
                 result = store.semantic_reindex_path(rel)
-                if result is not None:
-                    results.append(result)
+                if result is None:
+                    # Same contract as the full walk: an explicitly named
+                    # page that didn't make it in is data loss, not a no-op.
+                    # (A source under a `pages`-scoped wiki is a legitimate
+                    # skip, so only pages count.)
+                    if store.is_page_path(rel):
+                        path_dropped.append(rel)
+                    continue
+                results.append(result)
             for r in results:
                 state = "skipped" if r.skipped else f"+{r.chunks_added} chunks"
                 print(f"{r.rel_path}  {state}")
-            return 0
+            return _report_dropped_pages(path_dropped)
 
         summary = store.semantic_reindex_all(
             force=args.force,
-            scope=SEMANTIC_INDEX_PAGES if args.pages_only else None,
             on_progress=lambda done, total: report_progress(
                 None, done, total, label="reindex", unit="files"
             ),
@@ -298,22 +343,7 @@ def cmd_reindex(args: argparse.Namespace) -> int:
         f"{summary['chunks_added']} chunks added, "
         f"{summary.get('embed_tokens', 0)} embed tokens"
     )
-    # A page on disk that didn't make it into the index is unreachable by
-    # search. Never let that pass as a clean run: report it on stderr and
-    # exit non-zero so CI notices.
-    dropped_paths: list[str] = summary.get("dropped_paths") or []
-    if dropped_paths:
-        print(
-            f"outmem: {len(dropped_paths)} page(s) NOT indexed — unreachable "
-            f"by search. Run `outmem lint` for details:",
-            file=sys.stderr,
-        )
-        for rel in dropped_paths[:20]:
-            print(f"  {rel}", file=sys.stderr)
-        if len(dropped_paths) > 20:
-            print(f"  … and {len(dropped_paths) - 20} more", file=sys.stderr)
-        return 1
-    return 0
+    return _report_dropped_pages(summary.get("dropped_paths") or [])
 
 
 def _cmd_reindex_staged(store: WikiStore) -> int:

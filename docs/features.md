@@ -19,8 +19,9 @@ paragraph-aware chunks of every wiki page and every text source under
 source-heavy wiki, where raw sources are near-duplicates of the pages
 distilled from them and crowd those pages out of the fixed-size candidate
 window. Set `semantic.embed_frontmatter: true` to put each page's
-`"<title> — <tags>"` in front of every chunk, without which titles and
-tags are invisible to semantic search. Both are covered in
+`"<title> — <tags>"` in front of every chunk *at embed time*, without
+which titles and tags are invisible to semantic search (the stored chunk
+text is unchanged). Both are covered in
 [configuration.md](configuration.md).
 
 A page whose frontmatter outmem can't parse is **not** indexed, and would

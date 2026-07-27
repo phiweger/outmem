@@ -223,7 +223,7 @@ data loss — it becomes unreachable by `search_wiki`. `reindex` names every
 such page on stderr and **exits 1**, so a CI step notices:
 
 ```
-outmem: 1 page(s) NOT indexed — unreachable by search. Run `outmem lint` for details:
+outmem: 1 page(s) NOT indexed and unreachable by search. `outmem lint` names the offending field:
   wiki/pages/regulatory/deqs-rl-sepsis.md
 ```
 
@@ -247,6 +247,6 @@ outmem dashboard --pull-on-request   # git pull --rebase before each request
 |------|---------|
 | `0`  | Success. |
 | `1`  | An `OutmemError` was raised (network, git, malformed input, etc.). |
-| `2`  | Bad invocation (e.g. empty body to `write`). |
+| `2`  | Bad invocation (e.g. empty body to `write`), or the command ran but found errors in the wiki (`lint` findings, `reindex` dropped pages). |
 
 `outmem search` exits `1` when the pattern matched nothing (mirrors `rg`).

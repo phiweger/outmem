@@ -23,12 +23,16 @@ sources:
   max_chars: 200000    # cap on read_source returns
 
 # Semantic retrieval / lint — requires `pip install outmem[semantic]`.
-# Off by default; flip `enabled: true` to index pages and sources
-# into a local sqlite-vec DB and surface near-duplicate / similar chunks.
+# No on/off flag: semantic is active once the index exists. Build it with
+# `outmem reindex` to surface near-duplicate / similar chunks.
 semantic:
-  enabled: false
   embedding_model: openai:text-embedding-3-small
   db_filename: .vectors.db
+  # `pages+sources` (default) or `pages` to keep raw ingested sources out.
+  index: pages+sources
+  # Prepend "<title> — <tags>" to every chunk before embedding, so titles
+  # and tags affect retrieval. Turning this on re-embeds every page.
+  embed_frontmatter: false
   chunk_size: 2000
   chunk_max: 8000
   overlap_paragraphs: 1

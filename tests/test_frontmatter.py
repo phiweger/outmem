@@ -91,27 +91,57 @@ def test_provenance_must_be_list() -> None:
         parse_wiki_page(text)
 
 
-def test_numeric_tags_are_coerced_not_rejected() -> None:
-    """An unquoted year / code in `tags:` is valid YAML and obviously
-    intended as a tag. Rejecting it used to make the semantic indexer drop
-    the whole page silently, so it is rendered as a string instead."""
-    text = "---\ntitle: X\nslug: x\ntags: [a, 1, b, 2026]\n---\n\nbody\n"
+@pytest.mark.parametrize(
+    "written",
+    [
+        "2026",     # a bare year -> int
+        "007",      # zero-padded ICD/indicator code -> int 7
+        "12:30",    # YAML 1.1 sexagesimal -> int 750
+        "010",      # YAML 1.1 octal -> int 8
+        "0x1F",     # hex -> int 31
+        "1_000",    # underscore separator -> int 1000
+        "1.50",     # float -> 1.5, losing the trailing zero
+        ".inf",     # float infinity
+        "yes",      # bool True
+        "no",       # bool False
+    ],
+)
+def test_unquoted_tags_keep_their_authored_text(written: str) -> None:
+    """YAML resolves these to non-strings, and every resolution is lossy.
+    Rejecting them dropped the whole page from the index; `str()`-ing the
+    resolved value would silently rewrite the author's tag (007 -> '7',
+    12:30 -> '750'). The tag's original text is recovered instead."""
+    text = f"---\ntitle: X\nslug: x\ntags: [a, {written}]\n---\n\nbody\n"
     fm, _ = parse_wiki_page(text)
-    assert fm.tags == ["a", "1", "b", "2026"]
+    assert fm.tags == ["a", written]
 
 
-def test_bool_tags_still_rejected_with_a_pointed_message() -> None:
-    """`yes`/`on` become True in YAML and there is no correct string form
-    (str(True) == 'True' would rewrite the author's tag), so this one
-    keeps raising — but says exactly what to do about it."""
-    text = "---\ntitle: X\nslug: x\ntags: [a, yes]\n---\n\nbody\n"
-    with pytest.raises(FrontmatterError, match="Quote the tag"):
-        parse_wiki_page(text)
+def test_unquoted_tags_survive_a_write_round_trip() -> None:
+    """The corruption would otherwise be persisted to disk by the next
+    write_page/extend_page, permanently destroying the author's value."""
+    text = "---\ntitle: X\nslug: x\ntags: [icd, 007, 12:30]\n---\n\nbody\n"
+    fm, body = parse_wiki_page(text)
+    out = serialize_wiki_page(fm, body)
+    assert "'007'" in out and "'12:30'" in out
+    assert parse_wiki_page(out)[0].tags == ["icd", "007", "12:30"]
 
 
 def test_non_scalar_tags_still_rejected() -> None:
     text = "---\ntitle: X\nslug: x\ntags: [a, [nested]]\n---\n\nbody\n"
-    with pytest.raises(FrontmatterError, match="strings"):
+    with pytest.raises(FrontmatterError, match="Tags must be strings"):
+        parse_wiki_page(text)
+
+
+@pytest.mark.parametrize("bad_date", ["2026-02-30", "2026-13-01", "2026-04-31"])
+def test_invalid_calendar_date_raises_frontmatter_error_not_valueerror(
+    bad_date: str,
+) -> None:
+    """PyYAML's timestamp resolver matches the shape, then datetime.date()
+    raises a bare ValueError — not a YAMLError. Letting that escape killed
+    the whole reindex and blocked writeback, so parse_wiki_page must wrap
+    every parse failure as FrontmatterError."""
+    text = f"---\ntitle: X\nslug: x\ncreated: {bad_date}\n---\n\nbody\n"
+    with pytest.raises(FrontmatterError):
         parse_wiki_page(text)
 
 

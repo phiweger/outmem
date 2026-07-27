@@ -930,7 +930,8 @@ class TestIndexScope:
         from outmem._store.semantic import indexable_files_on_disk
 
         store = self._wiki_with_a_source(tmp_path)
-        rels = indexable_files_on_disk(store, scope="pages")
+        store.config.outmem.semantic.index = "pages"
+        rels = indexable_files_on_disk(store)
         assert any(r.endswith("pages/pricing.md") for r in rels)
         assert not any("sources/" in r for r in rels)
 
@@ -976,29 +977,47 @@ class TestIndexScope:
 class TestEmbedFrontmatter:
     """`semantic.embed_frontmatter` puts title/tags in front of every chunk."""
 
-    def test_header_prepended_to_every_chunk(self) -> None:
-        from outmem.semantic.chunker import chunk_text
+    def test_header_applies_to_every_chunk_at_embed_time(self) -> None:
+        """Per chunk, not per document: a continuation chunk otherwise
+        carries no token of the page it belongs to, so a title/tag query
+        can't reach it."""
+        from outmem.semantic.chunker import with_header
 
         body = "\n\n".join(f"paragraph {i} " + "x" * 500 for i in range(6))
-        chunks = chunk_text(body, chunk_size=600, header="Malaria — abx, tropen")
+        chunks = chunk_text(body, chunk_size=600)
         assert len(chunks) > 1  # a continuation chunk exists
-        # EVERY chunk carries it, not just the first — that is the point.
-        assert all(c.text.startswith("Malaria — abx, tropen\n\n") for c in chunks)
+        embedded = [with_header("Malaria — abx, tropen", c.text) for c in chunks]
+        assert all(e.startswith("Malaria — abx, tropen\n\n") for e in embedded)
 
-    def test_header_does_not_shift_offsets_or_split_points(self) -> None:
-        from outmem.semantic.chunker import chunk_text
+    def test_header_stays_out_of_the_stored_chunk(self, tmp_path: Path) -> None:
+        """`Chunk.text` is persisted as `chunks.content` and is
+        contractually `body[start_char:end_char]`. Baking the header in
+        broke that identity, stored the header once per chunk in a
+        git-tracked DB, and pushed chunks past `chunk_max`."""
+        body = "alpha beta gamma"
+        vs = VectorStore.open(tmp_path / "v.db", embedder=make_handle())
+        vs.reindex_file(
+            "wiki/pages/a.md", body=body, kind="wiki", header="Alpha — greek"
+        )
+        match = vs.find_similar("alpha", top_k=1)[0]
+        assert "Alpha — greek" not in match.content
+        assert match.content == body[match.start_char : match.end_char]
 
+    def test_header_is_excluded_from_the_chunk_size_budget(self) -> None:
+        """Adding a header must not change how a body is split."""
         body = "\n\n".join(f"paragraph {i} " + "x" * 500 for i in range(6))
         plain = chunk_text(body, chunk_size=600)
-        headed = chunk_text(body, chunk_size=600, header="T — a, b")
-        assert [(c.start_char, c.end_char) for c in plain] == [
-            (c.start_char, c.end_char) for c in headed
+        # Same call — the chunker no longer takes a header at all, which is
+        # what guarantees the split is header-independent.
+        assert [(c.start_char, c.end_char, c.text) for c in plain] == [
+            (c.start_char, c.end_char, c.text)
+            for c in chunk_text(body, chunk_size=600)
         ]
 
     def test_header_changes_the_content_hash(self, tmp_path: Path) -> None:
         """The upgrade hazard: hashing the body alone would make every
         existing index report `skipped` and silently keep header-less
-        chunks. Flipping the flag must invalidate."""
+        vectors. Flipping the flag must invalidate."""
         vs = VectorStore.open(tmp_path / "v.db", embedder=make_handle())
         first = vs.reindex_file("wiki/pages/a.md", body="alpha beta", kind="wiki")
         assert not first.skipped
@@ -1009,7 +1028,11 @@ class TestEmbedFrontmatter:
             "wiki/pages/a.md", body="alpha beta", kind="wiki", header="Alpha — greek"
         )
         assert not headed.skipped
-        assert "Alpha — greek" in vs.find_similar("alpha", top_k=1)[0].content
+        # And editing the title/tags alone re-embeds too.
+        again = vs.reindex_file(
+            "wiki/pages/a.md", body="alpha beta", kind="wiki", header="Alpha — greek, x"
+        )
+        assert not again.skipped
 
     def test_load_for_index_supplies_header_only_when_enabled(
         self, tmp_path: Path
@@ -1080,13 +1103,15 @@ class TestNeverDropAPageSilently:
         )
         store = WikiStore.init(tmp_path / "w")
         store.write_page("good", title="Good", body="fine\n")
-        # `yes` -> bool: the one tag shape with no correct string form.
-        self._break_page(store, "broken", "tags: [a, yes]")
+        # A nested collection as a tag: no lexical scalar to recover, so
+        # this is a genuine unfixable parse failure (unlike `yes`/`2026`,
+        # which are now preserved as written).
+        self._break_page(store, "broken", "tags: [a, [nested]]")
 
         with caplog.at_level(logging.WARNING):
             summary = store.semantic_reindex_all()
 
-        assert summary["dropped"] == 1
+        assert len(summary["dropped_paths"]) == 1
         assert any("broken.md" in p for p in summary["dropped_paths"])
         assert "NOT indexed" in caplog.text
         # The healthy page still indexed — one bad page doesn't halt the run.
@@ -1105,5 +1130,116 @@ class TestNeverDropAPageSilently:
         store = WikiStore.init(tmp_path / "w")
         store.write_page("a", title="A", body="alpha\n")
         summary = store.semantic_reindex_all()
-        assert summary["dropped"] == 0
         assert summary["dropped_paths"] == []
+
+
+class TestScopeHoldsOnIncrementalPaths:
+    """`semantic.index: pages` must hold on EVERY path, not just the walk.
+
+    Gating only the batch walk let each commit re-add the sources the last
+    reindex pruned — paying an embed round-trip inside the git path for
+    chunks the next reindex deletes again, forever.
+    """
+
+    def _wiki(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> WikiStore:
+        monkeypatch.setattr(
+            "outmem.semantic.build_embedder", lambda _model: make_handle()
+        )
+        store = WikiStore.init(tmp_path / "w")
+        store.config.outmem.semantic.index = "pages"
+        return store
+
+    def test_load_for_index_skips_sources_when_pages_scoped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from outmem._store.semantic import load_for_index
+
+        store = self._wiki(tmp_path, monkeypatch)
+        src = store.sources_path / "deck.md"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("raw deck\n", encoding="utf-8")
+        rel = f"{store.config.wiki_dir}/sources/deck.md"
+        assert load_for_index(store, rel) is None
+        # ...and is indexed again once the scope widens.
+        store.config.outmem.semantic.index = "pages+sources"
+        assert load_for_index(store, rel) is not None
+
+    def test_commit_time_reindex_does_not_re_add_pruned_sources(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from outmem._store.semantic import vector_store_or_open
+
+        store = self._wiki(tmp_path, monkeypatch)
+        store.write_page("p", title="P", body="page body\n")
+        store.semantic_reindex_all()
+        indexed = {f[0] for f in vector_store_or_open(store).list_indexed_files()}
+        assert not any("sources/" in r for r in indexed)
+
+        # A write that touches a source must not smuggle it back in.
+        src = store.sources_path / "deck.md"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("raw deck\n", encoding="utf-8")
+        store._maybe_reindex_commit_paths([f"{store.config.wiki_dir}/sources/deck.md"])
+        indexed = {f[0] for f in vector_store_or_open(store).list_indexed_files()}
+        assert not any("sources/" in r for r in indexed)
+
+
+class TestReindexReconciliation:
+    """`dropped_paths` must mean "on disk but not in the index" — for every
+    reason a page can fail to land, not just a parse error."""
+
+    def test_embed_failure_counts_as_dropped_not_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An embed 429 used to be recorded as `skipped` ("unchanged"), so
+        the CLI exited 0 while the page was absent from the index."""
+        class Boom:
+            model_name = "test:boom"
+            dimensions = 8
+
+            async def embed(self, inputs, **kw):
+                raise RuntimeError("429 rate limited")
+
+        good = make_handle()
+
+        def handle(_model):
+            return EmbedderHandle(
+                embedder=Boom(), model_name=good.model_name,
+                dimensions=good.dimensions,
+            )
+
+        monkeypatch.setattr("outmem.semantic.build_embedder", handle)
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("a", title="A", body="alpha content\n")
+        summary = store.semantic_reindex_all()
+
+        assert any("a.md" in p for p in summary["dropped_paths"]), summary
+        assert summary["reindexed"] == 0
+
+    def test_broken_page_purges_its_stale_chunks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A page indexed cleanly, then broken, kept serving its OLD body
+        while the CLI reported it "unreachable by search"."""
+        from outmem._store.semantic import vector_store_or_open
+
+        monkeypatch.setattr(
+            "outmem.semantic.build_embedder", lambda _model: make_handle()
+        )
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("p", title="P", body="original unique body\n")
+        store.semantic_reindex_all()
+        rel = f"{store.config.wiki_dir}/pages/p.md"
+        assert any(rel == f[0] for f in vector_store_or_open(store).list_indexed_files())
+
+        # Break it the way an external editor would.
+        (store.root / rel).write_text(
+            "---\ntitle: P\nslug: p\ntags: [a, [nested]]\n---\n\nnew body\n",
+            encoding="utf-8",
+        )
+        summary = store.semantic_reindex_all()
+        assert any("p.md" in p for p in summary["dropped_paths"])
+        # The stale chunks are gone, so "unreachable by search" is TRUE.
+        assert not any(
+            rel == f[0] for f in vector_store_or_open(store).list_indexed_files()
+        )

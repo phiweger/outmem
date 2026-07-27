@@ -76,13 +76,19 @@ def parse_wiki_page(content: str) -> tuple[WikiFrontmatter, str]:
 
     try:
         data = yaml.safe_load(raw_yaml)
-    except yaml.YAMLError as exc:
+    except Exception as exc:
+        # Deliberately broader than yaml.YAMLError: PyYAML's implicit
+        # timestamp resolver matches `2026-02-30`, then calls
+        # datetime.date(2026, 2, 30) and raises a bare ValueError. Letting
+        # that escape kills a whole `outmem reindex` (and blocks writeback,
+        # which must never fail on a bad page). Every parse failure this
+        # function can produce is a FrontmatterError.
         raise FrontmatterError(f"Frontmatter YAML failed to parse: {exc}") from exc
 
     if not isinstance(data, dict):
         raise FrontmatterError(f"Frontmatter must be a YAML mapping, got {type(data).__name__}.")
 
-    return _frontmatter_from_dict(data), body
+    return _frontmatter_from_dict(data, raw_yaml), body
 
 
 # Matches a top-level frontmatter line `<key>: <value>` where <value> is a
@@ -187,7 +193,42 @@ def touch_updated(frontmatter: WikiFrontmatter, *, now: datetime | None = None) 
 _KNOWN_FIELDS = {"title", "slug", "provenance", "created", "updated", "tags"}
 
 
-def _frontmatter_from_dict(data: dict[str, Any]) -> WikiFrontmatter:
+def _raw_tag_text(raw_yaml: str) -> list[str] | None:
+    """The *as-written* text of each entry in the top-level ``tags:`` list.
+
+    ``yaml.safe_load`` resolves scalars before we can see them, and the
+    resolution is lossy in ways that matter for tags: ``007`` becomes the
+    int 7, ``12:30`` becomes 750 (YAML 1.1 sexagesimal), ``0x1F`` becomes
+    31, ``yes`` becomes True. Rendering *those* back with ``str()`` would
+    write a tag the author never typed — and a later ``write_page`` would
+    persist the corruption to disk.
+
+    Composing the node tree instead gives us ``ScalarNode.value``, which is
+    the original lexical text, so a non-string tag can be recovered exactly
+    as authored. Returns ``None`` when the shape isn't a plain sequence of
+    scalars (then the caller falls back to validating the parsed values).
+    """
+    try:
+        node = yaml.compose(raw_yaml)
+    except Exception:
+        return None
+    if not isinstance(node, yaml.MappingNode):
+        return None
+    for key_node, value_node in node.value:
+        if getattr(key_node, "value", None) != "tags":
+            continue
+        if not isinstance(value_node, yaml.SequenceNode):
+            return None
+        out: list[str] = []
+        for item in value_node.value:
+            if not isinstance(item, yaml.ScalarNode):
+                return None
+            out.append(item.value)
+        return out
+    return None
+
+
+def _frontmatter_from_dict(data: dict[str, Any], raw_yaml: str = "") -> WikiFrontmatter:
     title = data.get("title")
     slug = data.get("slug")
     if not isinstance(title, str) or not title.strip():
@@ -198,7 +239,7 @@ def _frontmatter_from_dict(data: dict[str, Any]) -> WikiFrontmatter:
     provenance = _coerce_provenance(data.get("provenance", []))
     created = _coerce_datetime(data.get("created"), field_name="created")
     updated = _coerce_datetime(data.get("updated"), field_name="updated")
-    tags = _coerce_tags(data.get("tags", []))
+    tags = _coerce_tags(data.get("tags", []), _raw_tag_text(raw_yaml))
     extra = {k: v for k, v in data.items() if k not in _KNOWN_FIELDS}
 
     return WikiFrontmatter(
@@ -271,33 +312,34 @@ def _coerce_datetime(value: Any, *, field_name: str) -> datetime | None:
     )
 
 
-def _coerce_tags(value: Any) -> list[str]:
+def _coerce_tags(value: Any, raw_text: list[str] | None = None) -> list[str]:
+    """Normalise the ``tags:`` list, keeping every tag exactly as authored.
+
+    An unquoted year, ICD code, indicator ID or ``yes`` is valid YAML that
+    resolves to a non-string. Raising on those used to make the semantic
+    indexer drop the entire page, so instead we take the tag's original
+    text from ``raw_text`` (see :func:`_raw_tag_text`) — never ``str()`` of
+    the resolved value, which would rewrite ``007`` as ``7``.
+    """
     if value is None:
         return []
     if not isinstance(value, list):
         raise FrontmatterError(f"'tags' must be a list, got {type(value).__name__}.")
+    usable_raw = raw_text if raw_text is not None and len(raw_text) == len(value) else None
     out: list[str] = []
-    for tag in value:
+    for i, tag in enumerate(value):
         if isinstance(tag, str):
             out.append(tag)
             continue
-        # An unquoted year / ICD code / indicator ID (``tags: [sepsis, 2026]``)
-        # is loaded as an int. It is valid YAML and obviously intended as a
-        # tag, so render it rather than dropping the whole page — a strict
-        # raise here is swallowed by the semantic indexer and the page
-        # silently disappears from retrieval.
-        if isinstance(tag, (int, float)) and not isinstance(tag, bool):
-            out.append(str(tag))
+        if usable_raw is not None:
+            out.append(usable_raw[i])
             continue
-        # ``bool`` is deliberately NOT coerced: YAML turns ``yes``/``on``
-        # into True, and ``str(True)`` would silently rewrite the author's
-        # tag as "True". Quoting is the only correct fix, so say so.
-        if isinstance(tag, bool):
-            raise FrontmatterError(
-                f"Tags must be strings, got bool ({tag!r}) — YAML reads bare "
-                f"yes/no/on/off/true/false as booleans. Quote the tag."
-            )
-        raise FrontmatterError(f"Tags must be strings, got {type(tag).__name__}.")
+        # No lexical text recovered (unusual shape, e.g. an anchor or a
+        # nested collection). Refuse rather than guess at the author's
+        # intent — str() here is exactly the corruption we're avoiding.
+        raise FrontmatterError(
+            f"Tags must be strings, got {type(tag).__name__}. Quote the tag."
+        )
     return out
 
 

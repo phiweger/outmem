@@ -118,15 +118,21 @@ fixed-size KNN *before* anything can filter by kind — so a store that is
 half raw source spends roughly half its candidate window on material that
 is then discarded, pushing curated pages out of reach. Narrowing the
 scope also prunes already-indexed source chunks on the next
-`outmem reindex` (they show up in the `removed` count), and shrinks the
-committed `.vectors.db`.
+`outmem reindex` (they show up in the `removed` count).
+
+Note the pruned rows are deleted, not compacted away: outmem never runs
+`VACUUM`, so `.vectors.db` keeps its size on disk and the rewritten pages
+add a fresh blob to git history. The win is retrieval quality and
+embedding spend, not repo size.
 
 `outmem reindex --pages-only` does the same thing for a single run
 without editing config.
 
 Sources stay fully available either way — they are registered, readable
-via `read_source`, and greppable via `grep_wiki --scope raw`. Only the
-*vector* index is narrowed.
+via `read_source`, and greppable via `grep_wiki` with `scope="all"`
+(note `scope="raw"` searches the top-level `raw/` directory, which is a
+different tree from `wiki/sources/`). Only the *vector* index is
+narrowed.
 
 #### `semantic.embed_frontmatter` — make titles and tags searchable
 
@@ -139,8 +145,15 @@ are not in the embedded text at all**. A page whose body never repeats
 its own title is effectively unretrievable by that title, and the entire
 tag vocabulary contributes nothing to semantic search. The header is
 applied to *every* chunk, not just the first, so continuation chunks stay
-attributable to their page — which also gives the rerank gate the context
-it needs to judge them.
+attributable to their page rather than being reachable only by whatever
+happens to be in that slice of the body.
+
+Two limits worth knowing. The header is added to the *document* side
+only — `find_similar` embeds your query verbatim — so stored vectors
+shift slightly away from raw-body queries; if you rely on `find_similar`
+for near-duplicate detection, re-check `similarity_threshold` (0.80 was
+tuned without headers). And it does not affect the `rerank` gate, which
+re-reads the page body from disk by slug and never sees chunk text.
 
 Turning it on changes what is embedded, so the next `outmem reindex`
 re-embeds every page (the header participates in the content hash, so

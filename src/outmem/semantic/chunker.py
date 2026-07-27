@@ -15,6 +15,9 @@ count. Two properties make this design useful for incremental indexing:
 
 Frontmatter is the *caller's* responsibility to strip before calling
 this — use :func:`outmem.frontmatter.parse_wiki_page` for wiki pages.
+A page's title/tags can still be fed to the embedder without polluting
+the stored chunk: see :func:`with_header`, which the VectorStore applies
+at embed time only.
 """
 
 from __future__ import annotations
@@ -49,7 +52,6 @@ def chunk_text(
     chunk_size: int = 2000,
     chunk_max: int = 8000,
     overlap_paragraphs: int = 1,
-    header: str = "",
 ) -> list[Chunk]:
     """Split ``body`` into paragraph-aware chunks.
 
@@ -62,15 +64,6 @@ def chunk_text(
     3. Overlap: include the last ``overlap_paragraphs`` paragraphs of
        chunk N at the start of chunk N+1. Setting it to ``0`` disables
        overlap.
-
-    ``header`` (e.g. ``"<title> — <tags>"``) is prepended to **every**
-    chunk's ``text``. Applying it per chunk rather than once per document
-    is the point: a continuation chunk otherwise carries no token of the
-    page it belongs to, which both hides it from a title/tag query and
-    starves the rerank gate of the context it needs to judge relevance.
-    It does not shift ``start_char``/``end_char``, which stay offsets into
-    ``body``, and it is excluded from the ``chunk_size``/``chunk_max``
-    budget so adding one cannot change how a body is split.
 
     Empty bodies return an empty list. A body with one short paragraph
     returns one chunk.
@@ -118,7 +111,7 @@ def chunk_text(
         chunks.append(
             Chunk(
                 index=len(chunks),
-                text=f"{header}\n\n{chunk_body}" if header else chunk_body,
+                text=chunk_body,
                 start_char=chunk_start,
                 end_char=chunk_end,
             )
@@ -162,3 +155,21 @@ def _split_paragraphs(body: str) -> list[tuple[int, int, str]]:
 def hash_text(text: str) -> str:
     """SHA-256 hex digest of ``text`` (utf-8) — file-level content hash."""
     return sha256(text.encode("utf-8")).hexdigest()
+
+
+def with_header(header: str, text: str) -> str:
+    """``text`` with ``header`` prepended, for what gets EMBEDDED.
+
+    Kept out of :class:`Chunk` on purpose. ``Chunk.text`` is persisted as
+    ``chunks.content`` and is contractually ``body[start_char:end_char]``;
+    baking a header into it would break that identity, store the same
+    header once per chunk in a git-tracked DB, push every chunk over
+    ``chunk_max``, and burn preview budget re-printing the page title next
+    to the path it already appears in. Applying it at the embed call sites
+    keeps the header in the vectors, where it is wanted, and nowhere else.
+
+    The same function feeds the content hash, so toggling
+    ``semantic.embed_frontmatter`` (or editing a title/tags) invalidates
+    exactly the files whose embedded text changed.
+    """
+    return f"{header}\n\n{text}" if header else text

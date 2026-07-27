@@ -158,7 +158,6 @@ def reindex_all(
     store: WikiStore,
     *,
     force: bool = False,
-    scope: str | None = None,
     max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
@@ -168,17 +167,13 @@ def reindex_all(
     ``on_progress(done, total)`` fires as each file completes. Raises if
     the ``outmem[semantic]`` extra isn't installed.
 
-    ``scope`` overrides ``semantic.index`` for this run (see
-    :func:`indexable_files_on_disk`).
-
-    The returned summary carries ``dropped`` / ``dropped_paths``: wiki
-    pages that exist on disk but could not be loaded. That count is the
-    reconciliation between what was discovered and what was indexed —
-    without it a page can silently vanish from retrieval."""
+    The returned summary carries ``dropped_paths``: wiki pages that exist
+    on disk but did not make it into the index. That is the reconciliation
+    between what was discovered and what was indexed — without it a page
+    can silently vanish from retrieval."""
     vs = vector_store_or_open(store)
 
-    on_disk = indexable_files_on_disk(store, scope=scope)
-    pages_prefix = f"{store.config.wiki_dir}/{PAGES_DIR}/"
+    on_disk = indexable_files_on_disk(store)
     # Load bodies (skipping non-text/reserved files). force=True drops the
     # existing entry first so reindex_files re-embeds even on a hash match.
     batch: list[tuple[str, str, WikiContentKind, str]] = []
@@ -191,7 +186,7 @@ def reindex_all(
             # Sources/reserved files skip legitimately and quietly; a *page*
             # that fails to load is data loss and load_for_index has already
             # logged why. Surface it in the summary so the caller can act.
-            if rel_path.startswith(pages_prefix):
+            if store.is_page_path(rel_path):
                 dropped_paths.append(rel_path)
             continue
         body, kind, header = loaded
@@ -219,31 +214,40 @@ def reindex_all(
         sp.set_attribute("reindexed", reindexed)
         sp.set_attribute("chunks_added", added_chunks)
         sp.set_attribute("embed_tokens", embed_tokens)
-    skipped = sum(1 for r in results if r.skipped)
+    # A file that FAILED (embed error) is not "unchanged" — it needed
+    # indexing and isn't there. Counting it as skipped reported a clean run
+    # while the page was unreachable, which is the failure this whole
+    # reconciliation exists to catch.
+    failed = [r for r in results if r.error]
+    skipped = sum(1 for r in results if r.skipped and not r.error)
+    for r in failed:
+        log.warning("semantic: %s NOT indexed — %s", r.rel_path, r.error)
+        if store.is_page_path(r.rel_path):
+            dropped_paths.append(r.rel_path)
 
     removed = 0
-    on_disk_set = set(on_disk)
+    # Orphan sweep: anything indexed that is no longer indexable on disk.
+    # Dropped pages count as orphans even though the file still exists —
+    # their indexed chunks are from a previous, now-unreadable revision, and
+    # leaving them in means `search_wiki` answers from stale content while
+    # the caller is told the page is unreachable. Purging makes the report
+    # true and matches what `--force` already does.
+    stale = set(dropped_paths)
+    on_disk_set = set(on_disk) - stale
     for rel_path, _, _ in vs.list_indexed_files():
         if rel_path not in on_disk_set:
             vs.remove_file(rel_path)
             removed += 1
 
-    if dropped_paths:
-        log.warning(
-            "semantic: %d page(s) on disk were NOT indexed and are unreachable "
-            "by search: %s",
-            len(dropped_paths),
-            ", ".join(dropped_paths[:10])
-            + (" …" if len(dropped_paths) > 10 else ""),
-        )
-
+    # Per-page reasons were already logged (by load_for_index, or by the
+    # failed loop above) — no aggregate restatement here; the CLI prints
+    # the actionable list and sets the exit code.
     return {
         "reindexed": reindexed,
         "skipped": skipped,
         "removed": removed,
         "chunks_added": added_chunks,
         "embed_tokens": embed_tokens,
-        "dropped": len(dropped_paths),
         "dropped_paths": dropped_paths,
     }
 
@@ -287,7 +291,7 @@ def load_for_index(
     pass unnoticed.
     """
     wiki_prefix = f"{store.config.wiki_dir}/"
-    pages_prefix = f"{wiki_prefix}{PAGES_DIR}/"
+    pages_prefix = store.pages_prefix()
     sources_prefix = f"{wiki_prefix}{SOURCES_DIR}/"
 
     if any(rel_path == f"{wiki_prefix}{name}" for name in RESERVED_WIKI_FILES):
@@ -297,9 +301,28 @@ def load_for_index(
 
     abs_path = store.root / rel_path
     if not abs_path.is_file():
+        if store.is_page_path(rel_path):
+            # Reachable via a broken symlink, a directory named `*.md`, or a
+            # page deleted between the tree walk and this load. Counted as
+            # dropped, so it must say why — otherwise the run exits non-zero
+            # pointing at `outmem lint`, which has nothing to report.
+            log.warning(
+                "semantic: page %s NOT indexed — not a readable file "
+                "(broken symlink, or removed during the scan)",
+                rel_path,
+            )
         return None
 
     if rel_path.startswith(sources_prefix):
+        if store.config.outmem.semantic.index == SEMANTIC_INDEX_PAGES:
+            # Honour the scope here too, not just in the batch walk: every
+            # incremental path (write-time reindex, `reindex --path`, the
+            # `--staged` pre-commit hook) comes through this function. Gate
+            # it only in indexable_files_on_disk and a `pages`-scoped wiki
+            # re-adds each source on the next commit, pays an embedding
+            # round-trip inside the git path for chunks the next reindex
+            # deletes again, and churns the tracked .vectors.db forever.
+            return None
         try:
             text = abs_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -341,27 +364,27 @@ def load_for_index(
     return None
 
 
-def indexable_files_on_disk(store: WikiStore, *, scope: str | None = None) -> list[str]:
+def indexable_files_on_disk(store: WikiStore) -> list[str]:
     """Every repo-relative path that would normally be indexed.
 
-    ``scope`` (default: ``semantic.index`` from config) is either
-    ``"pages+sources"`` or ``"pages"``. Scoping to ``pages`` keeps raw
-    ingested material out of the vector store: sources are near-duplicates
-    of the pages distilled from them, and because the vector search takes
-    a fixed-``k`` KNN before anything can filter by kind, they crowd
-    curated pages out of the candidate window.
+    Honours ``semantic.index`` (``"pages+sources"`` or ``"pages"``).
+    Scoping to ``pages`` keeps raw ingested material out of the vector
+    store: sources are near-duplicates of the pages distilled from them,
+    and because the vector search takes a fixed-``k`` KNN before anything
+    can filter by kind, they crowd curated pages out of the candidate
+    window.
 
-    This is the single place both trees are walked, so restricting here
-    also makes ``reindex_all``'s orphan sweep prune already-indexed source
-    chunks on the next run rather than stranding them.
+    Restricting here makes ``reindex_all``'s orphan sweep prune
+    already-indexed source chunks on the next run rather than stranding
+    them; :func:`load_for_index` enforces the same setting on the
+    incremental paths.
 
     Iterates the on-disk tree without materialising an intermediate
     sorted list of every path under ``wiki/sources/`` — for a corpus
     with thousands of sources, that saved a non-trivial transient
     allocation per ``reindex_all``.
     """
-    if scope is None:
-        scope = store.config.outmem.semantic.index
+    scope = store.config.outmem.semantic.index
     rels: list[str] = []
     if store.pages_path.is_dir():
         for path in editorial_pages(store.pages_path):
