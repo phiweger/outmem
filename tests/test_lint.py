@@ -262,6 +262,76 @@ def test_dead_slug_mention_ignores_times_ratios_and_live_pages(tmp_path: Path) -
     assert dead == [], [f.message for f in dead]
 
 
+def test_a_renamed_page_mentioned_in_prose_is_not_called_dead(tmp_path: Path) -> None:
+    """`outmem rename` records an alias, so the old name still opens. Both
+    slug checks predate aliases and tested membership in the canonical slug
+    set, so a clean rename made the linter report a name that `read()`
+    resolves fine — the linter contradicting the feature next to it."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("clinical:sepsis", title="Sepsis", body="s")
+    store.write_page("clinical:other", title="Other", body="Vgl. clinical:sepsis\n")
+    store.rename_page("clinical:sepsis", "clinical:infektion:sepsis")
+
+    assert store.read("clinical:sepsis").slug == "clinical:infektion:sepsis"
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    assert [f for f in report.findings if f.kind == "dead-slug-mention"] == []
+    # Prose is editable, so the old name is still debt worth retiring —
+    # reported truthfully, the way `wikilink-via-alias` treats a link.
+    (via,) = [f for f in report.findings if f.kind == "slug-mention-via-alias"]
+    assert via.severity == Severity.WARNING
+    assert "clinical:infektion:sepsis" in via.message
+
+
+def test_a_source_referencing_an_aliased_slug_is_silent(tmp_path: Path) -> None:
+    """The alias is doing exactly its job here. A content-addressed source
+    cannot be edited, so a nudge would ask the operator to fix something
+    unfixable — unlike prose, which is why only that side gets one."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("sop:vitek2", title="Vitek", body="v")
+    store.sources_path.mkdir(parents=True, exist_ok=True)
+    (store.sources_path / "t.md").write_text("Vgl. sop:vitek2\n", encoding="utf-8")
+    store.rename_page("sop:vitek2", "sop:geraete:vitek2")
+
+    report = lint_wiki(
+        store.wiki_path,
+        log_dir=store.log_path,
+        raw_dir=store.raw_path,
+        sources_dir=store.sources_path,
+    )
+    assert [f for f in report.findings if f.kind == "source-references-dead-slug"] == []
+    assert [f for f in report.findings if f.kind == "slug-mention-via-alias"] == []
+
+
+def test_a_slug_with_no_page_and_no_alias_is_still_dead(tmp_path: Path) -> None:
+    """The guarantee the alias fix must not weaken: a genuinely dead
+    reference — the 136 found in production — still reports."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("sop:geraete:vitek2", title="Vitek", body="v")
+    store.write_page("sop:notes", title="Notes", body="Vgl. sop:mikrobiologie\n")
+    store.sources_path.mkdir(parents=True, exist_ok=True)
+    (store.sources_path / "t.md").write_text("Vgl. sop:mikrobiologie\n", encoding="utf-8")
+    report = lint_wiki(
+        store.wiki_path,
+        log_dir=store.log_path,
+        raw_dir=store.raw_path,
+        sources_dir=store.sources_path,
+    )
+    assert len([f for f in report.findings if f.kind == "dead-slug-mention"]) == 1
+    assert len([f for f in report.findings if f.kind == "source-references-dead-slug"]) == 1
+
+
+def test_alias_namespaces_do_not_widen_the_false_positive_gate(tmp_path: Path) -> None:
+    """Resolution and the namespace gate are separate questions. Folding
+    aliases into the namespace set would admit tokens no live page
+    justifies — and the gate is the only thing keeping `12:30` out."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("clinical:sepsis", title="Sepsis", body="s")
+    store.write_page("notes:dosing", title="Dosing", body="Abnahme 12:30, Verhaeltnis 3:1\n")
+    store.rename_page("clinical:sepsis", "clinical:infektion:sepsis")
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    assert [f for f in report.findings if f.kind == "dead-slug-mention"] == []
+
+
 def test_duplicate_slug_is_an_error(tmp_path: Path) -> None:
     """Two files claiming one slug silently collided before — the loser
     vanished from every slug-keyed check with no signal."""

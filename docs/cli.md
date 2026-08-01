@@ -338,6 +338,15 @@ silently after a namespace is reorganised. It only fires when the token's
 namespace already exists in the wiki, which keeps times (`12:30`) and
 ratios (`3:1`) out.
 
+**Aliases resolve here too.** A slug that opens only via an alias is not
+dead, so it is never reported as such. In *prose* — which you can edit — it
+becomes a `slug-mention-via-alias` warning instead, the same nudge
+`wikilink-via-alias` gives a link, so the alias can eventually be retired.
+Inside a **frozen source** it is silent: the file is content-addressed and
+cannot be edited, so the alias protecting that reference is the system
+working as designed, and a warning would only ask you to fix something you
+can't.
+
 `--error-only` is for CI on a wiki that carries known warnings you don't
 want to block on — they are still printed.
 

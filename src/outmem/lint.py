@@ -261,6 +261,7 @@ def _check_dead_slug_mentions(
     ``3`` are not namespaces, so times and ratios drop out.
     """
     known = set(pages.keys())
+    aliases = _alias_map(pages)
     # Every namespace prefix in use, at any depth: `abx`, `abx:side-effects`.
     namespaces: set[str] = set()
     for slug in known:
@@ -285,6 +286,26 @@ def _check_dead_slug_mentions(
             if namespace not in namespaces:
                 continue  # not a wiki namespace — a time, a ratio, prose
             seen.add(token)
+            if token in aliases:
+                # It resolves — `read(token)` opens the page. Calling it "not
+                # a page" would be false, and it would fire on every clean
+                # `outmem rename`, which is the case aliases exist to make
+                # safe. Still worth a nudge: prose is editable, so an old
+                # name here is debt the author can retire, exactly as
+                # `wikilink-via-alias` treats a link.
+                report.findings.append(
+                    LintFinding(
+                        kind="slug-mention-via-alias",
+                        severity=Severity.WARNING,
+                        path=page.rel_path,
+                        message=(
+                            f"text mentions {token!r}, which resolves only via "
+                            f"an alias on {aliases[token]!r} — update it to "
+                            f"{aliases[token]!r} so the alias can eventually go"
+                        ),
+                    )
+                )
+                continue
             report.findings.append(
                 LintFinding(
                     kind="dead-slug-mention",
@@ -458,18 +479,28 @@ def _check_source_slug_coupling(
     tellingly, *none* in genuine third-party material (0 of 305 files
     across guidelines, publications, regulatory…). All of it was
     self-authored SOP transcripts and dictated notes filed as sources.
-    That distribution is the real signal: self-authored material is
-    mutable by nature and doesn't belong in a frozen store. Until
-    ``wiki/notes/`` exists, this at least makes the coupling visible.
+    That distribution is the real signal, and it is why outmem now gives
+    sources *versions* (``--as`` / ``outmem stale``) rather than a
+    separate tree: an SOP is a source that gets replaced, exactly like a
+    republished guideline. What supersession does **not** fix is this
+    coupling, so the check stays.
 
-    Only fires on slugs that no longer resolve — a live reference is
-    fine, it just carries the risk.
+    Only fires on slugs that no longer resolve **at all**. A live
+    reference is fine, and so is one that resolves through an alias —
+    the alias is doing precisely its job, protecting a reference in a
+    file that is content-addressed and therefore cannot be edited. There
+    is no ``wikilink-via-alias``-style nudge here for that reason:
+    reporting it would ask the operator to fix something unfixable.
     """
     if sources_dir is None or not sources_dir.is_dir():
         return
-    known = set(pages)
+    # Resolution and the false-positive gate are separate questions. An
+    # alias resolves, so it belongs in `known`; but the namespace gate
+    # keeps deriving from live pages only, because widening it is what
+    # would let `12:30` back in.
+    resolvable = set(pages) | set(_alias_map(pages))
     namespaces: set[str] = set()
-    for slug in known:
+    for slug in pages:
         segments = slug.split(":")
         for i in range(1, len(segments)):
             namespaces.add(":".join(segments[:i]))
@@ -486,7 +517,7 @@ def _check_source_slug_coupling(
         seen: set[str] = set()
         for match in _SLUG_TOKEN_RE.finditer(text):
             token = match.group(0)
-            if token in known or token in seen:
+            if token in resolvable or token in seen:
                 continue
             if token.rsplit(":", 1)[0] not in namespaces:
                 continue
@@ -497,11 +528,12 @@ def _check_source_slug_coupling(
                     severity=Severity.WARNING,
                     path=rel,
                     message=(
-                        f"frozen source references {token!r}, which is not a "
-                        "page. Content-addressed sources shouldn't name page "
-                        "slugs — the source can't change, the slug can. "
-                        "Self-authored material referencing the wiki belongs "
-                        "outside sources/."
+                        f"frozen source references {token!r}, which no longer "
+                        "resolves — not as a page and not as an alias. A "
+                        "content-addressed source can never change; a page "
+                        "slug changes whenever the wiki is reorganised. "
+                        "Rename the page back, add the old name to its "
+                        "`aliases:`, or re-ingest the source without the slug."
                     ),
                 )
             )
