@@ -405,7 +405,7 @@ class WikiStore:
             raise OutmemError(f"No such wiki page: {slug}")
         text = path.read_text(encoding="utf-8")
         try:
-            frontmatter, body = parse_wiki_page(text)
+            frontmatter, body = parse_wiki_page(text, fallback_slug=slug)
         except FrontmatterError:
             repaired = repair_wiki_page(text)
             if repaired is None:
@@ -422,7 +422,7 @@ class WikiStore:
                     "pre-commit hook)",
                     slug,
                 )
-            frontmatter, body = parse_wiki_page(repaired)
+            frontmatter, body = parse_wiki_page(repaired, fallback_slug=slug)
         return WikiPage(slug=slug, frontmatter=frontmatter, body=body, path=path)
 
     def exists(self, slug: str) -> bool:
@@ -437,14 +437,72 @@ class WikiStore:
         The auto-generated ``index`` slug is hidden — it's structural,
         not content. Consumers who need to read it can still call
         ``read("index")`` directly.
+
+        Slugs that :meth:`read` would reject are skipped, so the catalogue
+        never advertises a page it can't open — a filename with uppercase
+        or an underscore derives a grammatically invalid slug, and handing
+        that to an agent costs it a tool call to find out. Use
+        :meth:`unreadable` to see what was skipped and why.
         """
         if not self.pages_path.is_dir():
             return []
         from outmem.slug import relpath_to_slug
-        return sorted(
-            relpath_to_slug(p.relative_to(self.pages_path))
-            for p in editorial_pages(self.pages_path)
-        )
+
+        out: list[str] = []
+        for path in editorial_pages(self.pages_path):
+            slug = relpath_to_slug(path.relative_to(self.pages_path))
+            try:
+                validate_slug(slug)
+            except SlugError:
+                continue
+            out.append(slug)
+        return sorted(out)
+
+    def unreadable(self) -> list[tuple[str, str]]:
+        """Every page under ``wiki/pages/`` that isn't cleanly addressable.
+
+        Returns ``(slug, reason)`` — the load-time audit a consumer needs
+        to know its wiki is sound, without attempting :meth:`read` on
+        every slug (O(n) file reads to learn something one walk can tell
+        you). Covers three defects:
+
+        - a filename whose derived slug fails the slug grammar, so it is
+          omitted from :meth:`list_slugs` and unopenable by that name
+        - a page whose frontmatter won't parse at all
+        - a page whose declared ``slug:`` disagrees with its path — the
+          silent one. It reads fine by path, but the same page then has
+          two names and the declared one resolves to nothing. Reported,
+          never fatal: the page stays available.
+
+        A clean wiki returns ``[]``, which is the assertion a downstream
+        consumer wants in its own test suite.
+        """
+        if not self.pages_path.is_dir():
+            return []
+        from outmem.index import load_editorial_pages
+        from outmem.slug import relpath_to_slug
+
+        out: list[tuple[str, str]] = []
+        for path in editorial_pages(self.pages_path):
+            slug = relpath_to_slug(path.relative_to(self.pages_path))
+            try:
+                validate_slug(slug)
+            except SlugError as exc:
+                out.append((slug, f"not addressable: {exc}"))
+        pages, failures = load_editorial_pages(self.pages_path)
+        for failure in failures:
+            out.append((failure.slug, f"does not parse: {failure.error}"))
+        for page in pages:
+            if page.slug_mismatch:
+                out.append(
+                    (
+                        page.slug,
+                        f"declares slug {page.declared_slug!r} but lives at "
+                        f"{page.slug!r} — the declared name resolves to nothing "
+                        "(usually a `git mv` that didn't update the frontmatter)",
+                    )
+                )
+        return sorted(set(out))
 
     def index_tree(self, prefix: str = "") -> IndexLevel:
         """Navigate the slug index (the TOC) one namespace level at a time.

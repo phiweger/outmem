@@ -893,3 +893,75 @@ class TestRepairPages:
         fresh_store.write_page("good", title="Good", body="ok\n")
         assert fresh_store.repair_pages(dry_run=True) == []
         assert fresh_store.repair_pages(dry_run=False) == []
+
+
+# ---------------------------------------------------------------------------
+# Discovery vs reading (issue #6) — the catalogue must not advertise a page
+# `read()` will reject, and a declared slug must never become a second address.
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryMatchesReading:
+    def _broken_wiki(self, tmp_path: Path) -> WikiStore:
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("ok", title="OK", body="fine\n")
+        p = store.pages_path
+        (p / "SOP-Upper" / "x").mkdir(parents=True, exist_ok=True)
+        (p / "SOP-Upper" / "x" / "page.md").write_text(
+            "---\ntitle: T\nslug: t\n---\n\nb\n", encoding="utf-8"
+        )
+        (p / "has_underscore").mkdir(parents=True, exist_ok=True)
+        (p / "has_underscore" / "page.md").write_text(
+            "---\ntitle: T\nslug: t\n---\n\nb\n", encoding="utf-8"
+        )
+        (p / "noslug.md").write_text("---\ntitle: T\n---\n\nb\n", encoding="utf-8")
+        (p / "moved.md").write_text(
+            "---\ntitle: T\nslug: somewhere-else\n---\n\nb\n", encoding="utf-8"
+        )
+        return store
+
+    def test_every_listed_slug_is_readable(self, tmp_path: Path) -> None:
+        """The core invariant from issue #6: discovery was more permissive
+        than reading, so an agent burned a tool call per malformed page."""
+        store = self._broken_wiki(tmp_path)
+        for slug in store.list_slugs():
+            store.read(slug)  # must not raise
+
+    def test_ungrammatical_slugs_are_not_advertised(self, tmp_path: Path) -> None:
+        store = self._broken_wiki(tmp_path)
+        listed = store.list_slugs()
+        assert "SOP-Upper:x:page" not in listed
+        assert "has_underscore:page" not in listed
+
+    def test_missing_slug_is_no_longer_fatal(self, tmp_path: Path) -> None:
+        """Refusing to read a findable page over a missing label was pure
+        downside — the path addresses it perfectly well."""
+        store = self._broken_wiki(tmp_path)
+        assert "noslug" in store.list_slugs()
+        assert store.read("noslug").frontmatter.slug == "noslug"
+
+    def test_declared_slug_never_becomes_a_second_address(self, tmp_path: Path) -> None:
+        """`moved.md` declaring `slug: somewhere-else` must not put an
+        unopenable name in the TOC — the path stays authoritative."""
+        from outmem.index import render_index
+
+        store = self._broken_wiki(tmp_path)
+        toc = render_index(store.pages_path)
+        assert "[[moved]]" in toc
+        assert "somewhere-else" not in toc
+        store.read("moved")  # still readable by its real name
+
+    def test_unreadable_reports_all_three_defects(self, tmp_path: Path) -> None:
+        store = self._broken_wiki(tmp_path)
+        reasons = dict(store.unreadable())
+        assert "SOP-Upper:x:page" in reasons
+        assert "not addressable" in reasons["SOP-Upper:x:page"]
+        assert "moved" in reasons
+        assert "somewhere-else" in reasons["moved"]
+
+    def test_clean_wiki_reports_nothing_unreadable(self, tmp_path: Path) -> None:
+        """The assertion a downstream consumer wants in its own suite."""
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("abx:penicillin", title="Pen", body="b\n")
+        store.write_page("pricing", title="P", body="b\n")
+        assert store.unreadable() == []

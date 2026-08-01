@@ -57,15 +57,26 @@ class WikiFrontmatter:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def parse_wiki_page(content: str) -> tuple[WikiFrontmatter, str]:
+def parse_wiki_page(
+    content: str, *, fallback_slug: str | None = None
+) -> tuple[WikiFrontmatter, str]:
     """Split a wiki page into frontmatter + body.
 
     The frontmatter block must be at the very start of the file and
     delimited by ``---`` lines.
 
+    ``fallback_slug`` is used when the page declares no ``slug:``. The
+    path is what actually addresses a page — ``slug:`` is a *declaration
+    of intent to check the path against*, not the address — so refusing
+    to read an otherwise-findable page over a missing label is pure
+    downside. Callers that know where the page lives (the loaders,
+    ``WikiStore.read``) pass it; callers parsing free-floating text don't,
+    and keep the strict behaviour.
+
     Raises:
         FrontmatterError: If the block is missing, malformed, or fails
-            validation (missing required ``title`` or ``slug``).
+            validation (missing ``title``, or missing ``slug`` with no
+            ``fallback_slug`` to stand in).
     """
     match = _FRONTMATTER_RE.match(content)
     if not match:
@@ -88,7 +99,7 @@ def parse_wiki_page(content: str) -> tuple[WikiFrontmatter, str]:
     if not isinstance(data, dict):
         raise FrontmatterError(f"Frontmatter must be a YAML mapping, got {type(data).__name__}.")
 
-    return _frontmatter_from_dict(data, raw_yaml), body
+    return _frontmatter_from_dict(data, raw_yaml, fallback_slug=fallback_slug), body
 
 
 # Matches a top-level frontmatter line `<key>: <value>` where <value> is a
@@ -237,13 +248,18 @@ def _raw_tag_text(raw_yaml: str) -> list[str] | None:
     return None
 
 
-def _frontmatter_from_dict(data: dict[str, Any], raw_yaml: str = "") -> WikiFrontmatter:
+def _frontmatter_from_dict(
+    data: dict[str, Any], raw_yaml: str = "", *, fallback_slug: str | None = None
+) -> WikiFrontmatter:
     title = data.get("title")
     slug = data.get("slug")
     if not isinstance(title, str) or not title.strip():
         raise FrontmatterError("Frontmatter is missing a non-empty 'title'.")
     if not isinstance(slug, str) or not slug.strip():
-        raise FrontmatterError("Frontmatter is missing a non-empty 'slug'.")
+        if fallback_slug:
+            slug = fallback_slug
+        else:
+            raise FrontmatterError("Frontmatter is missing a non-empty 'slug'.")
 
     provenance = _coerce_provenance(data.get("provenance", []))
     created = _coerce_datetime(data.get("created"), field_name="created")

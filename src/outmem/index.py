@@ -76,10 +76,21 @@ class LoadedPage:
     """One successfully-parsed editorial page."""
 
     path: Path
-    slug: str
+    slug: str  # path-derived — the address
     frontmatter: WikiFrontmatter
     body: str
     repaired: bool = False  # frontmatter was mended in memory to parse
+    declared_slug: str = ""  # what the page's own `slug:` claims
+
+    @property
+    def slug_mismatch(self) -> bool:
+        """The page declares a slug that isn't where it lives.
+
+        Harmless to read (the path still addresses it) but it means the
+        same page has two names, and the declared one resolves to
+        nothing. Usually a ``git mv`` that didn't update the frontmatter.
+        """
+        return bool(self.declared_slug) and self.declared_slug != self.slug
 
 
 @dataclass(frozen=True)
@@ -98,7 +109,9 @@ class PageLoadFailure:
     error: str
 
 
-def load_page_text(text: str) -> tuple[WikiFrontmatter, str, bool]:
+def load_page_text(
+    text: str, *, fallback_slug: str | None = None
+) -> tuple[WikiFrontmatter, str, bool]:
     """Parse one page's text, self-healing the repairable shape.
 
     Returns ``(frontmatter, body, repaired)``. Mirrors what
@@ -106,14 +119,19 @@ def load_page_text(text: str) -> tuple[WikiFrontmatter, str, bool]:
     page" has one answer: a page that ``read_page`` can serve is a page
     the index, the TOC and the backlink graph can also see. Raises
     :class:`FrontmatterError` when the break isn't mechanically fixable.
+
+    ``fallback_slug`` (the path-derived name) stands in for a missing
+    ``slug:`` — see :func:`outmem.frontmatter.parse_wiki_page`.
     """
     try:
-        frontmatter, body = parse_wiki_page(text)
+        frontmatter, body = parse_wiki_page(text, fallback_slug=fallback_slug)
     except FrontmatterError:
         repaired_text = repair_wiki_page(text)
         if repaired_text is None:
             raise  # not a shape we can mend — surface it
-        frontmatter, body = parse_wiki_page(repaired_text)
+        frontmatter, body = parse_wiki_page(
+            repaired_text, fallback_slug=fallback_slug
+        )
         return frontmatter, body, True
     return frontmatter, body, False
 
@@ -140,14 +158,22 @@ def load_editorial_pages(
             failures.append(PageLoadFailure(path, fallback_slug, f"unreadable: {exc}"))
             continue
         try:
-            frontmatter, body, repaired = load_page_text(text)
+            frontmatter, body, repaired = load_page_text(
+                text, fallback_slug=fallback_slug
+            )
         except FrontmatterError as exc:
             failures.append(PageLoadFailure(path, fallback_slug, str(exc)))
             continue
         pages.append(
             LoadedPage(
                 path=path,
-                slug=frontmatter.slug or fallback_slug,
+                # The PATH addresses the page — always. A declared `slug:`
+                # that disagrees is a defect to report (see
+                # WikiStore.unreadable), never an alternative address:
+                # honouring it here would put a name in wiki/index.md that
+                # `read()` cannot open.
+                slug=fallback_slug,
+                declared_slug=frontmatter.slug,
                 frontmatter=frontmatter,
                 body=body,
                 repaired=repaired,

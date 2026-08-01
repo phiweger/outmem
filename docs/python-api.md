@@ -165,6 +165,30 @@ contributors.lookup("bob@example.com")        # → Contributor(...) or None
 contributors.lookup("bob@personal.dev")       # → same Contributor if listed as alias
 ```
 
+## Checking a wiki is sound
+
+```python
+for slug, reason in store.unreadable():
+    print(slug, "->", reason)
+```
+
+`unreadable()` is the load-time audit: every page under `wiki/pages/`
+that isn't cleanly addressable, as `(slug, reason)`. It catches a filename
+whose derived slug fails the slug grammar (uppercase, underscores), a page
+whose frontmatter won't parse, and — the silent one — a page whose declared
+`slug:` disagrees with its path, which reads fine but gives the same page two
+names, only one of which resolves.
+
+A clean wiki returns `[]`, which is the assertion to put in a consumer's own
+test suite. It is one directory walk, not an O(n) `read()` sweep, and it does
+not require running the whole linter.
+
+**The path addresses a page; `slug:` is a declaration checked against it.**
+A missing `slug:` is derived from the path rather than being fatal, and a
+mismatched one is reported here rather than raising — the page stays
+available either way. `list_slugs()` skips anything `read()` would reject, so
+the catalogue never advertises a page it can't open.
+
 ## Error handling
 
 Every operation that touches the filesystem can raise `OutmemError`
