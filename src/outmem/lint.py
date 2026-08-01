@@ -124,6 +124,7 @@ def lint_wiki(
     _check_dead_slug_mentions(pages, report)
     _check_provenance(pages, raw_dir=raw_dir, sources_dir=sources_dir, report=report)
     _check_sources_registry(sources_dir, report)
+    _check_source_slug_coupling(pages, sources_dir, report)
     _check_orphans(pages, log_dir=log_dir, report=report)
     _check_index_drift(wiki_dir, pages_dir, report)
 
@@ -366,6 +367,72 @@ def _check_sources_registry(
                 ),
             )
         )
+
+
+def _check_source_slug_coupling(
+    pages: dict[str, _LoadedPage],
+    sources_dir: Path | None,
+    report: LintReport,
+) -> None:
+    """Flag frozen sources that reference mutable page slugs.
+
+    Sources are content-addressed — their path embeds a sha, so their
+    content is immutable by construction. A page slug is the opposite:
+    it moves whenever the wiki is reorganised. A source that names page
+    slugs therefore couples something that can never change to something
+    that changes often, and the reference rots with no way to notice.
+
+    Observed in production: 136 dead slugs across 129 source files — and
+    tellingly, *none* in genuine third-party material (0 of 305 files
+    across guidelines, publications, regulatory…). All of it was
+    self-authored SOP transcripts and dictated notes filed as sources.
+    That distribution is the real signal: self-authored material is
+    mutable by nature and doesn't belong in a frozen store. Until
+    ``wiki/notes/`` exists, this at least makes the coupling visible.
+
+    Only fires on slugs that no longer resolve — a live reference is
+    fine, it just carries the risk.
+    """
+    if sources_dir is None or not sources_dir.is_dir():
+        return
+    known = set(pages)
+    namespaces: set[str] = set()
+    for slug in known:
+        segments = slug.split(":")
+        for i in range(1, len(segments)):
+            namespaces.add(":".join(segments[:i]))
+    if not namespaces:
+        return
+    for path in sorted(sources_dir.rglob("*")):
+        if not path.is_file() or path.name == ".sources.db":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = f"{sources_dir.name}/{path.relative_to(sources_dir).as_posix()}"
+        seen: set[str] = set()
+        for match in _SLUG_TOKEN_RE.finditer(text):
+            token = match.group(0)
+            if token in known or token in seen:
+                continue
+            if token.rsplit(":", 1)[0] not in namespaces:
+                continue
+            seen.add(token)
+            report.findings.append(
+                LintFinding(
+                    kind="source-references-dead-slug",
+                    severity=Severity.WARNING,
+                    path=rel,
+                    message=(
+                        f"frozen source references {token!r}, which is not a "
+                        "page. Content-addressed sources shouldn't name page "
+                        "slugs — the source can't change, the slug can. "
+                        "Self-authored material referencing the wiki belongs "
+                        "outside sources/."
+                    ),
+                )
+            )
 
 
 def _check_provenance(

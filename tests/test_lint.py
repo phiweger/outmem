@@ -357,3 +357,41 @@ def test_cli_lint_error_only_ignores_warnings(tmp_path: Path) -> None:
     store.write_page("orphan", title="Lonely", body="no links here")
     assert main(["lint", "--root", str(store.root)]) == 1
     assert main(["lint", "--root", str(store.root), "--error-only"]) == 0
+
+
+def test_source_referencing_a_dead_slug_is_flagged(tmp_path: Path) -> None:
+    """Content-addressed sources are frozen; page slugs move. A source that
+    names slugs couples the two, and the reference rots undetected — 136
+    such references were found in one production wiki, all of it in
+    self-authored material filed as sources."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("sop:mikrobiologie:geraete:vitek2", title="Vitek", body="v")
+    store.sources_path.mkdir(parents=True, exist_ok=True)
+    (store.sources_path / "sop-transcript.md").write_text(
+        "Vgl. sop:mikrobiologie:vitek2 (alte Struktur)\n", encoding="utf-8"
+    )
+    report = lint_wiki(
+        store.wiki_path,
+        log_dir=store.log_path,
+        raw_dir=store.raw_path,
+        sources_dir=store.sources_path,
+    )
+    hits = [f for f in report.findings if f.kind == "source-references-dead-slug"]
+    assert len(hits) == 1
+    assert "sop:mikrobiologie:vitek2" in hits[0].message
+    assert hits[0].severity == Severity.WARNING
+
+
+def test_source_referencing_a_live_slug_is_not_flagged(tmp_path: Path) -> None:
+    """A live reference carries the risk but isn't a defect yet."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("sop:vitek2", title="Vitek", body="v")
+    store.sources_path.mkdir(parents=True, exist_ok=True)
+    (store.sources_path / "t.md").write_text("Vgl. sop:vitek2\n", encoding="utf-8")
+    report = lint_wiki(
+        store.wiki_path,
+        log_dir=store.log_path,
+        raw_dir=store.raw_path,
+        sources_dir=store.sources_path,
+    )
+    assert [f for f in report.findings if f.kind == "source-references-dead-slug"] == []
