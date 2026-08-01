@@ -89,6 +89,7 @@ from outmem.index import (
 from outmem.search import DEFAULT_RESULT_BYTES, SearchResult, rg_available, search
 from outmem.slug import PAGES_DIR, slug_to_relpath, validate_slug
 from outmem.sources import (
+    REGISTRY_FILENAME,
     SOURCES_DIR,
     IngestionRecord,
     SourceEntry,
@@ -806,9 +807,28 @@ class WikiStore:
             self, source, into_subdir=into_subdir, rename=rename, commit=commit
         )
 
-    def list_sources(self) -> list[SourceEntry]:
+    def sources_gc(self, *, dry_run: bool = True) -> Any:
+        """Reconcile ``.sources.db`` against disk; drop rows whose file is gone.
+
+        Returns a :class:`outmem.sources.RegistryAudit`. ``dry_run=True``
+        by default (the ``repair_pages`` convention) because the registry
+        is a git-tracked binary — every apply writes a full blob into
+        history. Files with no registry row are reported, never deleted.
+        """
+        from outmem.sources import gc_registry
+
+        audit = gc_registry(self.sources_path, dry_run=dry_run)
+        if not dry_run and (audit.missing_files or audit.orphan_ingestions):
+            self._source_registry = None  # drop the cached handle
+            self._commit_paths(
+                [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
+                subject=f"sources: gc — dropped {len(audit.missing_files)} stale row(s)",
+            )
+        return audit
+
+    def list_sources(self, *, include_missing: bool = False) -> list[SourceEntry]:
         """Every registered source, ordered by relative path."""
-        return _sources.list_sources(self)
+        return _sources.list_sources(self, include_missing=include_missing)
 
     def get_source(self, rel_path: str) -> SourceEntry | None:
         """Lookup a single registered source by its relative path."""

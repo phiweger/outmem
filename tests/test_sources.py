@@ -16,6 +16,7 @@ from outmem.sources import (
     is_allowed_source,
     read_source_text,
 )
+from outmem.store import WikiStore
 
 # ---------------------------------------------------------------------------
 # compute_sha256
@@ -335,3 +336,79 @@ def test_read_source_text_missing(tmp_path: Path) -> None:
     sources.mkdir()
     with pytest.raises(OutmemError, match="no such source"):
         read_source_text(sources, "ghost.md", max_chars=1024)
+
+
+# ---------------------------------------------------------------------------
+# Registry gc — nothing reconciled .sources.db against disk, so a registry
+# could drift to double-digit percent junk unnoticed.
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryGc:
+    def _wiki_with_drift(self, tmp_path: Path) -> WikiStore:
+        from outmem.sources import SourceRegistry
+
+        store = WikiStore.init(tmp_path / "w")
+        store.sources_path.mkdir(parents=True, exist_ok=True)
+        real = store.sources_path / "kept.md"
+        real.write_text("kept\n", encoding="utf-8")
+        reg = SourceRegistry.load(store.sources_path)
+        reg.register("kept.md", sha256="k" * 64, size_bytes=6)
+        # a row whose directory was deleted out-of-band
+        reg.register("gone/abcdef123456/x.md", sha256="g" * 64, size_bytes=9)
+        reg.record_ingestion("gone/abcdef123456/x.md", prompt="p", pages_touched=["a"])
+        # a file nobody registered
+        (store.sources_path / "stray.md").write_text("stray\n", encoding="utf-8")
+        return store
+
+    def test_dry_run_reports_and_changes_nothing(self, tmp_path: Path) -> None:
+        from outmem.sources import SourceRegistry
+
+        store = self._wiki_with_drift(tmp_path)
+        audit = store.sources_gc()  # dry_run default
+        assert audit.missing_files == ["gone/abcdef123456/x.md"]
+        assert audit.unregistered == ["stray.md"]
+        assert not audit.is_clean
+        # untouched
+        reg = SourceRegistry.load(store.sources_path)
+        assert "gone/abcdef123456/x.md" in reg.entries
+
+    def test_apply_removes_rows_and_cascades_ingestions(self, tmp_path: Path) -> None:
+        from outmem.sources import SourceRegistry, audit_registry
+
+        store = self._wiki_with_drift(tmp_path)
+        store.sources_gc(dry_run=False)
+        reg = SourceRegistry.load(store.sources_path)
+        assert "gone/abcdef123456/x.md" not in reg.entries
+        assert "kept.md" in reg.entries  # a live row is never touched
+        assert audit_registry(store.sources_path).orphan_ingestions == 0
+
+    def test_apply_never_deletes_an_unregistered_file(self, tmp_path: Path) -> None:
+        """Deleting a user's data to satisfy a registry is backwards."""
+        store = self._wiki_with_drift(tmp_path)
+        store.sources_gc(dry_run=False)
+        assert (store.sources_path / "stray.md").is_file()
+
+    def test_list_sources_hides_rows_whose_file_is_gone(self, tmp_path: Path) -> None:
+        """These were handed to the agent as readable sources — it would
+        burn a call on read_source and get 'no such source' back."""
+        store = self._wiki_with_drift(tmp_path)
+        listed = {e.rel_path for e in store.list_sources()}
+        assert listed == {"kept.md"}
+        raw = {e.rel_path for e in store.list_sources(include_missing=True)}
+        assert "gone/abcdef123456/x.md" in raw
+
+    def test_schema_version_is_stamped(self, tmp_path: Path) -> None:
+        from outmem.sources import SCHEMA_VERSION, SourceRegistry
+
+        sources = tmp_path / "s"
+        sources.mkdir()
+        reg = SourceRegistry.load(sources)
+        assert reg._connection().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+    def test_clean_registry_is_clean(self, tmp_path: Path) -> None:
+        from outmem.sources import audit_registry
+
+        store = WikiStore.init(tmp_path / "w")
+        store.sources_path.mkdir(parents=True, exist_ok=True)
+        assert audit_registry(store.sources_path).is_clean

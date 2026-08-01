@@ -67,9 +67,25 @@ def add_source(
     return entry
 
 
-def list_sources(store: WikiStore) -> list[SourceEntry]:
+def list_sources(store: WikiStore, *, include_missing: bool = False) -> list[SourceEntry]:
+    """Registered sources, newest-path-order, excluding rows whose file is gone.
+
+    The registry is not self-cleaning: a source re-ingested after its
+    content changed lands at a new sha-addressed path and the old row
+    survives, and nothing removes a row when a directory is deleted
+    out-of-band. This function never stat'd the filesystem, so those rows
+    were handed to the agent as readable sources — it would spend a call
+    on ``read_source`` and get "no such source" back.
+
+    Filtering here rather than at the call sites keeps the agent's view
+    honest by default. ``include_missing=True`` returns the raw rows for
+    maintenance tooling (``outmem sources gc``).
+    """
     registry = get_registry(store)
-    return sorted(registry.entries.values(), key=lambda e: e.rel_path)
+    entries = sorted(registry.entries.values(), key=lambda e: e.rel_path)
+    if include_missing:
+        return entries
+    return [e for e in entries if (store.sources_path / e.rel_path).is_file()]
 
 
 def get_source(store: WikiStore, rel_path: str) -> SourceEntry | None:

@@ -103,6 +103,34 @@ read-modify-write. Use `xargs -P` across a batch.
 Allowed source types: `.md`, `.txt`, `.csv`, `.json`, `.mmd`,
 `.yaml` / `.yml`. Binary files are rejected — convert upstream.
 
+## Source registry maintenance
+
+```bash
+outmem sources gc            # dry run — report only
+outmem sources gc --apply    # write + commit
+```
+
+Reconciles `wiki/sources/.sources.db` against what is on disk, in both
+directions. Nothing did this before, which is how a registry drifts to
+double-digit percentages of junk unnoticed: `list_sources` never stat'd the
+filesystem, so rows whose file was gone were handed to the agent as readable
+sources it then failed to open.
+
+- **Rows whose file is missing** are removed (`--apply`); the FK cascade takes
+  their ingestion history with it.
+- **Files with no registry row** are reported, never deleted — removing your
+  data to satisfy a registry is backwards. Re-register or remove them yourself.
+- **Orphaned ingestion rows** (parent row gone) are swept; they were invisible
+  before, skipped silently on read but resident forever.
+
+Dry run is the default because `.sources.db` is tracked in git, so every apply
+writes a full blob into history. There is no `VACUUM` and no in-file
+tombstone — `git show HEAD~1:wiki/sources/.sources.db` already recovers the
+exact pre-gc state.
+
+`outmem lint` reports the same drift as `source-orphaned` / `source-unregistered`
+warnings, so CI notices it the day it happens.
+
 ## Import (existing markdown vault)
 
 ```bash

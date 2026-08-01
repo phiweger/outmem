@@ -63,6 +63,9 @@ from outmem.exceptions import OutmemError
 SOURCES_DIR = "sources"
 REGISTRY_FILENAME = ".sources.db"
 
+# Bumped only when the sources/ingestions schema changes shape.
+SCHEMA_VERSION = 1
+
 ALLOWED_EXTENSIONS = frozenset({".md", ".txt", ".csv", ".json", ".mmd", ".yaml", ".yml"})
 
 # 12 hex chars = 48 bits, plenty of headroom against accidental
@@ -359,6 +362,11 @@ def _init_schema(con: sqlite3.Connection) -> None:
         " pages_touched TEXT NOT NULL)"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS ingestions_rel_path ON ingestions(rel_path)")
+    # Stamp a schema version even though nothing reads it yet. There is no
+    # migration framework here, and adding one retroactively means guessing
+    # which shape an existing file is in — this costs one pragma now and is
+    # the difference between a clean migration and a heuristic later.
+    cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     con.commit()
 
 
@@ -390,3 +398,80 @@ def _read_all_entries(con: sqlite3.Connection) -> dict[str, SourceEntry]:
             )
         )
     return entries
+
+
+@dataclass(frozen=True)
+class RegistryAudit:
+    """What ``gc`` found. Every list is repo-relative to ``sources_dir``."""
+
+    missing_files: list[str]  # registered, but the file is gone
+    unregistered: list[str]  # on disk, but no registry row
+    orphan_ingestions: int  # ingestion rows whose parent row is gone
+
+    @property
+    def is_clean(self) -> bool:
+        return not (self.missing_files or self.unregistered or self.orphan_ingestions)
+
+
+def audit_registry(sources_dir: Path) -> RegistryAudit:
+    """Reconcile ``.sources.db`` against what is actually on disk.
+
+    Nothing did this before, which is how a registry reaches double-digit
+    percentages of junk unnoticed: ``list_sources`` never stats the
+    filesystem, so orphaned rows are handed to the agent as readable
+    sources it then fails to open.
+    """
+    registry = SourceRegistry.load(sources_dir)
+    registered = set(registry.entries)
+    missing = sorted(r for r in registered if not (sources_dir / r).is_file())
+    on_disk = {
+        p.relative_to(sources_dir).as_posix()
+        for p in sources_dir.rglob("*")
+        if p.is_file() and p.name != REGISTRY_FILENAME
+    }
+    con = registry._connection()
+    orphans = con.execute(
+        "SELECT COUNT(*) FROM ingestions WHERE rel_path NOT IN (SELECT rel_path FROM sources)"
+    ).fetchone()[0]
+    return RegistryAudit(
+        missing_files=missing,
+        unregistered=sorted(on_disk - registered),
+        orphan_ingestions=int(orphans),
+    )
+
+
+def gc_registry(sources_dir: Path, *, dry_run: bool = True) -> RegistryAudit:
+    """Drop registry rows whose file is gone, plus orphaned ingestions.
+
+    Returns the audit describing what was found (and, unless ``dry_run``,
+    removed). Deliberately conservative in two ways:
+
+    - **Files with no row are reported, never deleted.** Deleting a user's
+      data to satisfy a registry is backwards; that direction is theirs to
+      resolve (re-register or remove).
+    - **``dry_run=True`` by default**, matching ``repair_pages``.
+      ``.sources.db`` is a git-tracked binary, so every apply writes a
+      full blob into history.
+
+    Hard delete rather than tombstoning: ``git show HEAD~1:<db>`` already
+    recovers the exact pre-gc state, so an in-file tombstone would
+    duplicate git at the cost of a schema change and a
+    did-I-filter-tombstones bug class. No ``VACUUM`` either — it would
+    rewrite the whole file and guarantee a maximal diff.
+    """
+    audit = audit_registry(sources_dir)
+    if dry_run or (not audit.missing_files and not audit.orphan_ingestions):
+        return audit
+    registry = SourceRegistry.load(sources_dir)
+    con = registry._connection()
+    with con:
+        for rel_path in audit.missing_files:
+            # FK ON DELETE CASCADE takes the ingestion chain with it — an
+            # ingestion of content nobody can read has no recoverable meaning.
+            con.execute("DELETE FROM sources WHERE rel_path = ?", (rel_path,))
+        con.execute(
+            "DELETE FROM ingestions WHERE rel_path NOT IN (SELECT rel_path FROM sources)"
+        )
+    for rel_path in audit.missing_files:
+        registry.entries.pop(rel_path, None)
+    return audit

@@ -501,6 +501,35 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sources_gc(args: argparse.Namespace) -> int:
+    store = _open_store(args)
+    audit = store.sources_gc(dry_run=not args.apply)
+    if audit.is_clean:
+        _status("sources: registry and disk agree")
+        return 0
+    if audit.missing_files:
+        verb = "removed" if args.apply else "would remove"
+        print(f"{verb} {len(audit.missing_files)} row(s) whose file is gone:")
+        for rel in audit.missing_files[:20]:
+            print(f"  {rel}")
+        if len(audit.missing_files) > 20:
+            print(f"  ... and {len(audit.missing_files) - 20} more")
+    if audit.orphan_ingestions:
+        verb = "removed" if args.apply else "would remove"
+        print(f"{verb} {audit.orphan_ingestions} ingestion row(s) with no source")
+    if audit.unregistered:
+        # Reported, never deleted — removing a user's file to satisfy a
+        # registry is backwards. Re-register it or delete it yourself.
+        print(f"\n{len(audit.unregistered)} file(s) under sources/ with no registry row:")
+        for rel in audit.unregistered[:20]:
+            print(f"  {rel}")
+        if len(audit.unregistered) > 20:
+            print(f"  ... and {len(audit.unregistered) - 20} more")
+    if not args.apply:
+        print("\n(dry run — re-run with --apply to write)")
+    return 0
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     from pathlib import Path as _Path
 
@@ -905,6 +934,25 @@ def build_parser() -> argparse.ArgumentParser:
         "record-run",
         help="Record a successful agent run (timestamp + HEAD).", parents=[root_parent])
     p_record.set_defaults(func=cmd_record_run)
+
+    p_sources = sub.add_parser(
+        "sources",
+        help="Inspect / maintain the source registry.",
+        parents=[root_parent],
+    )
+    sources_sub = p_sources.add_subparsers(dest="sources_command", required=True)
+    p_sources_gc = sources_sub.add_parser(
+        "gc",
+        help="Reconcile .sources.db with disk; drop rows whose file is gone.",
+        parents=[root_parent],
+    )
+    p_sources_gc.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually write. Without this it's a dry run — the registry is "
+        "tracked in git, so every apply commits a full blob.",
+    )
+    p_sources_gc.set_defaults(func=cmd_sources_gc)
 
     p_lint = sub.add_parser(
         "lint",
