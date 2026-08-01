@@ -109,27 +109,56 @@ accumulating beside it. Nothing is deleted — the old file, its sha and its
 ingestion history stay put, which is exactly what [`outmem stale`](#staleness)
 needs to find the pages compacted from a version that is no longer current.
 
-When you omit `--as`, outmem derives the name from the path (`<into>/<filename>`,
-with the hash segment dropped) — and **refuses the ingest** if that name is
-already another file's identity:
+When you omit `--as`, outmem derives the name from the path — and **refuses the
+ingest** if that name is already another file's identity:
 
 ```
-outmem: 'fachinfo/document.md' is already the identity of
-'fachinfo/9b3d0d4e1a35/document.md'. If this file is a new version of that
-document, pass `--as fachinfo/document.md`; if it is a different document
-that happens to share a filename, pass `--as` with a name that distinguishes
-it (e.g. `--as fachinfo/amikacin`).
+outmem: 'fachinfo/document' is already the identity of 'fachinfo/9b3d0d4e1a35/document.md'.
+    that row came from    parsed/fachinfo/aztreonam/output/9b3d0d/document.md
+    this file comes from  parsed/fachinfo/amikacin/output/a1b2c3/document.md
+If this file is a new version of that document, pass `--as fachinfo/document`.
+If it is a different document that happens to share a filename, pass `--as` with a
+name that distinguishes it, e.g. `--as fachinfo/amikacin`.
 ```
 
 It refuses rather than guesses because the two cases are indistinguishable from
-the path alone, and guessing wrong writes a supersession edge that later drives
-a recheck of one drug's page against another drug's source. A pipeline that
-emits `<drug>/output/<hash>/document.md` hits this on its second document —
-pass `--as` from the start and it never comes up. Re-ingesting *identical*
-content is still a no-op, not a refusal.
+the *wiki* path — copying into `<into>/<sha>/<filename>` already discarded what
+told them apart. The **ingest origins** still have it, so both are quoted and
+the suggested name comes from the first segment where they diverge. You read an
+answer rather than inventing one. (When the older row predates `origin_path`,
+the refusal stands but the evidence lines are omitted rather than fabricated.)
 
-The origin path is recorded alongside the entry, because for that pipeline
-shape it is the only place the distinguishing part of the name survives.
+A pipeline that emits `<drug>/output/<hash>/document.md` hits this on its second
+document — pass `--as` from the start and it never comes up. Re-ingesting
+*identical* content is still a no-op, not a refusal.
+
+### What a key looks like
+
+A key names a **document**, not a file, so the derived form drops the two
+properties that change without the document changing:
+
+| ingested as | key |
+|---|---|
+| `fachinfo/9b3d0d4e1a35/document.md` | `fachinfo/document` |
+| `Fachinfo/Document.MD` | `fachinfo/document` |
+
+Dropping the extension is the point: a pipeline that starts exporting `.txt`
+where it used to export `.md` keeps the same identity. Keep it in the key and
+that change starts a new identity **silently** — the exact failure mode
+supersession exists to remove. Note which way this cuts: dropping the extension
+makes *collisions* more likely, and a collision is a refusal, never a merge. So
+`report.md` and `report.csv` under one `--into` now stop and ask rather than
+quietly becoming unrelated documents.
+
+Keys are free-form apart from that normalisation, so when a document has a real
+external identifier, use it — `--as awmf/113-001`, `--as doi/10.1001-jama-2026`.
+Only extensions outmem accepts as source types are stripped, so an identifier's
+dot survives intact.
+
+Keys use `/`, not the `:` of page slugs. That is deliberate: `[[abx:amikacin]]`
+is a page and `fachinfo/amikacin` is a source document, and they appear side by
+side in `outmem stale` output. Keeping them visually disjoint stops an agent
+trying to `read_page` a source key.
 
 **Parallel ingest** is safe — `.sources.db` is SQLite, writers
 serialise on the DB's busy-timeout instead of racing on JSON
@@ -199,18 +228,19 @@ document lands as an unrelated row and supersession never fires. `backfill`
 reads the identity each path implies and assigns it — but **only where exactly
 one row claims it**.
 
-Where several rows share a name it stops and shows you the pages whose
-`provenance:` cites each one, because that is the evidence that settles it: two
-rows cited by *different* pages are different documents; two cited by the same
-page are versions of one.
+Where several rows share a name it stops and shows you the evidence that settles
+it — the pages whose `provenance:` cites each row, and where each was ingested
+from. Different citing pages, or different origins, means different documents:
 
 ```
 2 identit(ies) are claimed by more than one row. …
-  fachinfo/document.md
+  fachinfo/document
       fachinfo/9b3d0d4e1a35/document.md
           cited by [[abx:amikacin]]
+          from     parsed/fachinfo/amikacin/output/9b3d0d/document.md
       fachinfo/c4f10ab7e221/document.md
           cited by [[abx:aztreonam]]
+          from     parsed/fachinfo/aztreonam/output/c4f10a/document.md
       -> re-ingest each with `--as <name>` to resolve
 ```
 

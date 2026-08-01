@@ -22,6 +22,9 @@ from outmem.sources import (
     SourceRegistry,
     compute_sha256,
     copy_source,
+    derive_document_key,
+    distinguishing_segment,
+    normalize_document_key,
     read_source_text,
 )
 
@@ -36,23 +39,34 @@ def get_registry(store: WikiStore) -> SourceRegistry:
     return store._source_registry
 
 
-def derive_logical_key(rel_path: str, sha256: str) -> str | None:
-    """The ``<into>/<filename>`` a content-addressed path implies, or None.
+def _ambiguous_identity_error(
+    candidate: str, clashing: SourceEntry, origin: str
+) -> OutmemError:
+    """Refuse an ambiguous identity, with the evidence and both answers.
 
-    The sha segment is *verified* against the row's own hash rather than
-    pattern-matched, so a directory legitimately named like a hash can't
-    be mistaken for one. Returns None when the path has no verifiable sha
-    segment (a pre-hash-dir flat row — whose ``rel_path`` already is the
-    candidate key).
-
-    This is a **candidate**, never an identity: a pipeline emitting
-    ``document.md`` per drug produces the same candidate for every drug,
-    which is the collision the hash directory exists to survive.
+    The two readings — "a new version of that document" and "a different
+    document that happens to share a filename" — are indistinguishable
+    from the wiki path, because copying into ``<into>/<sha>/<filename>``
+    already discarded what told them apart. The ingest origins still have
+    it, so quote both and propose a name from the first place they
+    diverge: the operator reads an answer instead of inventing one.
     """
-    parts = rel_path.split("/")
-    if len(parts) >= 2 and parts[-2] == sha256[:12]:
-        return "/".join([*parts[:-2], parts[-1]])
-    return None
+    lines = [f"{candidate!r} is already the identity of {clashing.rel_path!r}."]
+    if clashing.origin_path:
+        lines += [
+            f"    that row came from    {clashing.origin_path}",
+            f"    this file comes from  {origin}",
+        ]
+    distinct = distinguishing_segment(origin, clashing.origin_path)
+    namespace = candidate.rsplit("/", 1)[0] if "/" in candidate else ""
+    example = f"{namespace}/{distinct}" if distinct and namespace else distinct
+    lines += [
+        f"If this file is a new version of that document, pass `--as {candidate}`.",
+        "If it is a different document that happens to share a filename, pass "
+        "`--as` with a name that distinguishes it"
+        + (f", e.g. `--as {example}`." if example else " (e.g. `--as fachinfo/amikacin`)."),
+    ]
+    return OutmemError("\n".join(lines))
 
 
 def add_source(
@@ -77,9 +91,10 @@ def add_source(
     if existing and existing.sha256 == sha:
         return existing
 
-    logical_key = as_key
-    if logical_key is None:
-        candidate = derive_logical_key(rel_path, sha) or rel_path
+    if as_key is not None:
+        document_key = normalize_document_key(as_key)
+    else:
+        candidate = derive_document_key(rel_path, sha) or normalize_document_key(rel_path)
         # Refuse rather than guess. A candidate already claimed by a
         # DIFFERENT document means we cannot tell "new version of that" from
         # "different document, same filename" — and guessing wrong writes a
@@ -88,23 +103,17 @@ def add_source(
         clashing = [
             e
             for e in registry.entries.values()
-            if e.logical_key == candidate and e.rel_path != rel_path
+            if e.document_key == candidate and e.rel_path != rel_path
         ]
         if clashing:
-            raise OutmemError(
-                f"{candidate!r} is already the identity of "
-                f"{clashing[0].rel_path!r}. If this file is a new version of "
-                f"that document, pass `--as {candidate}`; if it is a different "
-                "document that happens to share a filename, pass `--as` with a "
-                "name that distinguishes it (e.g. `--as fachinfo/amikacin`)."
-            )
-        logical_key = candidate
+            raise _ambiguous_identity_error(candidate, clashing[0], str(source_path))
+        document_key = candidate
 
     entry = registry.register(
         rel_path,
         sha256=sha,
         size_bytes=dest.stat().st_size,
-        logical_key=logical_key,
+        document_key=document_key,
         origin_path=str(source_path),
     )
     if commit:

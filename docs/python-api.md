@@ -120,7 +120,7 @@ entry.rel_path           # "research/<sha[:12]>/paper.md"
 entry.sha256             # full sha
 entry.size_bytes
 entry.registered_at      # datetime
-entry.logical_key        # "research/marino-2026" — survives a revision
+entry.document_key       # "research/marino-2026" — survives a revision
 entry.superseded_by      # rel_path of the version that replaced this, or None
 entry.origin_path        # where it was ingested from
 
@@ -152,7 +152,7 @@ store.source_citations()   # {source rel_path: [slug, …]} — the reverse
                            # provenance edge, in one walk of wiki/pages/
 
 for c in store.stale_pages():
-    c.slug, c.cited, c.current, c.logical_key
+    c.slug, c.cited, c.current, c.document_key
 ```
 
 `stale_pages()` follows the chain to the newest version and **reports only** —
@@ -162,15 +162,31 @@ run, not a side effect of ingest.
 Omit `as_key` and the identity is derived from the path; `add_source` raises
 `OutmemError` when that derivation is already another document's identity,
 rather than guessing which of "new version" / "different document, same
-filename" was meant.
+filename" was meant. The error quotes both ingest origins and proposes a name
+from the first segment where they diverge.
+
+Keys name a *document*, not a file, and are normalised on both paths — case
+folded, and the source extension dropped — so a `.md` document re-exported as
+`.txt` keeps its identity instead of silently starting a new one:
+
+```python
+from outmem.sources import normalize_document_key
+
+normalize_document_key("Fachinfo/Document.MD")    # "fachinfo/document"
+normalize_document_key("doi/10.1001-jama-2026")   # unchanged — not a source type
+```
+
+Otherwise free-form, so an external identifier (`awmf/113-001`) works as a key.
+They use `/` rather than the `:` of page slugs so a source key is never mistaken
+for a page.
 
 For wikis registered before identity existed:
 
 ```python
-for cand in store.propose_source_keys():
-    cand.logical_key, cand.rows, cand.citing_pages, cand.is_ambiguous
+for cand in store.propose_document_keys():
+    cand.document_key, cand.rows, cand.citing_pages, cand.origins, cand.is_ambiguous
 
-store.assign_source_keys([(rel_path, key), …])   # never overwrites an existing key
+store.assign_document_keys([(rel_path, key), …])   # never overwrites an existing key
 ```
 
 ## Renaming

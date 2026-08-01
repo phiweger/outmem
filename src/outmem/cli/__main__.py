@@ -538,7 +538,7 @@ def cmd_stale(args: argparse.Namespace) -> int:
 
 def cmd_sources_backfill(args: argparse.Namespace) -> int:
     store = _open_store(args)
-    candidates = store.propose_source_keys()
+    candidates = store.propose_document_keys()
     if not candidates:
         _status("sources: every row already has an identity")
         return 0
@@ -548,7 +548,7 @@ def cmd_sources_backfill(args: argparse.Namespace) -> int:
         verb = "assigned" if args.apply else "would assign"
         print(f"{verb} an identity to {len(clear)} row(s):")
         for c in clear[:20]:
-            print(f"  {c.rows[0]}\n      -> {c.logical_key}")
+            print(f"  {c.rows[0]}\n      -> {c.document_key}")
         if len(clear) > 20:
             print(f"  ... and {len(clear) - 20} more")
     if ambiguous:
@@ -556,20 +556,23 @@ def cmd_sources_backfill(args: argparse.Namespace) -> int:
             f"\n{len(ambiguous)} identit(ies) are claimed by more than one row. "
             "outmem cannot tell versions-of-one-document from "
             "different-documents-sharing-a-filename, so these are left alone.\n"
-            "The citing pages are the evidence — different pages means "
-            "different documents:\n"
+            "The citing pages and ingest origins are the evidence — different "
+            "pages, or different origins, means different documents:\n"
         )
         for c in ambiguous[:10]:
-            print(f"  {c.logical_key}")
+            print(f"  {c.document_key}")
             for rel in c.rows:
                 pages = c.citing_pages.get(rel) or []
                 cited = ", ".join(f"[[{p}]]" for p in pages) if pages else "(no page cites it)"
                 print(f"      {rel}\n          cited by {cited}")
+                origin = c.origins.get(rel)
+                if origin:
+                    print(f"          from     {origin}")
             print("      -> re-ingest each with `--as <name>` to resolve\n")
         if len(ambiguous) > 10:
             print(f"  ... and {len(ambiguous) - 10} more")
     if args.apply and clear:
-        store.assign_source_keys([(c.rows[0], c.logical_key) for c in clear])
+        store.assign_document_keys([(c.rows[0], c.document_key) for c in clear])
         _status(f"sources: assigned {len(clear)} identit(ies)")
     elif not args.apply:
         print("\n(dry run — re-run with --apply to write the unambiguous ones)")
@@ -1054,7 +1057,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sources_backfill = sources_sub.add_parser(
         "backfill",
-        help="Propose a logical identity for sources registered before "
+        help="Propose a document identity for sources registered before "
         "supersession existed.",
         parents=[root_parent],
     )

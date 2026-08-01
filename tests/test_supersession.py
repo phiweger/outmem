@@ -2,7 +2,7 @@
 
 ``rel_path`` embeds the content hash, so a revised document lands at a
 *new row* and looks unrelated to the one it replaces. These tests pin the
-identity that survives a revision (``logical_key``), the edge it creates
+identity that survives a revision (``document_key``), the edge it creates
 (``superseded_by``), and the thing that edge is for: finding the pages
 that were compacted from a version no longer current.
 """
@@ -72,7 +72,7 @@ class TestMigration:
 
         entry = reg.entries["abx/aaaaaaaaaaaa/document.md"]
         assert entry.sha256 == "a" * 64
-        assert entry.logical_key is None  # honestly unknown, not guessed
+        assert entry.document_key is None  # honestly unknown, not guessed
         assert entry.superseded_by is None
         assert entry.origin_path is None
         # Ingestion history survives the migration.
@@ -98,14 +98,14 @@ class TestMigration:
             "abx/aaaaaaaaaaaa/document.md",
             sha256="a" * 64,
             size_bytes=12,
-            logical_key="abx/amikacin",
+            document_key="abx/amikacin",
         )
         # Same sha => returns existing, which has no key yet; assign, then
         # a genuinely new version supersedes it.
         con = reg._connection()
         with con:
             con.execute(
-                "UPDATE sources SET logical_key = ? WHERE rel_path = ?",
+                "UPDATE sources SET document_key = ? WHERE rel_path = ?",
                 ("abx/amikacin", "abx/aaaaaaaaaaaa/document.md"),
             )
         reg = SourceRegistry.load(sources)
@@ -113,11 +113,171 @@ class TestMigration:
             "abx/bbbbbbbbbbbb/document.md",
             sha256="b" * 64,
             size_bytes=14,
-            logical_key="abx/amikacin",
+            document_key="abx/amikacin",
         )
         reloaded = SourceRegistry.load(sources)
         old = reloaded.entries["abx/aaaaaaaaaaaa/document.md"]
         assert old.superseded_by == "abx/bbbbbbbbbbbb/document.md"
+
+
+class TestMigrationRepairsARenamedColumn:
+    def test_registry_stamped_v2_without_the_column_repairs_itself(
+        self, tmp_path: Path
+    ) -> None:
+        """An earlier build of this change called the identity column
+        `logical_key` and stamped the same schema version. Gating the
+        migration on the version alone would leave every read failing with
+        "no such column: document_key"."""
+        sources = tmp_path / "sources"
+        sources.mkdir()
+        con = sqlite3.connect(sources / REGISTRY_FILENAME)
+        with con:
+            con.execute(
+                "CREATE TABLE sources ("
+                " rel_path TEXT PRIMARY KEY, sha256 TEXT NOT NULL,"
+                " size_bytes INTEGER NOT NULL, registered_at TEXT NOT NULL,"
+                " logical_key TEXT, superseded_by TEXT, origin_path TEXT)"
+            )
+            con.execute(
+                "CREATE TABLE ingestions ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT, rel_path TEXT NOT NULL"
+                " REFERENCES sources(rel_path) ON DELETE CASCADE,"
+                " timestamp TEXT NOT NULL, prompt TEXT, pages_touched TEXT NOT NULL)"
+            )
+            con.execute(
+                "INSERT INTO sources (rel_path, sha256, size_bytes, registered_at, "
+                "logical_key) VALUES (?, ?, ?, ?, ?)",
+                ("x/aaaaaaaaaaaa/d.md", "a" * 64, 1, "2026-01-01T00:00:00Z", "x/d"),
+            )
+            con.execute("PRAGMA user_version = 2")
+        con.close()
+
+        reg = SourceRegistry.load(sources)
+        assert reg.entries["x/aaaaaaaaaaaa/d.md"].document_key is None
+
+
+# ---------------------------------------------------------------------------
+# Document keys name a document, not a file
+# ---------------------------------------------------------------------------
+
+
+class TestDocumentKeyShape:
+    def test_derived_key_drops_the_source_extension(self, tmp_path: Path) -> None:
+        """An extension is a property of the file, not of the document.
+        Keeping it means a pipeline that switches from .md to .txt starts a
+        new identity *silently* — supersession's whole job is removing the
+        silent break."""
+        store = WikiStore.init(tmp_path / "w")
+        md = tmp_path / "guideline.md"
+        md.write_text("2024 edition\n", encoding="utf-8")
+        entry = store.add_source(md, into_subdir="rki")
+        assert entry.document_key == "rki/guideline"
+
+    def test_format_change_lands_on_the_same_identity(self, tmp_path: Path) -> None:
+        """The payoff: the .txt re-export is refused as ambiguous rather
+        than silently accepted as an unrelated document."""
+        store = WikiStore.init(tmp_path / "w")
+        md = tmp_path / "guideline.md"
+        md.write_text("2024 edition\n", encoding="utf-8")
+        store.add_source(md, into_subdir="rki")
+        txt = tmp_path / "guideline.txt"
+        txt.write_text("2026 edition\n", encoding="utf-8")
+        with pytest.raises(OutmemError, match=r"--as rki/guideline\b"):
+            store.add_source(txt, into_subdir="rki")
+
+    def test_explicit_key_is_normalised_the_same_way(self, tmp_path: Path) -> None:
+        """`--as` and the derived form must agree, or the flag the refusal
+        message suggests would fail to link."""
+        store = WikiStore.init(tmp_path / "w")
+        for name, text, key in (
+            ("v1.md", "one\n", None),
+            ("v2.md", "two\n", "/RKI/Guideline.md"),
+        ):
+            src = tmp_path / name
+            src.write_text(text, encoding="utf-8")
+            store.add_source(src, into_subdir="rki", rename="guideline.md", as_key=key)
+        reg = SourceRegistry.load(store.sources_path)
+        assert {e.document_key for e in reg.entries.values()} == {"rki/guideline"}
+        assert len([e for e in reg.entries.values() if e.superseded_by]) == 1
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("fachinfo/document.md", "fachinfo/document"),
+            ("Fachinfo/Document.MD", "fachinfo/document"),
+            ("/fachinfo//document.md/", "fachinfo/document"),
+            # An external identifier is not a filename — its dot survives,
+            # because `.1001-jama-2026` is not a source type.
+            ("doi/10.1001-jama-2026", "doi/10.1001-jama-2026"),
+            ("awmf/113-001", "awmf/113-001"),
+        ],
+    )
+    def test_normalisation(self, raw: str, expected: str) -> None:
+        from outmem.sources import normalize_document_key
+
+        assert normalize_document_key(raw) == expected
+
+    def test_empty_key_is_rejected(self) -> None:
+        from outmem.sources import normalize_document_key
+
+        with pytest.raises(OutmemError, match="not a usable document identity"):
+            normalize_document_key("  //  ")
+
+
+class TestRefusalQuotesTheOrigins:
+    def test_proposes_the_segment_where_the_two_origins_diverge(
+        self, tmp_path: Path
+    ) -> None:
+        """The wiki path discarded what told these apart; the ingest
+        origins still have it. Read the answer instead of inventing it."""
+        store = WikiStore.init(tmp_path / "w")
+        first = tmp_path / "parsed" / "fachinfo" / "aztreonam" / "out" / "document.md"
+        first.parent.mkdir(parents=True)
+        first.write_text("aztreonam\n", encoding="utf-8")
+        store.add_source(first, into_subdir="fachinfo")
+
+        second = tmp_path / "parsed" / "fachinfo" / "amikacin" / "out" / "document.md"
+        second.parent.mkdir(parents=True)
+        second.write_text("amikacin\n", encoding="utf-8")
+        with pytest.raises(OutmemError) as exc:
+            store.add_source(second, into_subdir="fachinfo")
+
+        msg = str(exc.value)
+        assert "aztreonam" in msg and "amikacin" in msg  # both origins quoted
+        assert "--as fachinfo/document" in msg  # the "new version" answer
+        assert "--as fachinfo/amikacin" in msg  # the "different document" answer
+
+    def test_no_proposal_when_the_divergence_is_a_hash(self, tmp_path: Path) -> None:
+        """`--as fachinfo/9b3d0d4e1a35` would be worse than no suggestion."""
+        from outmem.sources import distinguishing_segment
+
+        assert (
+            distinguishing_segment(
+                "parsed/9b3d0d4e1a35/document.md", "parsed/a1b2c3d4e5f6/document.md"
+            )
+            is None
+        )
+
+    def test_no_proposal_when_the_older_origin_is_unknown(
+        self, tmp_path: Path
+    ) -> None:
+        """Historical rows have no origin — refuse just as firmly, but
+        don't invent evidence."""
+        store = WikiStore.init(tmp_path / "w")
+        store.sources_path.mkdir(parents=True, exist_ok=True)
+        reg = SourceRegistry.load(store.sources_path)
+        reg.register(
+            "rki/aaaaaaaaaaaa/guideline.md",
+            sha256="a" * 64,
+            size_bytes=1,
+            document_key="rki/guideline",
+        )
+        store._source_registry = None
+        src = tmp_path / "guideline.md"
+        src.write_text("new\n", encoding="utf-8")
+        with pytest.raises(OutmemError) as exc:
+            store.add_source(src, into_subdir="rki")
+        assert "came from" not in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +348,7 @@ class TestStalePages:
         assert stale[0].slug == "abx:amikacin"
         assert stale[0].cited == old
         assert stale[0].current == new
-        assert stale[0].logical_key == "abx/amikacin"
+        assert stale[0].document_key == "abx/amikacin"
 
     def test_citing_the_current_version_is_not_stale(self, tmp_path: Path) -> None:
         store, _old, new = _wiki_with_a_superseded_source(tmp_path)
@@ -270,7 +430,7 @@ class TestIngestAsFlag:
         assert rc == 0
         reg = SourceRegistry.load(store.sources_path)
         (entry,) = reg.entries.values()
-        assert entry.logical_key == "fachinfo/amikacin"
+        assert entry.document_key == "fachinfo/amikacin"
 
     def test_as_flag_supersedes_across_two_cli_runs(self, tmp_path: Path) -> None:
         store = WikiStore.init(tmp_path / "w")
@@ -338,8 +498,8 @@ class TestProposeSourceKeys:
         self, tmp_path: Path
     ) -> None:
         store = _wiki_needing_backfill(tmp_path)
-        (clear,) = [c for c in store.propose_source_keys() if not c.is_ambiguous]
-        assert clear.logical_key == "rki/ratgeber.md"
+        (clear,) = [c for c in store.propose_document_keys() if not c.is_ambiguous]
+        assert clear.document_key == "rki/ratgeber"
         assert clear.rows == ["rki/aaaaaaaaaaaa/ratgeber.md"]
 
     def test_shared_filename_is_ambiguous_with_citing_pages_as_evidence(
@@ -349,8 +509,8 @@ class TestProposeSourceKeys:
         them would declare one the successor of the other and later drive
         a recheck of amikacin's page against aztreonam's source."""
         store = _wiki_needing_backfill(tmp_path)
-        (amb,) = [c for c in store.propose_source_keys() if c.is_ambiguous]
-        assert amb.logical_key == "abx/document.md"
+        (amb,) = [c for c in store.propose_document_keys() if c.is_ambiguous]
+        assert amb.document_key == "abx/document"
         assert set(amb.rows) == {
             "abx/bbbbbbbbbbbb/document.md",
             "abx/cccccccccccc/document.md",
@@ -368,8 +528,8 @@ class TestProposeSourceKeys:
         reg = SourceRegistry.load(store.sources_path)
         reg.register("deadbeefcafe/notes.md", sha256="f" * 64, size_bytes=1)
         store._source_registry = None
-        (cand,) = store.propose_source_keys()
-        assert cand.logical_key == "deadbeefcafe/notes.md"
+        (cand,) = store.propose_document_keys()
+        assert cand.document_key == "deadbeefcafe/notes"
 
     def test_rows_that_already_have_an_identity_are_skipped(
         self, tmp_path: Path
@@ -378,19 +538,19 @@ class TestProposeSourceKeys:
         src = tmp_path / "s.md"
         src.write_text("x\n", encoding="utf-8")
         store.add_source(src, as_key="explicit")
-        assert store.propose_source_keys() == []
+        assert store.propose_document_keys() == []
 
 
 class TestAssignSourceKeys:
     def test_writes_the_key_and_persists_it(self, tmp_path: Path) -> None:
         store = _wiki_needing_backfill(tmp_path)
-        written = store.assign_source_keys(
-            [("rki/aaaaaaaaaaaa/ratgeber.md", "rki/ratgeber.md")]
+        written = store.assign_document_keys(
+            [("rki/aaaaaaaaaaaa/ratgeber.md", "rki/ratgeber")]
         )
         assert written == 1
         reg = SourceRegistry.load(store.sources_path)
-        assert reg.entries["rki/aaaaaaaaaaaa/ratgeber.md"].logical_key == (
-            "rki/ratgeber.md"
+        assert reg.entries["rki/aaaaaaaaaaaa/ratgeber.md"].document_key == (
+            "rki/ratgeber"
         )
 
     def test_never_overwrites_an_explicit_identity(self, tmp_path: Path) -> None:
@@ -399,9 +559,9 @@ class TestAssignSourceKeys:
         src = tmp_path / "s.md"
         src.write_text("x\n", encoding="utf-8")
         entry = store.add_source(src, as_key="explicit")
-        assert store.assign_source_keys([(entry.rel_path, "guessed")]) == 0
+        assert store.assign_document_keys([(entry.rel_path, "guessed")]) == 0
         reg = SourceRegistry.load(store.sources_path)
-        assert reg.entries[entry.rel_path].logical_key == "explicit"
+        assert reg.entries[entry.rel_path].document_key == "explicit"
 
 
 class TestBackfillCommand:
@@ -413,10 +573,10 @@ class TestBackfillCommand:
         assert rc == 0
         out = capsys.readouterr().out
         assert "would assign" in out
-        assert "rki/ratgeber.md" in out
+        assert "rki/ratgeber" in out
         assert "dry run" in out
         reg = SourceRegistry.load(store.sources_path)
-        assert reg.entries["rki/aaaaaaaaaaaa/ratgeber.md"].logical_key is None
+        assert reg.entries["rki/aaaaaaaaaaaa/ratgeber.md"].document_key is None
 
     def test_apply_writes_only_the_unambiguous_rows(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -425,13 +585,13 @@ class TestBackfillCommand:
         assert main(["sources", "backfill", "--root", str(store.root), "--apply"]) == 0
         capsys.readouterr()
         reg = SourceRegistry.load(store.sources_path)
-        assert reg.entries["rki/aaaaaaaaaaaa/ratgeber.md"].logical_key == (
-            "rki/ratgeber.md"
+        assert reg.entries["rki/aaaaaaaaaaaa/ratgeber.md"].document_key == (
+            "rki/ratgeber"
         )
         # The colliding pair is left alone — outmem cannot tell versions of
         # one document from two documents that share a filename.
-        assert reg.entries["abx/bbbbbbbbbbbb/document.md"].logical_key is None
-        assert reg.entries["abx/cccccccccccc/document.md"].logical_key is None
+        assert reg.entries["abx/bbbbbbbbbbbb/document.md"].document_key is None
+        assert reg.entries["abx/cccccccccccc/document.md"].document_key is None
 
     def test_ambiguous_groups_print_their_citing_pages(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -439,10 +599,32 @@ class TestBackfillCommand:
         store = _wiki_needing_backfill(tmp_path)
         main(["sources", "backfill", "--root", str(store.root)])
         out = capsys.readouterr().out
-        assert "abx/document.md" in out
+        assert "abx/document" in out
         assert "[[abx:amikacin]]" in out
         assert "[[abx:aztreonam]]" in out
         assert "--as" in out
+
+    def test_ambiguous_groups_print_known_origins(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Origins are evidence even when nothing cites either row yet."""
+        store = WikiStore.init(tmp_path / "w")
+        for drug in ("amikacin", "aztreonam"):
+            src = tmp_path / "parsed" / drug / "document.md"
+            src.parent.mkdir(parents=True)
+            src.write_text(f"{drug}\n", encoding="utf-8")
+            store.add_source(src, into_subdir="abx", as_key=f"tmp/{drug}")
+        # Strip the identities to recreate the pre-0.7 shape, keeping origins.
+        con = SourceRegistry.load(store.sources_path)._connection()
+        with con:
+            con.execute("UPDATE sources SET document_key = NULL")
+        store._source_registry = None
+
+        main(["sources", "backfill", "--root", str(store.root)])
+        out = capsys.readouterr().out
+        assert "abx/document" in out
+        assert "parsed/amikacin/document.md" in out
+        assert "parsed/aztreonam/document.md" in out
 
     def test_nothing_to_do_exits_zero(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -460,8 +642,8 @@ class TestBackfillCommand:
         # Second run finds only the ambiguous pair, which it never resolves.
         assert main(["sources", "backfill", "--root", str(store.root), "--apply"]) == 0
         reg = SourceRegistry.load(store.sources_path)
-        assert reg.entries["rki/aaaaaaaaaaaa/ratgeber.md"].logical_key == (
-            "rki/ratgeber.md"
+        assert reg.entries["rki/aaaaaaaaaaaa/ratgeber.md"].document_key == (
+            "rki/ratgeber"
         )
 
 
@@ -475,7 +657,7 @@ def test_v06_wiki_backfills_then_supersedes_then_surfaces_the_page(
 ) -> None:
     """The whole journey for a wiki that predates identity.
 
-    v0.6 rows have no ``logical_key``, so a re-ingest lands as an
+    v0.6 rows have no ``document_key``, so a re-ingest lands as an
     unrelated row and nothing notices. Backfill gives the old row an
     identity; the re-ingest is then *refused* rather than guessed at, and
     once resolved it supersedes — surfacing the page compacted from the
@@ -485,10 +667,10 @@ def test_v06_wiki_backfills_then_supersedes_then_surfaces_the_page(
     v1 = tmp_path / "v1.md"
     v1.write_text("guideline, 2024\n", encoding="utf-8")
     e1 = store.add_source(v1, into_subdir="rki", rename="ratgeber.md")
-    # Simulate a v0.6 row: registered before logical_key existed.
+    # Simulate a v0.6 row: registered before document_key existed.
     con = SourceRegistry.load(store.sources_path)._connection()
     with con:
-        con.execute("UPDATE sources SET logical_key = NULL")
+        con.execute("UPDATE sources SET document_key = NULL")
     store._source_registry = None
     store.write_page(
         "rki:ratgeber",
@@ -498,20 +680,20 @@ def test_v06_wiki_backfills_then_supersedes_then_surfaces_the_page(
     )
     assert store.stale_pages() == []  # no identity, so no supersession
 
-    (cand,) = store.propose_source_keys()
+    (cand,) = store.propose_document_keys()
     assert not cand.is_ambiguous
-    store.assign_source_keys([(cand.rows[0], cand.logical_key)])
+    store.assign_document_keys([(cand.rows[0], cand.document_key)])
 
     v2 = tmp_path / "v2.md"
     v2.write_text("guideline, 2026 revision\n", encoding="utf-8")
     # The key is now claimed, and a bare path cannot say whether this is the
     # next version or a different document — so outmem asks instead of
     # guessing, and names the exact flag that answers it.
-    with pytest.raises(OutmemError, match=r"rki/ratgeber\.md"):
+    with pytest.raises(OutmemError, match=r"--as rki/ratgeber\b"):
         store.add_source(v2, into_subdir="rki", rename="ratgeber.md")
 
     e2 = store.add_source(
-        v2, into_subdir="rki", rename="ratgeber.md", as_key="rki/ratgeber.md"
+        v2, into_subdir="rki", rename="ratgeber.md", as_key="rki/ratgeber"
     )
     (stale,) = store.stale_pages()
     assert stale.slug == "rki:ratgeber"

@@ -1049,24 +1049,24 @@ class WikiStore:
                         slug=slug,
                         cited=rel_path,
                         current=current,
-                        logical_key=entry.logical_key or "",
+                        document_key=entry.document_key or "",
                     )
                 )
         return out
 
-    def propose_source_keys(self) -> list[KeyCandidate]:
-        """Candidate ``logical_key`` groupings for rows that predate identity."""
-        from outmem.sources import propose_logical_keys
+    def propose_document_keys(self) -> list[KeyCandidate]:
+        """Candidate ``document_key`` groupings for rows that predate identity."""
+        from outmem.sources import propose_document_keys
 
-        return propose_logical_keys(
+        return propose_document_keys(
             _sources.get_registry(self), self.source_citations()
         )
 
-    def assign_source_keys(self, pairs: Sequence[tuple[str, str]]) -> int:
-        """Set ``logical_key`` on rows that have none. Commits once.
+    def assign_document_keys(self, pairs: Sequence[tuple[str, str]]) -> int:
+        """Set ``document_key`` on rows that have none. Commits once.
 
         Only ever called with unambiguous candidates — see
-        :meth:`propose_source_keys`. Refuses to overwrite an existing key,
+        :meth:`propose_document_keys`. Refuses to overwrite an existing key,
         so re-running is safe and an explicit ``--as`` always wins.
         """
         registry = _sources.get_registry(self)
@@ -1075,18 +1075,18 @@ class WikiStore:
         with con:
             for rel_path, key in pairs:
                 entry = registry.entries.get(rel_path)
-                if entry is None or entry.logical_key is not None:
+                if entry is None or entry.document_key is not None:
                     continue
                 con.execute(
-                    "UPDATE sources SET logical_key = ? WHERE rel_path = ?",
+                    "UPDATE sources SET document_key = ? WHERE rel_path = ?",
                     (key, rel_path),
                 )
-                entry.logical_key = key
+                entry.document_key = key
                 written += 1
         if written:
             self._commit_paths(
                 [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
-                subject=f"sources: assign {written} logical identit(ies)",
+                subject=f"sources: assign {written} document identit(ies)",
             )
         return written
 

@@ -21,7 +21,10 @@ Registry format
         rel_path      TEXT PRIMARY KEY,
         sha256        TEXT NOT NULL,
         size_bytes    INTEGER NOT NULL,
-        registered_at TEXT NOT NULL
+        registered_at TEXT NOT NULL,
+        document_key  TEXT,   -- which document this file is a version of
+        superseded_by TEXT,   -- rel_path of the version that replaced it
+        origin_path   TEXT    -- where it was ingested from
     );
 
     CREATE TABLE ingestions (
@@ -39,10 +42,15 @@ The rollback-journal choice (not WAL) means the main ``.sources.db``
 file always reflects committed state, so it's a normal git-tracked
 binary with no ``-wal`` / ``-shm`` companion files.
 
+The last three columns arrived with schema v2 and are added in place by
+:func:`_migrate` on open, so an existing registry never needs rebuilding.
+
 Layout: every source lives at
 ``<sources_dir>/[<into>/]<sha256[:12]>/<filename>``. The hash
 directory makes the layout collision-free and dedupes
-identical-content re-ingests.
+identical-content re-ingests — and is exactly why ``document_key``
+exists, since it also makes a *revised* document look unrelated to the
+one it replaces.
 """
 
 from __future__ import annotations
@@ -91,11 +99,11 @@ class SourceEntry:
     registered_at: datetime
     size_bytes: int
     ingestions: list[IngestionRecord] = field(default_factory=list)
-    logical_key: str | None = None
+    document_key: str | None = None
     """Which *document* this file is a version of.
 
     ``rel_path`` embeds the content hash, so a revised document lands at a
-    new path and looks like an unrelated row. ``logical_key`` is the
+    new path and looks like an unrelated row. ``document_key`` is the
     identity that survives a revision — set explicitly at ingest
     (``--as``), because no derivation can tell "same document, new
     version" from "different document, same filename" in general.
@@ -109,6 +117,88 @@ class SourceEntry:
     ``.../<drug>/output/<hash>/document.md`` puts the distinguishing part
     here and nowhere else.
     """
+
+
+def normalize_document_key(raw: str) -> str:
+    """Canonical form of a document identity.
+
+    A document key names a *document*, not a file, so the two properties
+    that change without the document changing are dropped: case, and the
+    source file's extension. A pipeline that starts exporting ``.txt``
+    where it used to export ``.md`` keeps the same identity — the raw
+    path would silently start a new one, and a *silent* break is the one
+    failure mode supersession exists to remove.
+
+    Only extensions outmem accepts as sources are stripped, so an
+    external identifier survives intact: ``doi/10.1001-jama-2026`` keeps
+    its dot because ``.1001-jama-2026`` is not a source type.
+
+    Note the direction this moves in — dropping the extension makes
+    *collisions* more likely, and a collision is a refusal, never a
+    merge. ``report.md`` and ``report.csv`` under one ``--into`` now stop
+    and ask instead of quietly becoming unrelated documents.
+    """
+    key = "/".join(part for part in raw.strip().lower().split("/") if part)
+    if not key:
+        raise OutmemError(f"{raw!r} is not a usable document identity (it is empty).")
+    head, dot, ext = key.rpartition(".")
+    if dot and head and f".{ext}" in ALLOWED_EXTENSIONS:
+        key = head
+    return key
+
+
+def derive_document_key(rel_path: str, sha256: str) -> str | None:
+    """The identity a content-addressed path implies, or None.
+
+    The sha segment is *verified* against the row's own hash rather than
+    pattern-matched, so a directory legitimately named like a hash can't
+    be mistaken for one. Returns None when the path has no verifiable sha
+    segment (a pre-hash-dir flat row — whose ``rel_path`` already is the
+    candidate).
+
+    This is a **candidate**, never an identity. The derivation reads the
+    wiki path, which has already discarded the distinguishing part: a
+    pipeline emitting ``document.md`` per drug produces the same
+    candidate for every drug — the collision the hash directory exists to
+    survive. ``origin_path`` is where that part survives, which is why
+    the refusal quotes it.
+    """
+    parts = rel_path.split("/")
+    if len(parts) >= 2 and parts[-2] == sha256[:SHA_PREFIX_LEN]:
+        return normalize_document_key("/".join([*parts[:-2], parts[-1]]))
+    return None
+
+
+def distinguishing_segment(origin: str | None, other: str | None) -> str | None:
+    """The first path segment where two ingest origins diverge.
+
+    When two files derive the same document key, this is the part of
+    their provenance that tells them apart — for a
+    ``parsed/fachinfo/<drug>/output/<hash>/document.md`` pipeline it is
+    the drug, which is exactly the name the operator wants to pass to
+    ``--as``. The *first* divergence rather than the last, because that
+    is the most general distinguishing segment; deeper ones tend to be
+    hashes.
+
+    Returns None when either origin is unknown (a historical row), when
+    the paths never diverge before the filename, or when the divergence
+    is itself a hash — proposing ``--as fachinfo/a1b2c3d4`` would be
+    worse than proposing nothing.
+    """
+    if not origin or not other:
+        return None
+    # Different-length origins are the norm; the common prefix is all we
+    # can compare, so strict=False is the intent, not an oversight.
+    for mine, theirs in zip(
+        Path(origin).parts[:-1], Path(other).parts[:-1], strict=False
+    ):
+        if mine == theirs:
+            continue
+        stripped = mine.lower().lstrip("0123456789abcdef")
+        if not stripped and len(mine) >= 8:
+            return None  # a hash directory is not a name
+        return mine
+    return None
 
 
 @dataclass
@@ -142,12 +232,12 @@ class SourceRegistry:
     # Mutations
     # ------------------------------------------------------------------
 
-    def latest_for(self, logical_key: str) -> SourceEntry | None:
-        """The current (un-superseded) version of ``logical_key``, if any."""
+    def latest_for(self, document_key: str) -> SourceEntry | None:
+        """The current (un-superseded) version of ``document_key``, if any."""
         candidates = [
             e
             for e in self.entries.values()
-            if e.logical_key == logical_key and e.superseded_by is None
+            if e.document_key == document_key and e.superseded_by is None
         ]
         if not candidates:
             return None
@@ -160,7 +250,7 @@ class SourceRegistry:
         sha256: str,
         size_bytes: int,
         when: datetime | None = None,
-        logical_key: str | None = None,
+        document_key: str | None = None,
         origin_path: str | None = None,
     ) -> SourceEntry:
         """Add or refresh an entry. Returns the canonical entry.
@@ -168,7 +258,7 @@ class SourceRegistry:
         Re-registering with the same hash returns the existing entry
         unchanged.
 
-        When ``logical_key`` is given and a live version of that document
+        When ``document_key`` is given and a live version of that document
         already exists, this registration **supersedes** it: the older row
         keeps its file, its sha and its ingestion history, and gains a
         ``superseded_by`` pointer to this one. Nothing is deleted —
@@ -185,7 +275,7 @@ class SourceRegistry:
             return existing
 
         ts = when.replace(microsecond=0) if when else utc_now()
-        predecessor = self.latest_for(logical_key) if logical_key else None
+        predecessor = self.latest_for(document_key) if document_key else None
         if predecessor is not None and predecessor.rel_path == rel_path:
             predecessor = None  # re-registering the same path, not a new version
 
@@ -195,16 +285,16 @@ class SourceRegistry:
             registered_at=ts,
             size_bytes=size_bytes,
             ingestions=[],
-            logical_key=logical_key,
+            document_key=document_key,
             origin_path=origin_path,
         )
         con = self._connection()
         with con:
             con.execute(
                 "INSERT OR REPLACE INTO sources "
-                "(rel_path, sha256, size_bytes, registered_at, logical_key, "
+                "(rel_path, sha256, size_bytes, registered_at, document_key, "
                 "superseded_by, origin_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (rel_path, sha256, size_bytes, format_iso_z(ts), logical_key,
+                (rel_path, sha256, size_bytes, format_iso_z(ts), document_key,
                  None, origin_path),
             )
             # INSERT OR REPLACE preserves the row, so FK ON DELETE
@@ -435,16 +525,22 @@ def _migrate(con: sqlite3.Connection) -> None:
     only share a filename (see ``outmem sources backfill``).
     """
     version = con.execute("PRAGMA user_version").fetchone()[0]
-    if version >= SCHEMA_VERSION:
-        return
     existing = {row[1] for row in con.execute("PRAGMA table_info(sources)")}
+    wanted = ("document_key", "superseded_by", "origin_path")
+    missing = [c for c in wanted if c not in existing]
+    # The version is the fast path; the columns are the actual
+    # precondition. Checking both means a registry stamped v2 by an
+    # earlier build of this change — when the identity column was still
+    # called `logical_key` — repairs itself on open instead of failing
+    # every read with "no such column".
+    if version >= SCHEMA_VERSION and not missing:
+        return
     with con:
-        for column in ("logical_key", "superseded_by", "origin_path"):
-            if column not in existing:
-                con.execute(f"ALTER TABLE sources ADD COLUMN {column} TEXT")
+        for column in missing:
+            con.execute(f"ALTER TABLE sources ADD COLUMN {column} TEXT")
         con.execute(
-            "CREATE INDEX IF NOT EXISTS sources_logical_key "
-            "ON sources(logical_key)"
+            "CREATE INDEX IF NOT EXISTS sources_document_key "
+            "ON sources(document_key)"
         )
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -453,14 +549,14 @@ def _read_all_entries(con: sqlite3.Connection) -> dict[str, SourceEntry]:
     cur = con.cursor()
     entries: dict[str, SourceEntry] = {}
     for row in cur.execute(
-        "SELECT rel_path, sha256, size_bytes, registered_at, logical_key, "
+        "SELECT rel_path, sha256, size_bytes, registered_at, document_key, "
         "superseded_by, origin_path FROM sources ORDER BY rel_path"
     ).fetchall():
         entries[row["rel_path"]] = SourceEntry(
             rel_path=row["rel_path"],
             sha256=row["sha256"],
             registered_at=parse_iso_z(row["registered_at"]),
-            logical_key=row["logical_key"],
+            document_key=row["document_key"],
             superseded_by=row["superseded_by"],
             origin_path=row["origin_path"],
             size_bytes=int(row["size_bytes"]),
@@ -566,16 +662,23 @@ class StaleCitation:
     slug: str
     cited: str  # rel_path the page's provenance names
     current: str  # rel_path of the version that replaced it
-    logical_key: str
+    document_key: str
 
 
 @dataclass(frozen=True)
 class KeyCandidate:
-    """A proposed ``logical_key`` for rows that predate identity."""
+    """A proposed ``document_key`` for rows that predate identity."""
 
-    logical_key: str
+    document_key: str
     rows: list[str]  # rel_paths sharing this candidate
     citing_pages: dict[str, list[str]]  # rel_path -> slugs whose provenance cites it
+    origins: dict[str, str | None] = field(default_factory=dict)
+    """rel_path -> where that file was ingested from, when known.
+
+    The second half of the evidence: two rows from
+    ``parsed/fachinfo/amikacin/…`` and ``parsed/fachinfo/aztreonam/…``
+    are visibly different documents even when nothing cites either yet.
+    """
 
     @property
     def is_ambiguous(self) -> bool:
@@ -583,14 +686,15 @@ class KeyCandidate:
 
         Cannot be resolved mechanically: the rows are either versions of
         one document or different documents that share a filename, and
-        nothing outmem recorded distinguishes them. ``citing_pages`` is
-        the evidence a human needs — two rows cited by *different* pages
-        are different documents; two cited by the same page are versions.
+        nothing outmem *derives* distinguishes them. ``citing_pages`` and
+        ``origins`` are the evidence a human needs — two rows cited by
+        *different* pages are different documents; two cited by the same
+        page are versions.
         """
         return len(self.rows) > 1
 
 
-def propose_logical_keys(
+def propose_document_keys(
     registry: SourceRegistry,
     citations: dict[str, list[str]] | None = None,
 ) -> list[KeyCandidate]:
@@ -601,18 +705,21 @@ def propose_logical_keys(
     """
     citations = citations or {}
     groups: dict[str, list[str]] = {}
+    origins: dict[str, str | None] = {}
     for entry in sorted(registry.entries.values(), key=lambda e: e.rel_path):
-        if entry.logical_key is not None:
+        if entry.document_key is not None:
             continue
-        parts = entry.rel_path.split("/")
-        if len(parts) >= 2 and parts[-2] == entry.sha256[:12]:
-            candidate = "/".join([*parts[:-2], parts[-1]])
-        else:
-            candidate = entry.rel_path  # pre-hash-dir row: already the key
+        # A pre-hash-dir flat row has no sha segment to strip; its own
+        # rel_path is already the candidate.
+        candidate = derive_document_key(entry.rel_path, entry.sha256)
+        if candidate is None:
+            candidate = normalize_document_key(entry.rel_path)
         groups.setdefault(candidate, []).append(entry.rel_path)
+        origins[entry.rel_path] = entry.origin_path
     return [
         KeyCandidate(
-            logical_key=key,
+            document_key=key,
+            origins={r: origins.get(r) for r in rows},
             rows=rows,
             citing_pages={r: citations.get(r, []) for r in rows},
         )
