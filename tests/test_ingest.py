@@ -349,13 +349,66 @@ def test_add_source_same_name_different_content_no_collision(tmp_path: Path) -> 
     b = tmp_path / "aztreonam-document.md"
     b.write_text("aztreonam fachinfo\n", encoding="utf-8")
 
-    ea = store.add_source(a, into_subdir="abx", rename="document.md")
-    eb = store.add_source(b, into_subdir="abx", rename="document.md")
+    ea = store.add_source(a, into_subdir="abx", rename="document.md", as_key="abx:amikacin")
+    eb = store.add_source(b, into_subdir="abx", rename="document.md", as_key="abx:aztreonam")
 
     assert ea.rel_path != eb.rel_path
     assert ea.sha256 != eb.sha256
     reg = SourceRegistry.load(store.sources_path)
     assert ea.rel_path in reg.entries
     assert eb.rel_path in reg.entries
+    # Distinct identities, so neither supersedes the other.
+    assert reg.entries[ea.rel_path].superseded_by is None
+    assert reg.entries[eb.rel_path].superseded_by is None
 
 
+
+
+def test_ambiguous_identity_is_refused_rather_than_guessed(tmp_path: Path) -> None:
+    """Two different documents sharing a filename derive the same candidate
+    identity. outmem cannot tell that from "a new version of the first", and
+    guessing would write a supersession edge that later drives a recheck of
+    one drug's page against another's — so it refuses and asks for `--as`."""
+    store = WikiStore.init(tmp_path / "w")
+    a = tmp_path / "a.md"
+    a.write_text("amikacin fachinfo\n", encoding="utf-8")
+    b = tmp_path / "b.md"
+    b.write_text("aztreonam fachinfo\n", encoding="utf-8")
+
+    store.add_source(a, into_subdir="abx", rename="document.md")
+    with pytest.raises(OutmemError, match="already the identity of"):
+        store.add_source(b, into_subdir="abx", rename="document.md")
+
+
+def test_same_key_supersedes_the_previous_version(tmp_path: Path) -> None:
+    """A revision of the SAME document links to its predecessor. Nothing is
+    deleted — the old file, its sha and its ingestion history are what
+    `outmem stale` needs to find pages still citing it."""
+    store = WikiStore.init(tmp_path / "w")
+    v1 = tmp_path / "v1.md"
+    v1.write_text("dosing v1\n", encoding="utf-8")
+    e1 = store.add_source(v1, into_subdir="abx", rename="document.md",
+                          as_key="abx:amikacin")
+    v2 = tmp_path / "v2.md"
+    v2.write_text("dosing v2, revised\n", encoding="utf-8")
+    e2 = store.add_source(v2, into_subdir="abx", rename="document.md",
+                          as_key="abx:amikacin")
+
+    reg = SourceRegistry.load(store.sources_path)
+    assert reg.entries[e1.rel_path].superseded_by == e2.rel_path
+    assert reg.entries[e2.rel_path].superseded_by is None
+    assert reg.latest_for("abx:amikacin").rel_path == e2.rel_path
+    # Both files survive; supersession is an edge, not a deletion.
+    assert (store.sources_path / e1.rel_path).is_file()
+
+
+def test_origin_path_is_recorded(tmp_path: Path) -> None:
+    """The field that would have disambiguated the historical rows and was
+    previously discarded."""
+    store = WikiStore.init(tmp_path / "w")
+    src = tmp_path / "deep" / "amikacin" / "document.md"
+    src.parent.mkdir(parents=True)
+    src.write_text("x\n", encoding="utf-8")
+    entry = store.add_source(src, into_subdir="abx", as_key="abx:amikacin")
+    assert entry.origin_path is not None
+    assert "amikacin" in entry.origin_path

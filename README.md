@@ -180,6 +180,21 @@ source. Parallel `outmem ingest` runs are safe (SQLite serialises
 writers). See [docs/cli.md](docs/cli.md#ingestion-requires-outmemagent)
 for `--register-only`, re-ingest semantics, and file-type rules.
 
+**When a source gets a new version**, name the document with `--as` so the
+revision supersedes its predecessor instead of landing beside it:
+
+```bash
+outmem ingest fachinfo/amikacin/2026/document.md --into fachinfo \
+    --as fachinfo/amikacin
+outmem stale        # pages compacted from a version that is no longer current
+```
+
+Because the path embeds the content hash, a revision is otherwise
+indistinguishable from an unrelated file. `--as` is what turns `provenance:`
+from an audit trail into a signal: it tells you exactly which pages to
+re-check when a guideline is republished. See
+[docs/cli.md](docs/cli.md#as-which-document-is-this-a-version-of).
+
 ### Import an existing markdown vault (Obsidian, plain notes folder)
 
 ```bash

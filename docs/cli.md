@@ -89,12 +89,47 @@ outmem ingest path/to/guide.md --into veterinary --register-only
 # Register + invoke the agent with an optional focus prompt.
 outmem ingest path/to/guide.md --into veterinary \
     --prompt "extract drug dosages for cats"
+
+# Say which document this file is a version of.
+outmem ingest parsed/fachinfo/amikacin/output/a1b2/document.md \
+    --into fachinfo --as fachinfo/amikacin
 ```
 
 Sources land at `wiki/sources/[<into>/]<sha256[:12]>/<filename>`
 (tracked in git) and are registered in `wiki/sources/.sources.db`
 (SQLite). The hash directory keeps the layout collision-free; the
 same file ingested twice deduplicates to the same dir.
+
+### `--as`: which document is this a version of?
+
+Because the path embeds the content hash, a *revised* document lands at a new
+path and looks like an unrelated source. `--as` gives it a name that survives
+the revision, so the new version **supersedes** the old one instead of
+accumulating beside it. Nothing is deleted — the old file, its sha and its
+ingestion history stay put, which is exactly what [`outmem stale`](#staleness)
+needs to find the pages compacted from a version that is no longer current.
+
+When you omit `--as`, outmem derives the name from the path (`<into>/<filename>`,
+with the hash segment dropped) — and **refuses the ingest** if that name is
+already another file's identity:
+
+```
+outmem: 'fachinfo/document.md' is already the identity of
+'fachinfo/9b3d0d4e1a35/document.md'. If this file is a new version of that
+document, pass `--as fachinfo/document.md`; if it is a different document
+that happens to share a filename, pass `--as` with a name that distinguishes
+it (e.g. `--as fachinfo/amikacin`).
+```
+
+It refuses rather than guesses because the two cases are indistinguishable from
+the path alone, and guessing wrong writes a supersession edge that later drives
+a recheck of one drug's page against another drug's source. A pipeline that
+emits `<drug>/output/<hash>/document.md` hits this on its second document —
+pass `--as` from the start and it never comes up. Re-ingesting *identical*
+content is still a no-op, not a refusal.
+
+The origin path is recorded alongside the entry, because for that pipeline
+shape it is the only place the distinguishing part of the name survives.
 
 **Parallel ingest** is safe — `.sources.db` is SQLite, writers
 serialise on the DB's busy-timeout instead of racing on JSON
@@ -151,6 +186,64 @@ exact pre-gc state.
 
 `outmem lint` reports the same drift as `source-orphaned` / `source-unregistered`
 warnings, so CI notices it the day it happens.
+
+### Backfilling identity on an older wiki
+
+```bash
+outmem sources backfill            # dry run — propose only
+outmem sources backfill --apply    # write the unambiguous ones
+```
+
+A wiki built before `--as` existed has rows with no identity, so re-ingesting a
+document lands as an unrelated row and supersession never fires. `backfill`
+reads the identity each path implies and assigns it — but **only where exactly
+one row claims it**.
+
+Where several rows share a name it stops and shows you the pages whose
+`provenance:` cites each one, because that is the evidence that settles it: two
+rows cited by *different* pages are different documents; two cited by the same
+page are versions of one.
+
+```
+2 identit(ies) are claimed by more than one row. …
+  fachinfo/document.md
+      fachinfo/9b3d0d4e1a35/document.md
+          cited by [[abx:amikacin]]
+      fachinfo/c4f10ab7e221/document.md
+          cited by [[abx:aztreonam]]
+      -> re-ingest each with `--as <name>` to resolve
+```
+
+The hash segment is *verified* against the row's own sha256 rather than
+pattern-matched, so a directory legitimately named like a hash is never
+mistaken for one. An identity set explicitly with `--as` is never overwritten,
+so re-running is safe.
+
+<a id="staleness"></a>
+## Staleness — pages citing a superseded source
+
+```bash
+outmem stale
+# → exit 0 if clean, 1 if any page cites a version that has been superseded
+```
+
+The payoff of supersession. Every page's `provenance:` names the source
+versions it was compacted from; when one of those moves to a new version,
+`outmem stale` reports the pages that may no longer hold:
+
+```
+1 page(s) cite a source that has been superseded:
+
+  [[abx:amikacin]]
+      cites   fachinfo/9b3d0d4e1a35/document.md
+      current fachinfo/e77a10b4c503/document.md
+```
+
+It follows the chain to the *newest* version, not just the next one, so you
+diff against something current. It **reports only** — deciding whether a page
+still stands is a judgement call, and on clinical content that belongs to a
+human (or to an explicit agent run over this list), not to a side effect of
+ingest. Wire it into CI as a warning gate, or run it after a batch re-ingest.
 
 ## Import (existing markdown vault)
 

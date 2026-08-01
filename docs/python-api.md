@@ -114,13 +114,17 @@ entry = store.add_source(
     "/path/to/paper.md",
     into_subdir="research",
     rename="paper.md",
+    as_key="research/marino-2026",   # which document this is a version of
 )
 entry.rel_path           # "research/<sha[:12]>/paper.md"
 entry.sha256             # full sha
 entry.size_bytes
 entry.registered_at      # datetime
+entry.logical_key        # "research/marino-2026" — survives a revision
+entry.superseded_by      # rel_path of the version that replaced this, or None
+entry.origin_path        # where it was ingested from
 
-store.list_sources()                  # list[SourceEntry]
+store.list_sources()                  # list[SourceEntry], rows whose file is gone excluded
 store.get_source(entry.rel_path)      # SourceEntry | None
 store.read_source(entry.rel_path)     # text, capped at config.sources.max_chars
 
@@ -130,6 +134,43 @@ store.record_ingestion(
     prompt="extract dosages",
     pages_touched=["amikacin-iv-dosing"],
 )
+```
+
+### Supersession and staleness
+
+`rel_path` embeds the content hash, so a revised document is always a *new*
+row. `as_key` is the identity that survives the revision: re-adding under the
+same key links the old row to the new one instead of leaving two unrelated
+sources.
+
+```python
+v2 = store.add_source("/path/to/paper-v2.md", into_subdir="research",
+                      as_key="research/marino-2026")
+store.get_source(entry.rel_path).superseded_by == v2.rel_path
+
+store.source_citations()   # {source rel_path: [slug, …]} — the reverse
+                           # provenance edge, in one walk of wiki/pages/
+
+for c in store.stale_pages():
+    c.slug, c.cited, c.current, c.logical_key
+```
+
+`stale_pages()` follows the chain to the newest version and **reports only** —
+whether a page still holds is a judgement call for a human or an explicit agent
+run, not a side effect of ingest.
+
+Omit `as_key` and the identity is derived from the path; `add_source` raises
+`OutmemError` when that derivation is already another document's identity,
+rather than guessing which of "new version" / "different document, same
+filename" was meant.
+
+For wikis registered before identity existed:
+
+```python
+for cand in store.propose_source_keys():
+    cand.logical_key, cand.rows, cand.citing_pages, cand.is_ambiguous
+
+store.assign_source_keys([(rel_path, key), …])   # never overwrites an existing key
 ```
 
 ## Renaming

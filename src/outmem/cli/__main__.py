@@ -24,6 +24,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from outmem import __version__
 from outmem._progress import report_progress
@@ -513,6 +514,68 @@ def cmd_rename(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stale(args: argparse.Namespace) -> int:
+    store = _open_store(args)
+    stale = store.stale_pages()
+    if not stale:
+        _status("stale: no page cites a superseded source")
+        return 0
+    by_page: dict[str, list[Any]] = {}
+    for c in stale:
+        by_page.setdefault(c.slug, []).append(c)
+    print(f"{len(by_page)} page(s) cite a source that has been superseded:\n")
+    for slug in sorted(by_page):
+        print(f"  [[{slug}]]")
+        for c in by_page[slug]:
+            print(f"      cites   {c.cited}")
+            print(f"      current {c.current}")
+    print(
+        "\nRead the diff between the cited and current version, then "
+        "`outmem extend` the page or `outmem log` why it still holds."
+    )
+    return 1
+
+
+def cmd_sources_backfill(args: argparse.Namespace) -> int:
+    store = _open_store(args)
+    candidates = store.propose_source_keys()
+    if not candidates:
+        _status("sources: every row already has an identity")
+        return 0
+    clear = [c for c in candidates if not c.is_ambiguous]
+    ambiguous = [c for c in candidates if c.is_ambiguous]
+    if clear:
+        verb = "assigned" if args.apply else "would assign"
+        print(f"{verb} an identity to {len(clear)} row(s):")
+        for c in clear[:20]:
+            print(f"  {c.rows[0]}\n      -> {c.logical_key}")
+        if len(clear) > 20:
+            print(f"  ... and {len(clear) - 20} more")
+    if ambiguous:
+        print(
+            f"\n{len(ambiguous)} identit(ies) are claimed by more than one row. "
+            "outmem cannot tell versions-of-one-document from "
+            "different-documents-sharing-a-filename, so these are left alone.\n"
+            "The citing pages are the evidence — different pages means "
+            "different documents:\n"
+        )
+        for c in ambiguous[:10]:
+            print(f"  {c.logical_key}")
+            for rel in c.rows:
+                pages = c.citing_pages.get(rel) or []
+                cited = ", ".join(f"[[{p}]]" for p in pages) if pages else "(no page cites it)"
+                print(f"      {rel}\n          cited by {cited}")
+            print("      -> re-ingest each with `--as <name>` to resolve\n")
+        if len(ambiguous) > 10:
+            print(f"  ... and {len(ambiguous) - 10} more")
+    if args.apply and clear:
+        store.assign_source_keys([(c.rows[0], c.logical_key) for c in clear])
+        _status(f"sources: assigned {len(clear)} identit(ies)")
+    elif not args.apply:
+        print("\n(dry run — re-run with --apply to write the unambiguous ones)")
+    return 0
+
+
 def cmd_sources_gc(args: argparse.Namespace) -> int:
     store = _open_store(args)
     audit = store.sources_gc(dry_run=not args.apply)
@@ -556,6 +619,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             source,
             into_subdir=args.into,
             rename=args.rename,
+            as_key=args.as_key,
             commit=True,
         )
     except OutmemError as exc:
@@ -988,6 +1052,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sources_gc.set_defaults(func=cmd_sources_gc)
 
+    p_sources_backfill = sources_sub.add_parser(
+        "backfill",
+        help="Propose a logical identity for sources registered before "
+        "supersession existed.",
+        parents=[root_parent],
+    )
+    p_sources_backfill.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the unambiguous ones. Ambiguous groups are never "
+        "resolved automatically.",
+    )
+    p_sources_backfill.set_defaults(func=cmd_sources_backfill)
+
+    p_stale = sub.add_parser(
+        "stale",
+        help="List pages citing a source version that has been superseded.",
+        parents=[root_parent],
+    )
+    p_stale.set_defaults(func=cmd_stale)
+
     p_lint = sub.add_parser(
         "lint",
         help="Run static checks over the wiki (orphans, broken links, drift).",
@@ -1108,6 +1193,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--rename",
         default=None,
         help="Rename the file in wiki/sources/.",
+    )
+    p_ingest.add_argument(
+        "--as",
+        dest="as_key",
+        default=None,
+        metavar="NAME",
+        help="Which document this file is a version of (e.g. "
+        "'fachinfo/amikacin'). A later revision under the same name "
+        "supersedes this one instead of landing as an unrelated source, "
+        "which is what lets `outmem stale` find the pages compacted from "
+        "the old version. Derived from the path when unambiguous.",
     )
     p_ingest.add_argument(
         "--prompt",

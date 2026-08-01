@@ -57,6 +57,14 @@ contradicts something better-sourced, etc.) — pair it with a
   `(source → pages)` link are two halves of the same audit trail. Skip
   `record_ingestion` and only the page-side half survives; `outmem lint`
   doesn't (yet) cross-check the two, so silent drift is on you.
+- **`provenance` is a liveness signal, not just a citation.** A source
+  path names a *version*: it embeds the content hash, so when the same
+  document is re-ingested after a revision, the old path is marked
+  superseded. `outmem stale` then reports every page whose `provenance`
+  still cites the old version — i.e. every page that may no longer hold.
+  A page written with a vague or missing `provenance` is invisible to
+  that check forever, which is the real cost of skipping the field.
+  Cite the **exact** `rel_path` you read, never a prettified variant.
 
 ## Two-source ingestion (worth showing once)
 

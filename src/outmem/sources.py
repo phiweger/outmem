@@ -64,7 +64,7 @@ SOURCES_DIR = "sources"
 REGISTRY_FILENAME = ".sources.db"
 
 # Bumped only when the sources/ingestions schema changes shape.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 ALLOWED_EXTENSIONS = frozenset({".md", ".txt", ".csv", ".json", ".mmd", ".yaml", ".yml"})
 
@@ -91,6 +91,24 @@ class SourceEntry:
     registered_at: datetime
     size_bytes: int
     ingestions: list[IngestionRecord] = field(default_factory=list)
+    logical_key: str | None = None
+    """Which *document* this file is a version of.
+
+    ``rel_path`` embeds the content hash, so a revised document lands at a
+    new path and looks like an unrelated row. ``logical_key`` is the
+    identity that survives a revision — set explicitly at ingest
+    (``--as``), because no derivation can tell "same document, new
+    version" from "different document, same filename" in general.
+    """
+    superseded_by: str | None = None  # rel_path of the version that replaced this
+    origin_path: str | None = None
+    """Where the file was ingested from.
+
+    Recorded because it is the field that would have disambiguated the
+    historical rows and was previously discarded — a pipeline emitting
+    ``.../<drug>/output/<hash>/document.md`` puts the distinguishing part
+    here and nowhere else.
+    """
 
 
 @dataclass
@@ -124,6 +142,17 @@ class SourceRegistry:
     # Mutations
     # ------------------------------------------------------------------
 
+    def latest_for(self, logical_key: str) -> SourceEntry | None:
+        """The current (un-superseded) version of ``logical_key``, if any."""
+        candidates = [
+            e
+            for e in self.entries.values()
+            if e.logical_key == logical_key and e.superseded_by is None
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda e: e.registered_at)
+
     def register(
         self,
         rel_path: str,
@@ -131,38 +160,65 @@ class SourceRegistry:
         sha256: str,
         size_bytes: int,
         when: datetime | None = None,
+        logical_key: str | None = None,
+        origin_path: str | None = None,
     ) -> SourceEntry:
         """Add or refresh an entry. Returns the canonical entry.
 
         Re-registering with the same hash returns the existing entry
-        unchanged. A new hash refreshes the row and clears its
-        ingestion chain — old entries belonged to the old content.
+        unchanged.
+
+        When ``logical_key`` is given and a live version of that document
+        already exists, this registration **supersedes** it: the older row
+        keeps its file, its sha and its ingestion history, and gains a
+        ``superseded_by`` pointer to this one. Nothing is deleted —
+        knowing that v1 existed and what was compacted from it is the
+        point, and it is what lets ``outmem stale`` find the pages that
+        still cite it.
+
+        Note the sha is part of ``rel_path``, so a revised document is
+        always a *new row*; the pre-existing ``!= sha256`` refresh branch
+        below is only reachable for callers that build paths themselves.
         """
         existing = self.entries.get(rel_path)
         if existing and existing.sha256 == sha256:
             return existing
 
         ts = when.replace(microsecond=0) if when else utc_now()
+        predecessor = self.latest_for(logical_key) if logical_key else None
+        if predecessor is not None and predecessor.rel_path == rel_path:
+            predecessor = None  # re-registering the same path, not a new version
+
         entry = SourceEntry(
             rel_path=rel_path,
             sha256=sha256,
             registered_at=ts,
             size_bytes=size_bytes,
             ingestions=[],
+            logical_key=logical_key,
+            origin_path=origin_path,
         )
         con = self._connection()
         with con:
             con.execute(
                 "INSERT OR REPLACE INTO sources "
-                "(rel_path, sha256, size_bytes, registered_at) "
-                "VALUES (?, ?, ?, ?)",
-                (rel_path, sha256, size_bytes, format_iso_z(ts)),
+                "(rel_path, sha256, size_bytes, registered_at, logical_key, "
+                "superseded_by, origin_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (rel_path, sha256, size_bytes, format_iso_z(ts), logical_key,
+                 None, origin_path),
             )
             # INSERT OR REPLACE preserves the row, so FK ON DELETE
             # CASCADE doesn't fire — clear ingestions explicitly when
             # the sha rolled over.
             if existing and existing.sha256 != sha256:
                 con.execute("DELETE FROM ingestions WHERE rel_path = ?", (rel_path,))
+            if predecessor is not None:
+                con.execute(
+                    "UPDATE sources SET superseded_by = ? WHERE rel_path = ?",
+                    (rel_path, predecessor.rel_path),
+                )
+        if predecessor is not None:
+            self.entries[predecessor.rel_path].superseded_by = rel_path
         self.entries[rel_path] = entry
         return entry
 
@@ -362,25 +418,51 @@ def _init_schema(con: sqlite3.Connection) -> None:
         " pages_touched TEXT NOT NULL)"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS ingestions_rel_path ON ingestions(rel_path)")
-    # Stamp a schema version even though nothing reads it yet. There is no
-    # migration framework here, and adding one retroactively means guessing
-    # which shape an existing file is in — this costs one pragma now and is
-    # the difference between a clean migration and a heuristic later.
-    cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    # A fresh file is at user_version 0, so it takes the same path as an
+    # existing one — the migration *is* how the v2 columns get added, and
+    # running it on both shapes is what keeps them identical.
+    _migrate(con)
     con.commit()
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    """Bring an existing registry up to :data:`SCHEMA_VERSION`.
+
+    ``ALTER TABLE ADD COLUMN`` is the one cheap, non-destructive SQLite
+    DDL: existing rows get NULL, which is exactly right here — a row
+    registered before identity existed genuinely has no known identity,
+    and inventing one by parsing ``rel_path`` would merge documents that
+    only share a filename (see ``outmem sources backfill``).
+    """
+    version = con.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
+    existing = {row[1] for row in con.execute("PRAGMA table_info(sources)")}
+    with con:
+        for column in ("logical_key", "superseded_by", "origin_path"):
+            if column not in existing:
+                con.execute(f"ALTER TABLE sources ADD COLUMN {column} TEXT")
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS sources_logical_key "
+            "ON sources(logical_key)"
+        )
+        con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def _read_all_entries(con: sqlite3.Connection) -> dict[str, SourceEntry]:
     cur = con.cursor()
     entries: dict[str, SourceEntry] = {}
     for row in cur.execute(
-        "SELECT rel_path, sha256, size_bytes, registered_at FROM sources "
-        "ORDER BY rel_path"
+        "SELECT rel_path, sha256, size_bytes, registered_at, logical_key, "
+        "superseded_by, origin_path FROM sources ORDER BY rel_path"
     ).fetchall():
         entries[row["rel_path"]] = SourceEntry(
             rel_path=row["rel_path"],
             sha256=row["sha256"],
             registered_at=parse_iso_z(row["registered_at"]),
+            logical_key=row["logical_key"],
+            superseded_by=row["superseded_by"],
+            origin_path=row["origin_path"],
             size_bytes=int(row["size_bytes"]),
             ingestions=[],
         )
@@ -475,3 +557,64 @@ def gc_registry(sources_dir: Path, *, dry_run: bool = True) -> RegistryAudit:
     for rel_path in audit.missing_files:
         registry.entries.pop(rel_path, None)
     return audit
+
+
+@dataclass(frozen=True)
+class StaleCitation:
+    """A page still citing a source version that has been superseded."""
+
+    slug: str
+    cited: str  # rel_path the page's provenance names
+    current: str  # rel_path of the version that replaced it
+    logical_key: str
+
+
+@dataclass(frozen=True)
+class KeyCandidate:
+    """A proposed ``logical_key`` for rows that predate identity."""
+
+    logical_key: str
+    rows: list[str]  # rel_paths sharing this candidate
+    citing_pages: dict[str, list[str]]  # rel_path -> slugs whose provenance cites it
+
+    @property
+    def is_ambiguous(self) -> bool:
+        """More than one row claims this candidate.
+
+        Cannot be resolved mechanically: the rows are either versions of
+        one document or different documents that share a filename, and
+        nothing outmem recorded distinguishes them. ``citing_pages`` is
+        the evidence a human needs — two rows cited by *different* pages
+        are different documents; two cited by the same page are versions.
+        """
+        return len(self.rows) > 1
+
+
+def propose_logical_keys(
+    registry: SourceRegistry,
+    citations: dict[str, list[str]] | None = None,
+) -> list[KeyCandidate]:
+    """Group un-keyed rows by the identity their path implies.
+
+    Proposes; never assigns. See :class:`KeyCandidate.is_ambiguous` for
+    why an ambiguous group cannot be resolved without a human.
+    """
+    citations = citations or {}
+    groups: dict[str, list[str]] = {}
+    for entry in sorted(registry.entries.values(), key=lambda e: e.rel_path):
+        if entry.logical_key is not None:
+            continue
+        parts = entry.rel_path.split("/")
+        if len(parts) >= 2 and parts[-2] == entry.sha256[:12]:
+            candidate = "/".join([*parts[:-2], parts[-1]])
+        else:
+            candidate = entry.rel_path  # pre-hash-dir row: already the key
+        groups.setdefault(candidate, []).append(entry.rel_path)
+    return [
+        KeyCandidate(
+            logical_key=key,
+            rows=rows,
+            citing_pages={r: citations.get(r, []) for r in rows},
+        )
+        for key, rows in sorted(groups.items())
+    ]

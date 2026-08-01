@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from outmem.exceptions import OutmemError
 from outmem.sources import (
     REGISTRY_FILENAME,
     SOURCES_DIR,
@@ -35,12 +36,32 @@ def get_registry(store: WikiStore) -> SourceRegistry:
     return store._source_registry
 
 
+def derive_logical_key(rel_path: str, sha256: str) -> str | None:
+    """The ``<into>/<filename>`` a content-addressed path implies, or None.
+
+    The sha segment is *verified* against the row's own hash rather than
+    pattern-matched, so a directory legitimately named like a hash can't
+    be mistaken for one. Returns None when the path has no verifiable sha
+    segment (a pre-hash-dir flat row — whose ``rel_path`` already is the
+    candidate key).
+
+    This is a **candidate**, never an identity: a pipeline emitting
+    ``document.md`` per drug produces the same candidate for every drug,
+    which is the collision the hash directory exists to survive.
+    """
+    parts = rel_path.split("/")
+    if len(parts) >= 2 and parts[-2] == sha256[:12]:
+        return "/".join([*parts[:-2], parts[-1]])
+    return None
+
+
 def add_source(
     store: WikiStore,
     source: str | Path,
     *,
     into_subdir: str | None = None,
     rename: str | None = None,
+    as_key: str | None = None,
     commit: bool = True,
 ) -> SourceEntry:
     source_path = Path(source).expanduser()
@@ -55,7 +76,37 @@ def add_source(
     existing = registry.entries.get(rel_path)
     if existing and existing.sha256 == sha:
         return existing
-    entry = registry.register(rel_path, sha256=sha, size_bytes=dest.stat().st_size)
+
+    logical_key = as_key
+    if logical_key is None:
+        candidate = derive_logical_key(rel_path, sha) or rel_path
+        # Refuse rather than guess. A candidate already claimed by a
+        # DIFFERENT document means we cannot tell "new version of that" from
+        # "different document, same filename" — and guessing wrong writes a
+        # supersession edge that would later drive a recheck of one drug's
+        # page against another's.
+        clashing = [
+            e
+            for e in registry.entries.values()
+            if e.logical_key == candidate and e.rel_path != rel_path
+        ]
+        if clashing:
+            raise OutmemError(
+                f"{candidate!r} is already the identity of "
+                f"{clashing[0].rel_path!r}. If this file is a new version of "
+                f"that document, pass `--as {candidate}`; if it is a different "
+                "document that happens to share a filename, pass `--as` with a "
+                "name that distinguishes it (e.g. `--as fachinfo/amikacin`)."
+            )
+        logical_key = candidate
+
+    entry = registry.register(
+        rel_path,
+        sha256=sha,
+        size_bytes=dest.stat().st_size,
+        logical_key=logical_key,
+        origin_path=str(source_path),
+    )
     if commit:
         store._commit_paths(
             [

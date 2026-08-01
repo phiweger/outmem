@@ -31,6 +31,7 @@ from outmem._time import ensure_utc, utc_now
 
 if TYPE_CHECKING:
     from outmem.semantic import Match, ReindexResult, VectorStore
+    from outmem.sources import KeyCandidate, RegistryAudit, StaleCitation
 
 from outmem.backlinks import BacklinkCache
 from outmem.config import (
@@ -968,20 +969,128 @@ class WikiStore:
         *,
         into_subdir: str | None = None,
         rename: str | None = None,
+        as_key: str | None = None,
         commit: bool = True,
     ) -> SourceEntry:
         """Copy a source file into ``wiki/sources/`` and register it.
 
         Content-addressed: the file lands at
         ``wiki/sources/[<into>/]<sha[:12]>/<filename>``. Re-adding the
-        same content is a no-op; different content under the same
-        slug refreshes the registry row.
+        same content is a no-op.
+
+        ``as_key`` declares *which document* this file is a version of. A
+        revision therefore supersedes its predecessor instead of landing
+        as an unrelated row. Without it, the identity is derived from the
+        path — and the call is **refused** when that derivation is
+        ambiguous, because "new version of that document" and "different
+        document, same filename" are indistinguishable from the path
+        alone, and guessing wrong writes a supersession edge that would
+        later drive a recheck of one document against another.
         """
         return _sources.add_source(
-            self, source, into_subdir=into_subdir, rename=rename, commit=commit
+            self,
+            source,
+            into_subdir=into_subdir,
+            rename=rename,
+            as_key=as_key,
+            commit=commit,
         )
 
-    def sources_gc(self, *, dry_run: bool = True) -> Any:
+    def source_citations(self) -> dict[str, list[str]]:
+        """``source rel_path -> [slug, …]`` from every page's ``provenance:``.
+
+        The reverse of the provenance edge, built in one walk. Nothing
+        stored it because nothing consumed it — it is what turns
+        provenance from an audit trail into a liveness signal.
+        """
+        from outmem.index import load_editorial_pages
+
+        out: dict[str, list[str]] = {}
+        pages, _failures = load_editorial_pages(self.pages_path)
+        for page in pages:
+            for entry in page.frontmatter.provenance:
+                ref = entry if isinstance(entry, str) else entry.get("path")
+                if not isinstance(ref, str):
+                    continue
+                ref = ref.removeprefix(f"{SOURCES_DIR}/")
+                out.setdefault(ref, []).append(page.slug)
+        return out
+
+    def stale_pages(self) -> list[StaleCitation]:
+        """Pages whose provenance cites a source version since superseded.
+
+        The payoff of supersession: a source moving to v2 tells you exactly
+        which pages were compacted from v1 and may no longer hold. Reports
+        only — deciding whether a page still stands is a judgement call,
+        and on clinical content that belongs to a human (or an explicit
+        agent run over this list), not to a side effect of ingest.
+        """
+        from outmem.sources import StaleCitation
+
+        registry = _sources.get_registry(self)
+        citations = self.source_citations()
+        out: list[StaleCitation] = []
+        for rel_path, slugs in sorted(citations.items()):
+            entry = registry.entries.get(rel_path)
+            if entry is None or entry.superseded_by is None:
+                continue
+            current = entry.superseded_by
+            # Follow the chain to the newest version, not just the next one.
+            seen = {rel_path}
+            while current in registry.entries and current not in seen:
+                seen.add(current)
+                nxt = registry.entries[current].superseded_by
+                if nxt is None:
+                    break
+                current = nxt
+            for slug in sorted(slugs):
+                out.append(
+                    StaleCitation(
+                        slug=slug,
+                        cited=rel_path,
+                        current=current,
+                        logical_key=entry.logical_key or "",
+                    )
+                )
+        return out
+
+    def propose_source_keys(self) -> list[KeyCandidate]:
+        """Candidate ``logical_key`` groupings for rows that predate identity."""
+        from outmem.sources import propose_logical_keys
+
+        return propose_logical_keys(
+            _sources.get_registry(self), self.source_citations()
+        )
+
+    def assign_source_keys(self, pairs: Sequence[tuple[str, str]]) -> int:
+        """Set ``logical_key`` on rows that have none. Commits once.
+
+        Only ever called with unambiguous candidates — see
+        :meth:`propose_source_keys`. Refuses to overwrite an existing key,
+        so re-running is safe and an explicit ``--as`` always wins.
+        """
+        registry = _sources.get_registry(self)
+        con = registry._connection()
+        written = 0
+        with con:
+            for rel_path, key in pairs:
+                entry = registry.entries.get(rel_path)
+                if entry is None or entry.logical_key is not None:
+                    continue
+                con.execute(
+                    "UPDATE sources SET logical_key = ? WHERE rel_path = ?",
+                    (key, rel_path),
+                )
+                entry.logical_key = key
+                written += 1
+        if written:
+            self._commit_paths(
+                [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
+                subject=f"sources: assign {written} logical identit(ies)",
+            )
+        return written
+
+    def sources_gc(self, *, dry_run: bool = True) -> RegistryAudit:
         """Reconcile ``.sources.db`` against disk; drop rows whose file is gone.
 
         Returns a :class:`outmem.sources.RegistryAudit`. ``dry_run=True``
