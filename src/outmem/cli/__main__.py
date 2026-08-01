@@ -541,12 +541,45 @@ def cmd_stale(args: argparse.Namespace) -> int:
     return dropped or 1
 
 
+def _backfill_source_refs(store: WikiStore, *, apply: bool) -> bool:
+    """Record page references for sources ingested before outmem kept them.
+
+    Separate from the document-key backfill in the same command because
+    they are the same *kind* of work — deriving what outmem now records
+    at ingest but once discarded — and an operator catching up an older
+    wiki wants both in one pass.
+
+    Only what resolves *today* can be captured. A slug already dead when
+    this runs stays dead; the point is to pin the live ones before the
+    next reorganisation, not to reconstruct history.
+    """
+    missing = [e.rel_path for e in store.list_sources() if e.refs_scanned_at is None]
+    if not missing:
+        return False
+    if not apply:
+        print(
+            f"{len(missing)} source(s) have no recorded page references. "
+            "--apply resolves the slugs they name against the wiki as it "
+            "stands now, so a later rename follows them instead of breaking "
+            "them."
+        )
+        return True
+    recorded = sum(len(store.record_source_refs(rel)) for rel in missing)
+    store.commit_registry(f"sources: record {recorded} page reference(s)")
+    _status(
+        f"sources: recorded {recorded} page reference(s) across "
+        f"{len(missing)} source(s)"
+    )
+    return True
+
+
 def cmd_sources_backfill(args: argparse.Namespace) -> int:
     store = _open_store(args)
     candidates, failures = store.propose_document_keys()
     dropped = _report_dropped_pages([str(f.path) for f in failures])
+    refs_done = _backfill_source_refs(store, apply=args.apply)
     if not candidates:
-        if not dropped:
+        if not dropped and not refs_done:
             _status("sources: every row already has an identity")
         return dropped
     clear = [c for c in candidates if not c.is_ambiguous]
@@ -624,6 +657,39 @@ def cmd_sources_gc(args: argparse.Namespace) -> int:
     return 0
 
 
+def _report_source_refs(store: WikiStore, rel_path: str) -> None:
+    """Tell the operator this source names page slugs, while they can act.
+
+    A warning, not a gate. It is their document, and the references are
+    now *recorded* — a rename re-points them — so this is advice rather
+    than a defect. But ingest is the last moment the file is editable:
+    afterwards it is content-addressed, and the only remaining fix is
+    re-ingesting. Worth one line then rather than a lint warning later.
+    """
+    refs = store.source_refs(rel_path)
+    if not refs:
+        return
+    inexact = [r for r in refs if not r.exact]
+    print(
+        f"outmem: this source names {len(refs)} page slug(s); the references "
+        "are recorded, so a rename will follow them.",
+        file=sys.stderr,
+    )
+    for ref in refs[:10]:
+        how = "[[link]]" if ref.exact else "prose  "
+        print(f"  {how}  {ref.token} -> {ref.page_slug}", file=sys.stderr)
+    if len(refs) > 10:
+        print(f"  ... and {len(refs) - 10} more", file=sys.stderr)
+    if inexact:
+        print(
+            f"  {len(inexact)} were matched heuristically from prose. Writing "
+            "them as [[wikilinks]] before ingest makes them exact — a bare "
+            "single-word slug cannot be detected at all, and `12:30` looks "
+            "like one.",
+            file=sys.stderr,
+        )
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     from pathlib import Path as _Path
 
@@ -645,6 +711,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         print(f"outmem: {exc}", file=sys.stderr)
         return 1
     _status(f"registered {entry.rel_path} (sha256: {entry.sha256[:12]}…)")
+    _report_source_refs(store, entry.rel_path)
 
     if args.register_only:
         return 0

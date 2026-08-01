@@ -347,6 +347,54 @@ cannot be edited, so the alias protecting that reference is the system
 working as designed, and a warning would only ask you to fix something you
 can't.
 
+An alias a frozen source depends on is **load-bearing**, and neither nudge
+tells you to retire it — the message says to keep it instead. Retiring it
+would break a reference in a file you cannot edit.
+
+### Frozen sources naming page slugs
+
+A source under `wiki/sources/` can never change — the path embeds its sha. A
+page slug changes whenever you reorganise. A source that names slugs couples
+the two, and one production wiki carried 136 references that had rotted this
+way, none of them in genuine third-party material.
+
+outmem **records the coupling rather than forbidding it.** At ingest, every
+page slug the source names is resolved and stored in the registry:
+
+```
+outmem: this source names 2 page slug(s); the references are recorded,
+so a rename will follow them.
+  prose     clinical:sepsis -> clinical:sepsis
+  [[link]]  glossary -> glossary
+  1 were matched heuristically from prose. Writing them as [[wikilinks]]
+  before ingest makes them exact …
+```
+
+The bytes are never touched — a source is a faithful copy — but `outmem rename`
+re-points the *mapping*, so the reference survives a reorganisation even with
+`--no-alias`. `outmem lint` reads the mapping, so it reports only what is
+genuinely gone, and names both what the file says and what it meant:
+
+```
+frozen source references 'clinical:sepsis', recorded at ingest as
+'clinical:infektion:sepsis', which no longer exists. A rename would have been
+followed — this page was deleted or moved outside outmem.
+```
+
+**Write references as `[[wikilinks]]`.** A bare prose slug is a *guess*: the
+grammar needs at least one `:`, so a single-segment slug like `glossary` cannot
+be detected at all, and `12:30` and `3:1` look exactly like slugs. A `[[link]]`
+is exact — it works for single-segment slugs, survives a wiki with no
+namespaces, and can never be a time or a ratio. Only sources you write yourself
+can carry markup, which is fine: that is empirically the only material that
+names slugs.
+
+This protects against **renames, not deletions.** Delete a page and no mapping
+brings it back — you just learn precisely which sources are now orphaned.
+
+Sources ingested before outmem recorded this are caught up by
+`outmem sources backfill --apply`, which resolves whatever is still live today.
+
 `--error-only` is for CI on a wiki that carries known warnings you don't
 want to block on — they are still printed.
 

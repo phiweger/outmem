@@ -95,6 +95,7 @@ from outmem.sources import (
     SOURCES_DIR,
     IngestionRecord,
     SourceEntry,
+    SourceRef,
     SourceRegistry,
 )
 from outmem.state import LastRun, OutmemState
@@ -811,6 +812,14 @@ class WikiStore:
         if rewrite_links:
             touched.extend(self._rewrite_links_to(old_slug, new_slug))
 
+        # A frozen source naming this page cannot be rewritten — that is
+        # what content addressing means — but the mapping recorded at
+        # ingest can be, and that is the point of recording it. Do this
+        # even when rewrite_links is off: the caller declined to touch
+        # *page* text, not to corrupt the registry.
+        if _sources.get_registry(self).repoint_refs(old_slug, new_slug):
+            touched.append(f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}")
+
         self._alias_map = None  # the page moved; any cached map is stale
         self._regenerate_index()
         touched.append(f"{self.config.wiki_dir}/{INDEX_FILENAME}")
@@ -818,6 +827,33 @@ class WikiStore:
             touched,
             subject=commit_subject or f"rename: {old_slug} -> {new_slug}",
         )
+
+    def commit_registry(self, subject: str) -> str | None:
+        """Commit ``.sources.db`` alone, for registry-only mutations."""
+        return self._commit_paths(
+            [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
+            subject=subject,
+        )
+
+    def record_source_refs(self, rel_path: str) -> list[SourceRef]:
+        """Resolve and record the page slugs one source names.
+
+        Runs automatically at ingest. Exposed because a source registered
+        before the mapping existed has none, and what is still resolvable
+        *today* is worth capturing before the next reorganisation makes it
+        unresolvable — see ``outmem sources backfill``.
+        """
+        return _sources.record_source_refs(self, rel_path)
+
+    def source_refs(self, rel_path: str | None = None) -> list[SourceRef]:
+        """Recorded source→page references, kept current across renames.
+
+        The reverse of ``provenance:``: which *pages* a frozen source
+        names, rather than which sources a page was compacted from.
+        Recorded at ingest because that is the only moment the tokens are
+        known correct, and re-pointed by :meth:`rename_page`.
+        """
+        return _sources.get_registry(self).refs(rel_path)
 
     def _rewrite_links_to(self, old_slug: str, new_slug: str) -> list[str]:
         """Point every ``[[old_slug]]`` at ``new_slug``. Returns paths touched.

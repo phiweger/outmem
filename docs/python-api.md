@@ -196,6 +196,10 @@ for a page.
 For wikis registered before identity existed:
 
 ```python
+store.source_refs()              # list[SourceRef] — which pages each frozen
+                                 # source names, resolved at ingest
+store.record_source_refs(rel)    # (re)scan one source; runs at ingest
+
 candidates, failures = store.propose_document_keys()
 for cand in candidates:
     cand.document_key, cand.rows, cand.held_by, cand.citing_pages, cand.origins

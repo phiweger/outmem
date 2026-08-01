@@ -1015,3 +1015,179 @@ def test_reingesting_identical_content_is_still_a_no_op(tmp_path: Path) -> None:
     again = store.add_source(src, into_subdir="rki", rename="ratgeber.md")
     assert again.rel_path == first.rel_path
     assert again.superseded_by is None
+
+
+# ---------------------------------------------------------------------------
+# Uncoupling frozen sources from mutable page slugs
+# ---------------------------------------------------------------------------
+
+
+class TestSourceRefsSurviveRenames:
+    def test_a_rename_repoints_the_recorded_reference(self, tmp_path: Path) -> None:
+        """The uncoupling. `rename_page` cannot rewrite a frozen source —
+        that is what content addressing means — but it can rewrite the
+        mapping recorded at ingest, which is why the mapping exists."""
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("clinical:sepsis", title="Sepsis", body="s")
+        src = tmp_path / "sop.md"
+        src.write_text("Vgl. clinical:sepsis fuer das Protokoll.\n", encoding="utf-8")
+        entry = store.add_source(src, into_subdir="sop")
+
+        (ref,) = store.source_refs(entry.rel_path)
+        assert ref.token == "clinical:sepsis"
+        assert ref.page_slug == "clinical:sepsis"
+        assert not ref.exact
+
+        store.rename_page("clinical:sepsis", "clinical:infektion:sepsis")
+
+        (ref,) = store.source_refs(entry.rel_path)
+        assert ref.token == "clinical:sepsis"  # the frozen bytes never change
+        assert ref.page_slug == "clinical:infektion:sepsis"  # the mapping follows
+
+    def test_lint_is_quiet_once_the_mapping_holds_the_reference(
+        self, tmp_path: Path
+    ) -> None:
+        """Held by identity, not by a string — so it survives even after
+        the alias is gone, which the alias-only fix could not."""
+        from outmem.lint import lint_wiki
+
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("clinical:sepsis", title="Sepsis", body="s")
+        src = tmp_path / "sop.md"
+        src.write_text("Vgl. clinical:sepsis\n", encoding="utf-8")
+        store.add_source(src, into_subdir="sop")
+        store.rename_page("clinical:sepsis", "clinical:infektion:sepsis", alias=False)
+
+        report = lint_wiki(
+            store.wiki_path,
+            log_dir=store.log_path,
+            raw_dir=store.raw_path,
+            sources_dir=store.sources_path,
+        )
+        assert [
+            f for f in report.findings if f.kind == "source-references-dead-slug"
+        ] == []
+
+    def test_an_exact_wikilink_needs_no_heuristics(self, tmp_path: Path) -> None:
+        """A single-segment slug is just a word — `_SLUG_MENTION_RE`
+        requires a colon, so prose can never detect `glossary`. Written as
+        a link it is unambiguous, which is why markup is the better input."""
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("glossary", title="Glossary", body="g")
+        src = tmp_path / "sop.md"
+        src.write_text("See [[glossary]] and also glossary.\n", encoding="utf-8")
+        entry = store.add_source(src, into_subdir="sop")
+
+        (ref,) = store.source_refs(entry.rel_path)
+        assert ref.token == "glossary"
+        assert ref.exact
+
+    def test_unresolvable_tokens_are_not_recorded(self, tmp_path: Path) -> None:
+        """A slug already dead on arrival stays dead — recording a guess
+        would be worse than recording nothing."""
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("clinical:sepsis", title="Sepsis", body="s")
+        src = tmp_path / "sop.md"
+        src.write_text("Vgl. clinical:ghost, Abnahme 12:30, ratio 3:1\n", encoding="utf-8")
+        entry = store.add_source(src, into_subdir="sop")
+        assert store.source_refs(entry.rel_path) == []
+
+    def test_a_deleted_page_still_reports(self, tmp_path: Path) -> None:
+        """Uncoupling protects against rename, not deletion. The mapping
+        makes the break precise; it cannot repair it."""
+        from outmem.lint import lint_wiki
+
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("clinical:sepsis", title="Sepsis", body="s")
+        src = tmp_path / "sop.md"
+        src.write_text("Vgl. clinical:sepsis\n", encoding="utf-8")
+        store.add_source(src, into_subdir="sop")
+        store._page_path("clinical:sepsis").unlink()
+
+        report = lint_wiki(
+            store.wiki_path,
+            log_dir=store.log_path,
+            raw_dir=store.raw_path,
+            sources_dir=store.sources_path,
+        )
+        assert [f for f in report.findings if f.kind == "source-references-dead-slug"]
+
+
+class TestLoadBearingAliases:
+    def test_an_alias_a_source_needs_is_not_nudged_for_retirement(
+        self, tmp_path: Path
+    ) -> None:
+        """Both alias nudges said "so the alias can eventually go". For an
+        alias a content-addressed file depends on, that advice is wrong:
+        the source cannot be edited to stop needing it."""
+        from outmem.lint import lint_wiki
+
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("clinical:sepsis", title="Sepsis", body="s")
+        store.write_page("clinical:other", title="Other", body="Vgl. clinical:sepsis\n")
+        src = tmp_path / "sop.md"
+        src.write_text("Vgl. clinical:sepsis\n", encoding="utf-8")
+        store.add_source(src, into_subdir="sop")
+        store.rename_page("clinical:sepsis", "clinical:infektion:sepsis")
+
+        report = lint_wiki(
+            store.wiki_path,
+            log_dir=store.log_path,
+            raw_dir=store.raw_path,
+            sources_dir=store.sources_path,
+        )
+        (via,) = [f for f in report.findings if f.kind == "slug-mention-via-alias"]
+        assert "keep the alias" in via.message
+        assert "can eventually go" not in via.message
+
+    def test_an_unpinned_alias_still_gets_the_retirement_nudge(
+        self, tmp_path: Path
+    ) -> None:
+        """The guarantee this must not weaken: aliases with no frozen
+        dependant are still debt with cleanup pressure."""
+        from outmem.lint import lint_wiki
+
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("clinical:sepsis", title="Sepsis", body="s")
+        store.write_page("clinical:other", title="Other", body="Vgl. clinical:sepsis\n")
+        store.rename_page("clinical:sepsis", "clinical:infektion:sepsis")
+
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        (via,) = [f for f in report.findings if f.kind == "slug-mention-via-alias"]
+        assert "can eventually go" in via.message
+
+
+class TestSourceRefsBackfill:
+    def test_scanned_and_empty_is_not_reported_again(self, tmp_path: Path) -> None:
+        """"No references" and "never scanned" are different states. Without
+        `refs_scanned_at` backfill re-reports every source that names no
+        pages, forever."""
+        store = WikiStore.init(tmp_path / "w")
+        src = tmp_path / "plain.md"
+        src.write_text("No slugs here at all.\n", encoding="utf-8")
+        store.add_source(src)
+        assert main(["sources", "backfill", "--root", str(store.root)]) == 0
+
+    def test_apply_records_refs_for_a_pre_existing_source(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("clinical:sepsis", title="Sepsis", body="s")
+        src = tmp_path / "sop.md"
+        src.write_text("Vgl. clinical:sepsis\n", encoding="utf-8")
+        entry = store.add_source(src, into_subdir="sop")
+        # Simulate a source registered before the mapping existed.
+        con = SourceRegistry.load(store.sources_path)._connection()
+        with con:
+            con.execute("DELETE FROM source_refs")
+            con.execute("UPDATE sources SET refs_scanned_at = NULL")
+        store._source_registry = None
+
+        assert main(["sources", "backfill", "--root", str(store.root)]) == 0
+        assert "no recorded page references" in capsys.readouterr().out
+        assert store.source_refs(entry.rel_path) == []  # dry run wrote nothing
+
+        assert main(["sources", "backfill", "--root", str(store.root), "--apply"]) == 0
+        store._source_registry = None
+        (ref,) = store.source_refs(entry.rel_path)
+        assert ref.page_slug == "clinical:sepsis"

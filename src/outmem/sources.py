@@ -24,7 +24,16 @@ Registry format
         registered_at TEXT NOT NULL,
         document_key  TEXT,   -- which document this file is a version of
         superseded_by TEXT,   -- rel_path of the version that replaced it
-        origin_path   TEXT    -- where it was ingested from
+        origin_path   TEXT,   -- where it was ingested from
+        refs_scanned_at TEXT  -- when it was scanned for page references
+    );
+
+    CREATE TABLE source_refs (
+        rel_path  TEXT NOT NULL REFERENCES sources(rel_path) ON DELETE CASCADE,
+        token     TEXT NOT NULL,  -- the slug as written in the frozen bytes
+        page_slug TEXT NOT NULL,  -- what it meant; kept current by rename
+        exact     INTEGER NOT NULL,  -- 1 when written as [[token]]
+        PRIMARY KEY (rel_path, token)
     );
 
     CREATE TABLE ingestions (
@@ -42,8 +51,11 @@ The rollback-journal choice (not WAL) means the main ``.sources.db``
 file always reflects committed state, so it's a normal git-tracked
 binary with no ``-wal`` / ``-shm`` companion files.
 
-The last three columns arrived with schema v2 and are added in place by
-:func:`_migrate` on open, so an existing registry never needs rebuilding.
+``source_refs`` is what uncouples a frozen file from mutable page slugs:
+the bytes keep naming ``clinical:sepsis``, but the registry remembers
+which page that meant at ingest, and ``rename_page`` re-points it. New
+columns and tables are added in place by :func:`_migrate` on open, so an
+existing registry never needs rebuilding.
 
 Layout: every source lives at
 ``<sources_dir>/[<into>/]<sha256[:12]>/<filename>``. The hash
@@ -72,7 +84,7 @@ SOURCES_DIR = "sources"
 REGISTRY_FILENAME = ".sources.db"
 
 # Bumped only when the sources/ingestions schema changes shape.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 ALLOWED_EXTENSIONS = frozenset({".md", ".txt", ".csv", ".json", ".mmd", ".yaml", ".yml"})
 
@@ -109,6 +121,14 @@ class SourceEntry:
     version" from "different document, same filename" in general.
     """
     superseded_by: str | None = None  # rel_path of the version that replaced this
+    refs_scanned_at: str | None = None
+    """When this source was scanned for page references, if ever.
+
+    Distinct from "has no references": a source that names no pages is
+    scanned and empty, while one ingested before the scan existed is
+    unknown. Without this column ``sources backfill`` cannot tell them
+    apart and re-reports the empty ones on every run.
+    """
     origin_path: str | None = None
     """Where the file was ingested from.
 
@@ -246,6 +266,16 @@ def distinguishing_segment(origin: str | None, other: str | None) -> str | None:
             return None  # a hash directory is not a name
         return mine
     return None
+
+
+@dataclass(frozen=True)
+class SourceRef:
+    """A page a frozen source names, and what that name resolved to."""
+
+    rel_path: str  # the source
+    token: str  # the slug as written in the frozen bytes
+    page_slug: str  # the page it meant; kept current across renames
+    exact: bool  # written as [[token]] rather than guessed from prose
 
 
 @dataclass
@@ -460,6 +490,80 @@ class SourceRegistry:
         con.commit()
         entry.document_key = document_key
         return entry
+
+    def record_refs(self, rel_path: str, refs: Iterable[SourceRef]) -> list[SourceRef]:
+        """Record which pages a frozen source names, resolved at ingest.
+
+        This is what uncouples a content-addressed file from mutable page
+        slugs. The bytes keep saying ``clinical:sepsis`` — they must, a
+        source is a faithful copy — but the registry remembers that *at
+        the moment of ingest* that token meant a specific page, and
+        :meth:`repoint_refs` keeps that current across renames. The
+        reference is then held by identity rather than by a string, which
+        is the same move ``origin_path`` makes for document names.
+
+        Only resolvable references are worth storing; the caller filters.
+        """
+        rows = list(refs)
+        stamp = format_iso_z(utc_now())
+        con = self._connection()
+        with con:
+            if rows:
+                con.executemany(
+                    "INSERT OR REPLACE INTO source_refs "
+                    "(rel_path, token, page_slug, exact) VALUES (?, ?, ?, ?)",
+                    [(rel_path, r.token, r.page_slug, int(r.exact)) for r in rows],
+                )
+            # Stamped even when nothing was found, so "scanned and empty"
+            # is distinguishable from "never scanned".
+            con.execute(
+                "UPDATE sources SET refs_scanned_at = ? WHERE rel_path = ?",
+                (stamp, rel_path),
+            )
+        entry = self.entries.get(rel_path)
+        if entry is not None:
+            entry.refs_scanned_at = stamp
+        return rows
+
+    def refs(self, rel_path: str | None = None) -> list[SourceRef]:
+        """Recorded source→page references, for one source or all of them."""
+        con = self._connection()
+        if rel_path is None:
+            rows = con.execute(
+                "SELECT rel_path, token, page_slug, exact FROM source_refs "
+                "ORDER BY rel_path, token"
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT rel_path, token, page_slug, exact FROM source_refs "
+                "WHERE rel_path = ? ORDER BY token",
+                (rel_path,),
+            ).fetchall()
+        return [
+            SourceRef(
+                rel_path=r["rel_path"],
+                token=r["token"],
+                page_slug=r["page_slug"],
+                exact=bool(r["exact"]),
+            )
+            for r in rows
+        ]
+
+    def repoint_refs(self, old_slug: str, new_slug: str) -> int:
+        """Follow a rename. Returns the number of references re-pointed.
+
+        ``rename_page`` rewrites ``[[links]]`` in pages and ``log/`` but
+        physically cannot rewrite a source — that is what content
+        addressing means. It can rewrite the *mapping*, which is why the
+        mapping exists.
+        """
+        con = self._connection()
+        with con:
+            cur = con.execute(
+                "UPDATE source_refs SET page_slug = ? WHERE page_slug = ?",
+                (new_slug, old_slug),
+            )
+        return int(cur.rowcount or 0)
 
     def record_ingestion(
         self,
@@ -683,6 +787,18 @@ def _init_schema(con: sqlite3.Connection) -> None:
         " pages_touched TEXT NOT NULL)"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS ingestions_rel_path ON ingestions(rel_path)")
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS source_refs ("
+        " rel_path TEXT NOT NULL"
+        " REFERENCES sources(rel_path) ON DELETE CASCADE,"
+        " token TEXT NOT NULL,"      # as written in the frozen file
+        " page_slug TEXT NOT NULL,"  # what it meant; kept current by rename
+        " exact INTEGER NOT NULL,"   # 1 when written as [[token]]
+        " PRIMARY KEY (rel_path, token))"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS source_refs_page ON source_refs(page_slug)"
+    )
     # A fresh file is at user_version 0, so it takes the same path as an
     # existing one — the migration *is* how the v2 columns get added, and
     # running it on both shapes is what keeps them identical.
@@ -701,8 +817,10 @@ def _migrate(con: sqlite3.Connection) -> None:
     """
     version = con.execute("PRAGMA user_version").fetchone()[0]
     existing = {row[1] for row in con.execute("PRAGMA table_info(sources)")}
-    wanted = ("document_key", "superseded_by", "origin_path")
+    wanted = ("document_key", "superseded_by", "origin_path", "refs_scanned_at")
     missing = [c for c in wanted if c not in existing]
+    # v3 added source_refs, created unconditionally above by CREATE TABLE
+    # IF NOT EXISTS — so the migration only has to move user_version.
     # The version is the fast path; the columns are the actual
     # precondition. Checking both means a registry stamped v2 by an
     # earlier build of this change — when the identity column was still
@@ -725,7 +843,8 @@ def _read_all_entries(con: sqlite3.Connection) -> dict[str, SourceEntry]:
     entries: dict[str, SourceEntry] = {}
     for row in cur.execute(
         "SELECT rel_path, sha256, size_bytes, registered_at, document_key, "
-        "superseded_by, origin_path FROM sources ORDER BY rel_path"
+        "superseded_by, origin_path, refs_scanned_at FROM sources "
+        "ORDER BY rel_path"
     ).fetchall():
         entries[row["rel_path"]] = SourceEntry(
             rel_path=row["rel_path"],
@@ -734,6 +853,7 @@ def _read_all_entries(con: sqlite3.Connection) -> dict[str, SourceEntry]:
             document_key=row["document_key"],
             superseded_by=row["superseded_by"],
             origin_path=row["origin_path"],
+            refs_scanned_at=row["refs_scanned_at"],
             size_bytes=int(row["size_bytes"]),
             ingestions=[],
         )

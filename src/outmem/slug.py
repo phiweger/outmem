@@ -127,3 +127,51 @@ def extract_wikilinks(body: str) -> list[Wikilink]:
         display = (match.group(2) or slug).strip()
         out.append(Wikilink(slug=slug, display=display, raw=match.group(0)))
     return out
+
+
+# A slug written as running text rather than as a `[[link]]`. Requires at
+# least one `:` — a single-segment slug like `sepsis` is just a word, and
+# matching bare words would flag most of a document.
+_SLUG_MENTION_RE = re.compile(
+    r"(?<![\w:-])[a-z0-9]+(?:-[a-z0-9]+)*(?::[a-z0-9]+(?:-[a-z0-9]+)*)+(?![\w-])"
+)
+
+
+@dataclass(frozen=True)
+class SlugReference:
+    """A slug named by a piece of text, and how confidently."""
+
+    slug: str
+    exact: bool
+    """True when written as ``[[slug]]``.
+
+    An exact reference is unambiguous and needs no heuristics: it works
+    for single-segment slugs, survives a flat wiki with no namespaces,
+    and can never be a time or a ratio. An inexact one is a *guess* the
+    caller must gate — the grammar is permissive enough that ``12:30``
+    and ``3:1`` parse as slugs, and ``clinical:x: dose`` uses the second
+    colon as punctuation.
+    """
+
+
+def extract_slug_references(text: str) -> list[SlugReference]:
+    """Every slug ``text`` appears to name, exact references first.
+
+    Linked spans are removed before the prose scan, so a ``[[link]]`` is
+    reported once, as exact. Order within each group follows first
+    appearance; duplicates are dropped.
+    """
+    out: list[SlugReference] = []
+    seen: set[str] = set()
+    prose = text
+    for link in extract_wikilinks(text):
+        prose = prose.replace(link.raw, " ")
+        if link.slug not in seen:
+            seen.add(link.slug)
+            out.append(SlugReference(slug=link.slug, exact=True))
+    for match in _SLUG_MENTION_RE.finditer(prose):
+        token = match.group(0)
+        if token not in seen:
+            seen.add(token)
+            out.append(SlugReference(slug=token, exact=False))
+    return out

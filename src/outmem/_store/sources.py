@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from outmem.exceptions import OutmemError
+from outmem.slug import extract_slug_references
 from outmem.sources import (
     REGISTRY_FILENAME,
     SOURCES_DIR,
     DocumentKeyConflict,
     IngestionRecord,
     SourceEntry,
+    SourceRef,
     SourceRegistry,
     candidate_document_key,
     copy_source,
@@ -129,6 +131,7 @@ def add_source(
         raise _ambiguous_identity_error(
             conflict.document_key, conflict.claimant, origin
         ) from None
+    record_source_refs(store, rel_path)
     if commit:
         store._commit_paths(
             [
@@ -138,6 +141,52 @@ def add_source(
             subject=f"source: {rel_path}",
         )
     return entry
+
+
+def record_source_refs(store: WikiStore, rel_path: str) -> list[SourceRef]:
+    """Resolve the page slugs a source names and record the mapping.
+
+    Runs at ingest because that is the only moment the tokens are known
+    to be correct: the slugs are live, the wiki is in a state the author
+    was looking at, and the file is about to become immutable. Afterwards
+    only the registry can carry this — the bytes cannot be touched.
+
+    An **exact** ``[[link]]`` is recorded whenever it resolves. A bare
+    prose token is a guess, so it is recorded only if it resolves *and*
+    its namespace exists — the same gate lint uses to keep ``12:30`` and
+    ``3:1`` out. Anything unresolvable is skipped rather than stored
+    wrong; it was already dead when it arrived.
+    """
+    path = store.sources_path / rel_path
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    known = set(store.list_slugs())
+    namespaces = {
+        ":".join(s.split(":")[:i])
+        for s in known
+        for i in range(1, len(s.split(":")))
+    }
+    resolved: list[SourceRef] = []
+    for ref in extract_slug_references(text):
+        if not ref.exact and ref.slug.rsplit(":", 1)[0] not in namespaces:
+            continue
+        try:
+            canonical = store.resolve_slug(ref.slug)
+        except OutmemError:
+            continue
+        if canonical not in known:
+            continue
+        resolved.append(
+            SourceRef(
+                rel_path=rel_path,
+                token=ref.slug,
+                page_slug=canonical,
+                exact=ref.exact,
+            )
+        )
+    return get_registry(store).record_refs(rel_path, resolved)
 
 
 def _adopt_or_refuse(

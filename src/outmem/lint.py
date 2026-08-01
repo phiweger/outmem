@@ -44,7 +44,12 @@ from outmem.index import (
     load_page_text,
     render_index,
 )
-from outmem.slug import PAGES_DIR, extract_wikilinks, relpath_to_slug
+from outmem.slug import (
+    PAGES_DIR,
+    extract_slug_references,
+    extract_wikilinks,
+    relpath_to_slug,
+)
 
 
 class Severity(StrEnum):
@@ -121,8 +126,11 @@ def lint_wiki(
     pages = _load_pages(wiki_dir, pages_dir, report)
 
     _check_aliases(pages, report)
-    _check_wikilinks(pages, report)
-    _check_dead_slug_mentions(pages, report)
+    # An alias a frozen source depends on is load-bearing, not debt — the
+    # retirement nudges below must not tell you to remove it.
+    pinned = _source_pinned_aliases(sources_dir, _alias_map(pages))
+    _check_wikilinks(pages, pinned, report)
+    _check_dead_slug_mentions(pages, pinned, report)
     _check_provenance(pages, raw_dir=raw_dir, sources_dir=sources_dir, report=report)
     _check_sources_registry(sources_dir, report)
     _check_source_slug_coupling(pages, sources_dir, report)
@@ -241,6 +249,7 @@ _SLUG_TOKEN_RE = re.compile(
 
 def _check_dead_slug_mentions(
     pages: dict[str, _LoadedPage],
+    pinned: frozenset[str],
     report: LintReport,
 ) -> None:
     """Flag slugs written as prose that no longer resolve.
@@ -301,7 +310,7 @@ def _check_dead_slug_mentions(
                         message=(
                             f"text mentions {token!r}, which resolves only via "
                             f"an alias on {aliases[token]!r} — update it to "
-                            f"{aliases[token]!r} so the alias can eventually go"
+                            f"{aliases[token]!r}" + _alias_advice(token, pinned)
                         ),
                     )
                 )
@@ -319,6 +328,22 @@ def _check_dead_slug_mentions(
                     ),
                 )
             )
+
+
+def _alias_advice(alias: str, pinned: frozenset[str]) -> str:
+    """The trailing clause of an alias-retirement nudge.
+
+    Retiring an alias is the right end state — that is what keeps aliases
+    from becoming permanent — *unless* a content-addressed source names
+    it. That file cannot be edited to stop needing it, so the alias is
+    structural and the nudge applies only to the editable reference.
+    """
+    if alias in pinned:
+        return (
+            "; keep the alias — a frozen source under sources/ names "
+            f"{alias!r} and cannot be rewritten"
+        )
+    return " so the alias can eventually go"
 
 
 def _alias_map(pages: dict[str, _LoadedPage]) -> dict[str, str]:
@@ -377,6 +402,7 @@ def _check_aliases(
 
 def _check_wikilinks(
     pages: dict[str, _LoadedPage],
+    pinned: frozenset[str],
     report: LintReport,
 ) -> None:
     known = set(pages.keys())
@@ -394,7 +420,7 @@ def _check_wikilinks(
                         message=(
                             f"[[{target}]] resolves only via an alias on "
                             f"{aliases[target]!r} — rewrite it to "
-                            f"[[{aliases[target]}]] so the alias can eventually go"
+                            f"[[{aliases[target]}]]" + _alias_advice(target, pinned)
                         ),
                     )
                 )
@@ -494,10 +520,37 @@ def _check_source_slug_coupling(
     """
     if sources_dir is None or not sources_dir.is_dir():
         return
+    # A token with a *recorded* mapping resolves by identity rather than
+    # by string: the registry remembers what it meant at ingest and
+    # `rename_page` keeps that current, so a rename can no longer break
+    # it. When that mapping's target is gone the reference is *certainly*
+    # dead — no heuristics, no namespace gate, and it works for
+    # single-segment slugs the text scan can never see.
+    recorded = _recorded_refs(sources_dir)
+    for source_rel in sorted(recorded):
+        for token, target in sorted(recorded[source_rel].items()):
+            if target in pages:
+                continue
+            report.findings.append(
+                LintFinding(
+                    kind="source-references-dead-slug",
+                    severity=Severity.WARNING,
+                    path=f"{sources_dir.name}/{source_rel}",
+                    message=(
+                        f"frozen source references {token!r}, recorded at "
+                        f"ingest as {target!r}, which no longer exists. A "
+                        "rename would have been followed — this page was "
+                        "deleted or moved outside outmem. Restore it, or "
+                        "re-ingest the source without the slug."
+                    ),
+                )
+            )
+
     # Resolution and the false-positive gate are separate questions. An
-    # alias resolves, so it belongs in `known`; but the namespace gate
-    # keeps deriving from live pages only, because widening it is what
-    # would let `12:30` back in.
+    # alias resolves, so it belongs in `resolvable`; but the namespace
+    # gate keeps deriving from live pages only, because widening it is
+    # what would let `12:30` back in. This half is the fallback for
+    # sources ingested before the mapping existed.
     resolvable = set(pages) | set(_alias_map(pages))
     namespaces: set[str] = set()
     for slug in pages:
@@ -514,11 +567,15 @@ def _check_source_slug_coupling(
         except (OSError, UnicodeDecodeError):
             continue
         rel = f"{sources_dir.name}/{path.relative_to(sources_dir).as_posix()}"
+        source_rel = path.relative_to(sources_dir).as_posix()
+        mapped = recorded.get(source_rel, {})
         seen: set[str] = set()
         for match in _SLUG_TOKEN_RE.finditer(text):
             token = match.group(0)
             if token in resolvable or token in seen:
                 continue
+            if token in mapped:
+                continue  # the mapping owns this token, reported above
             if token.rsplit(":", 1)[0] not in namespaces:
                 continue
             seen.add(token)
@@ -594,6 +651,47 @@ def _provenance_sha(entry: Any) -> str | None:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return None
+
+
+def _recorded_refs(sources_dir: Path | None) -> dict[str, dict[str, str]]:
+    """``source rel_path -> {token: page_slug}`` from the registry."""
+    if sources_dir is None or not sources_dir.is_dir():
+        return {}
+    from outmem.sources import SourceRegistry
+
+    try:
+        registry = SourceRegistry.load(sources_dir)
+    except Exception:  # a registry we can't read is not a lint failure
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for ref in registry.refs():
+        out.setdefault(ref.rel_path, {})[ref.token] = ref.page_slug
+    return out
+
+
+def _source_pinned_aliases(
+    sources_dir: Path | None, aliases: dict[str, str]
+) -> frozenset[str]:
+    """Aliases a frozen source depends on, so retiring one would break it.
+
+    Both alias nudges end with "so the alias can eventually go". For an
+    alias that is the only thing keeping a content-addressed file's
+    reference alive, that advice is wrong — the source cannot be edited
+    to stop needing it. These are load-bearing, and the nudge says so.
+    """
+    if not aliases or sources_dir is None or not sources_dir.is_dir():
+        return frozenset()
+    from outmem.sources import REGISTRY_FILENAME as _REGISTRY_FILE
+    pinned: set[str] = set()
+    for path in sources_dir.rglob("*"):
+        if not path.is_file() or path.name == _REGISTRY_FILE:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        pinned.update(ref.slug for ref in extract_slug_references(text) if ref.slug in aliases)
+    return frozenset(pinned)
 
 
 def _registry_sha(sources_dir: Path, ref: str) -> str | None:
