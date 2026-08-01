@@ -182,6 +182,31 @@ def load_editorial_pages(
     return pages, failures
 
 
+def alias_index(pages_dir: Path) -> dict[str, str]:
+    """Map every declared alias to the slug of the page that claims it.
+
+    File-first: an alias that collides with a live page's slug is
+    dropped, so a stale alias can never shadow a real page. Collisions
+    between two pages' aliases are also dropped — the winner would depend
+    on directory order — and ``outmem lint`` reports both.
+    """
+    pages, _failures = load_editorial_pages(pages_dir)
+    real = {p.slug for p in pages}
+    out: dict[str, str] = {}
+    clashing: set[str] = set()
+    for page in pages:
+        for alias in page.frontmatter.aliases:
+            if alias in real or alias == INDEX_SLUG:
+                continue  # a live page always wins its own name
+            if alias in out and out[alias] != page.slug:
+                clashing.add(alias)
+                continue
+            out[alias] = page.slug
+    for alias in clashing:
+        out.pop(alias, None)
+    return out
+
+
 def render_index(pages_dir: Path) -> str:
     """Build the index.md content from the current state of ``pages_dir``.
 
@@ -289,6 +314,7 @@ __all__ = [
     "IndexLevel",
     "LoadedPage",
     "PageLoadFailure",
+    "alias_index",
     "editorial_pages",
     "index_page_text",
     "load_editorial_pages",

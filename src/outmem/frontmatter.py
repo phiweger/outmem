@@ -23,6 +23,7 @@ upstream-supplied entries verbatim during compaction.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -31,7 +32,10 @@ from typing import Any
 import yaml
 
 from outmem._time import ensure_utc, format_iso_z, parse_iso_z, utc_now
-from outmem.exceptions import FrontmatterError
+from outmem.exceptions import FrontmatterError, SlugError
+from outmem.slug import validate_slug
+
+log = logging.getLogger(__name__)
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
@@ -54,6 +58,14 @@ class WikiFrontmatter:
     created: datetime | None = None
     updated: datetime | None = None
     tags: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    """Former slugs this page also answers to.
+
+    Set by ``outmem rename`` so a move isn't a hard break for inbound
+    ``[[links]]`` and for references outside the wiki entirely (tickets,
+    configs) that outmem cannot rewrite. Resolution is one-way and
+    file-first: a live page always wins over any alias claiming its name.
+    """
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -210,11 +222,11 @@ def touch_updated(frontmatter: WikiFrontmatter, *, now: datetime | None = None) 
 # ---------------------------------------------------------------------------
 
 
-_KNOWN_FIELDS = {"title", "slug", "provenance", "created", "updated", "tags"}
+_KNOWN_FIELDS = {"title", "slug", "provenance", "created", "updated", "tags", "aliases"}
 
 
-def _raw_tag_text(raw_yaml: str) -> list[str] | None:
-    """The *as-written* text of each entry in the top-level ``tags:`` list.
+def _raw_sequence_text(raw_yaml: str, key: str) -> list[str] | None:
+    """The *as-written* text of each entry in a top-level sequence.
 
     ``yaml.safe_load`` resolves scalars before we can see them, and the
     resolution is lossy in ways that matter for tags: ``007`` becomes the
@@ -235,7 +247,7 @@ def _raw_tag_text(raw_yaml: str) -> list[str] | None:
     if not isinstance(node, yaml.MappingNode):
         return None
     for key_node, value_node in node.value:
-        if getattr(key_node, "value", None) != "tags":
+        if getattr(key_node, "value", None) != key:
             continue
         if not isinstance(value_node, yaml.SequenceNode):
             return None
@@ -264,7 +276,10 @@ def _frontmatter_from_dict(
     provenance = _coerce_provenance(data.get("provenance", []))
     created = _coerce_datetime(data.get("created"), field_name="created")
     updated = _coerce_datetime(data.get("updated"), field_name="updated")
-    tags = _coerce_tags(data.get("tags", []), _raw_tag_text(raw_yaml))
+    tags = _coerce_tags(data.get("tags", []), _raw_sequence_text(raw_yaml, "tags"))
+    aliases = _coerce_aliases(
+        data.get("aliases", []), _raw_sequence_text(raw_yaml, "aliases")
+    )
     extra = {k: v for k, v in data.items() if k not in _KNOWN_FIELDS}
 
     return WikiFrontmatter(
@@ -274,6 +289,7 @@ def _frontmatter_from_dict(
         created=created,
         updated=updated,
         tags=tags,
+        aliases=aliases,
         extra=extra,
     )
 
@@ -291,6 +307,11 @@ def _frontmatter_to_dict(frontmatter: WikiFrontmatter) -> dict[str, Any]:
         data["updated"] = frontmatter.updated
     if frontmatter.tags:
         data["tags"] = list(frontmatter.tags)
+    # After tags, before `extra` — that is where a hand-written `aliases:`
+    # already lands today (it round-trips via `extra`), so promoting it to a
+    # known field doesn't reorder existing files.
+    if frontmatter.aliases:
+        data["aliases"] = list(frontmatter.aliases)
     data.update(frontmatter.extra)
     return data
 
@@ -310,6 +331,43 @@ def _coerce_provenance(value: Any) -> list[ProvenanceEntry]:
             raise FrontmatterError(
                 f"Provenance entries must be strings or mappings, got {type(entry).__name__}."
             )
+    return out
+
+
+def _coerce_aliases(value: Any, raw_text: list[str] | None = None) -> list[str]:
+    """Normalise ``aliases:``, dropping anything unusable rather than raising.
+
+    Deliberately diverges from :func:`_coerce_tags`, which raises. An
+    alias is a *convenience*: it must never be able to take a page
+    offline. A malformed entry is dropped with a warning and reported by
+    ``outmem lint``; the page still loads.
+
+    Uses the same lexical recovery as tags because aliases are slugs and
+    hit the identical YAML hazard — a two-segment numeric alias like
+    ``- 12:30`` is a grammatically valid slug that YAML 1.1 resolves to
+    the int 750.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        log.warning("frontmatter: 'aliases' must be a list, got %s — ignored",
+                    type(value).__name__)
+        return []
+    usable_raw = raw_text if raw_text is not None and len(raw_text) == len(value) else None
+    out: list[str] = []
+    for i, alias in enumerate(value):
+        text = alias if isinstance(alias, str) else (
+            usable_raw[i] if usable_raw is not None else None
+        )
+        if text is None:
+            log.warning("frontmatter: dropping unreadable alias %r", alias)
+            continue
+        try:
+            validate_slug(text)
+        except SlugError as exc:
+            log.warning("frontmatter: dropping invalid alias %r (%s)", text, exc)
+            continue
+        out.append(text)
     return out
 
 

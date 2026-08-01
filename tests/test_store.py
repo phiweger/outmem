@@ -965,3 +965,88 @@ class TestDiscoveryMatchesReading:
         store.write_page("abx:penicillin", title="Pen", body="b\n")
         store.write_page("pricing", title="P", body="b\n")
         assert store.unreadable() == []
+
+
+class TestAliases:
+    """A rename shouldn't be a hard break. `aliases:` makes an old slug keep
+    resolving, so inbound links and outside references (tickets, configs)
+    survive a reorganisation."""
+
+    def _renamed(self, tmp_path: Path) -> WikiStore:
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page(
+            "clinical:sepsis", title="Sepsis", body="body\n",
+            extra={"aliases": ["sepsis", "old:sepsis"]},
+        )
+        store.write_page("ref", title="Ref", body="See [[sepsis]].\n")
+        return store
+
+    def test_read_follows_an_alias(self, tmp_path: Path) -> None:
+        store = self._renamed(tmp_path)
+        assert store.read("sepsis").title == "Sepsis"
+        assert store.exists("old:sepsis")
+
+    def test_read_reports_the_canonical_slug(self, tmp_path: Path) -> None:
+        """Otherwise the dashboard renders alias URLs and they never decay."""
+        store = self._renamed(tmp_path)
+        assert store.read("sepsis").slug == "clinical:sepsis"
+
+    def test_a_live_page_always_wins_its_own_name(self, tmp_path: Path) -> None:
+        """A stale alias must never shadow a real page."""
+        store = self._renamed(tmp_path)
+        store.write_page("sepsis-note", title="N", body="n\n")
+        assert store.resolve_slug("sepsis-note") == "sepsis-note"
+
+    def test_extend_page_via_alias_commits_cleanly(self, tmp_path: Path) -> None:
+        """Regression: resolving only in _page_path made extend_page write the
+        canonical file then `git add` the alias path, which doesn't exist —
+        a half-applied write."""
+        store = self._renamed(tmp_path)
+        store.extend_page("sepsis", body="revised\n")
+        assert "revised" in store.read("clinical:sepsis").body
+
+    def test_history_via_alias_is_not_empty(self, tmp_path: Path) -> None:
+        store = self._renamed(tmp_path)
+        assert store.history("sepsis")  # would silently be [] without resolution
+
+    def test_backlinks_fold_onto_the_canonical_page(self, tmp_path: Path) -> None:
+        """Otherwise a renamed page's referrers split across two keys."""
+        store = self._renamed(tmp_path)
+        assert "ref" in store.backlinks("clinical:sepsis")
+
+    def test_writing_a_page_at_an_alias_is_refused(self, tmp_path: Path) -> None:
+        """It would succeed, win resolution file-first, and silently retarget
+        every [[sepsis]] link in the corpus to the new stub."""
+        store = self._renamed(tmp_path)
+        with pytest.raises(OutmemError, match="is an alias of"):
+            store.write_page("sepsis", title="Hijack", body="x\n")
+
+    def test_alias_link_is_not_a_broken_link(self, tmp_path: Path) -> None:
+        """Without this the feature makes `outmem lint` fail CI on every
+        renamed page, which defeats the point."""
+        from outmem.lint import lint_wiki
+
+        store = self._renamed(tmp_path)
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        assert [f for f in report.findings if f.kind == "broken-wikilink"] == []
+        assert [f for f in report.findings if f.kind == "wikilink-via-alias"]
+
+    def test_alias_linked_page_is_not_an_orphan(self, tmp_path: Path) -> None:
+        from outmem.lint import lint_wiki
+
+        store = self._renamed(tmp_path)
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        orphans = {f.path for f in report.findings if f.kind == "orphan-page"}
+        assert not any("sepsis" in p for p in orphans)
+
+    def test_alias_collisions_are_lint_errors(self, tmp_path: Path) -> None:
+        from outmem.lint import lint_wiki
+
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("a", title="A", body="a\n", extra={"aliases": ["shared"]})
+        store.write_page("b", title="B", body="b\n", extra={"aliases": ["shared"]})
+        store.write_page("c", title="C", body="c\n", extra={"aliases": ["a"]})
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        kinds = {f.kind for f in report.findings}
+        assert "alias-conflict" in kinds
+        assert "alias-shadowed" in kinds

@@ -151,7 +151,11 @@ def _build_graph(pages_dir: Path) -> dict[str, tuple[str, ...]]:
         return {}
 
     # Import lazily to avoid a frontmatter ↔ backlinks circular import.
-    from outmem.index import load_page_text
+    from outmem.index import alias_index, load_page_text
+
+    # Fold alias links onto the canonical page, or a renamed page's
+    # referrers split across two keys and find_backlinks sees half.
+    aliases = alias_index(pages_dir)
 
     # slug -> set of referrer slugs (set so duplicates collapse).
     inverse: dict[str, set[str]] = {}
@@ -177,8 +181,9 @@ def _build_graph(pages_dir: Path) -> dict[str, tuple[str, ...]]:
         if frontmatter is not None and frontmatter.extra.get("generated"):
             continue  # generated pages' wikilinks don't count as backlinks
         for link in extract_wikilinks(body):
-            if link.slug == page_slug:
+            target = aliases.get(link.slug, link.slug)
+            if target == page_slug:
                 continue  # self-links don't count
-            inverse.setdefault(link.slug, set()).add(page_slug)
+            inverse.setdefault(target, set()).add(page_slug)
 
     return {slug: tuple(sorted(refs)) for slug, refs in sorted(inverse.items())}

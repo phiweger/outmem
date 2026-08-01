@@ -120,6 +120,7 @@ def lint_wiki(
     pages_dir = wiki_dir / PAGES_DIR
     pages = _load_pages(wiki_dir, pages_dir, report)
 
+    _check_aliases(pages, report)
     _check_wikilinks(pages, report)
     _check_dead_slug_mentions(pages, report)
     _check_provenance(pages, raw_dir=raw_dir, sources_dir=sources_dir, report=report)
@@ -145,6 +146,7 @@ class _LoadedPage:
     body: str
     outbound_links: tuple[str, ...]
     generated: bool
+    aliases: tuple[str, ...] = ()
 
 
 def _load_pages(
@@ -224,6 +226,7 @@ def _load_pages(
             body=body,
             outbound_links=links,
             generated=generated,
+            aliases=tuple(frontmatter.aliases),
         )
     return pages
 
@@ -297,15 +300,84 @@ def _check_dead_slug_mentions(
             )
 
 
+def _alias_map(pages: dict[str, _LoadedPage]) -> dict[str, str]:
+    """Alias → canonical slug. File-first: a live page keeps its own name."""
+    out: dict[str, str] = {}
+    for page in pages.values():
+        for alias in page.aliases:
+            if alias not in pages:
+                out.setdefault(alias, page.slug)
+    return out
+
+
+def _check_aliases(
+    pages: dict[str, _LoadedPage],
+    report: LintReport,
+) -> None:
+    """Aliases that can never resolve, or resolve ambiguously."""
+    claims: dict[str, list[str]] = {}
+    for page in pages.values():
+        for alias in page.aliases:
+            claims.setdefault(alias, []).append(page.slug)
+    for alias, owners in sorted(claims.items()):
+        if alias == INDEX_SLUG:
+            report.findings.append(
+                LintFinding(
+                    kind="alias-reserved", severity=Severity.ERROR,
+                    path=pages[owners[0]].rel_path,
+                    message=f"alias {alias!r} is the reserved index slug",
+                )
+            )
+        elif alias in pages:
+            report.findings.append(
+                LintFinding(
+                    kind="alias-shadowed", severity=Severity.ERROR,
+                    path=pages[owners[0]].rel_path,
+                    message=(
+                        f"alias {alias!r} is a real page, so it never resolves "
+                        "to this one — a live page always wins its own name"
+                    ),
+                )
+            )
+        elif len(owners) > 1:
+            for owner in owners:
+                report.findings.append(
+                    LintFinding(
+                        kind="alias-conflict", severity=Severity.ERROR,
+                        path=pages[owner].rel_path,
+                        message=(
+                            f"alias {alias!r} is also claimed by "
+                            f"{[o for o in owners if o != owner]} — which wins "
+                            "would depend on directory order"
+                        ),
+                    )
+                )
+
+
 def _check_wikilinks(
     pages: dict[str, _LoadedPage],
     report: LintReport,
 ) -> None:
     known = set(pages.keys())
+    aliases = _alias_map(pages)
     for page in pages.values():
         for target in page.outbound_links:
             if target == page.slug:
                 continue  # self-links are accepted; backlinks already skips them
+            if target in aliases:
+                report.findings.append(
+                    LintFinding(
+                        kind="wikilink-via-alias",
+                        severity=Severity.WARNING,
+                        path=page.rel_path,
+                        message=(
+                            f"[[{target}]] resolves only via an alias on "
+                            f"{aliases[target]!r} — rewrite it to "
+                            f"[[{aliases[target]}]] so the alias can eventually go"
+                        ),
+                    )
+                )
+                continue
             if target not in known:
                 report.findings.append(
                     LintFinding(
@@ -558,6 +630,9 @@ def _check_orphans(
 ) -> None:
     """Flag pages with zero inbound wikilinks and no mention in log/."""
     inbound: dict[str, set[str]] = {slug: set() for slug in pages}
+    # A link arriving via an alias still references the page — without
+    # folding, renaming a page makes it look orphaned.
+    aliases = _alias_map(pages)
     for page in pages.values():
         if page.generated:
             # Generated pages (the auto-index) link to everything by
@@ -565,6 +640,7 @@ def _check_orphans(
             # editorial. Don't let them rescue real orphans.
             continue
         for target in page.outbound_links:
+            target = aliases.get(target, target)
             if target in inbound and target != page.slug:
                 inbound[target].add(page.slug)
 

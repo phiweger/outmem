@@ -261,6 +261,7 @@ class WikiStore:
         # Lazily-opened resources holding sqlite connections.
         self._vector_store: VectorStore | None = None
         self._source_registry: SourceRegistry | None = None
+        self._alias_map: dict[str, str] | None = None
         # Guards lazy VectorStore open — the optimize tool queries
         # concurrently across a thread pool, so the check-then-open must be
         # atomic or 8 threads each build an embedder + orphan 7 connections.
@@ -401,6 +402,7 @@ class WikiStore:
         :class:`outmem.exceptions.FrontmatterError` if frontmatter is
         missing or malformed in a way the repair doesn't cover.
         """
+        slug = self.resolve_slug(slug)
         path = self._page_path(slug)
         if not path.exists():
             raise OutmemError(f"No such wiki page: {slug}")
@@ -428,7 +430,7 @@ class WikiStore:
 
     def exists(self, slug: str) -> bool:
         try:
-            return self._page_path(slug).exists()
+            return self._page_path(self.resolve_slug(slug)).exists()
         except SlugError:
             return False
 
@@ -458,6 +460,43 @@ class WikiStore:
                 continue
             out.append(slug)
         return sorted(out)
+
+    def _alias_index(self) -> dict[str, str]:
+        """Alias → canonical slug, built lazily and cached.
+
+        Only consulted on a resolution *miss* (see :meth:`resolve_slug`),
+        so the hot paths — every loop over ``list_slugs()`` calling
+        ``read`` — never pay for the corpus walk that builds it.
+        """
+        if self._alias_map is None:
+            from outmem.index import alias_index
+
+            self._alias_map = alias_index(self.pages_path)
+        return self._alias_map
+
+    def resolve_slug(self, slug: str) -> str:
+        """The canonical slug for ``slug``, following an alias if needed.
+
+        Returns ``slug`` unchanged when a page lives there — checking the
+        file **first** is what guarantees a stale alias can never shadow a
+        live page, and is also what keeps the alias map off the hot path.
+
+        Resolution happens here, at the API boundary, rather than inside
+        the path builders: ``_page_relpath``, ``history._slug_relpath``
+        and the semantic ``exclude_slug`` all derive paths without going
+        through ``_page_path``, so hooking that one function would leave
+        ``extend_page`` reading the aliased page, writing the canonical
+        file, and then staging a path that doesn't exist.
+        """
+        if slug == INDEX_SLUG:
+            return slug
+        try:
+            validate_slug(slug)
+        except SlugError:
+            return slug  # let the caller raise its own error
+        if (self.pages_path / slug_to_relpath(slug)).exists():
+            return slug
+        return self._alias_index().get(slug, slug)
 
     def unreadable(self) -> list[tuple[str, str]]:
         """Every page under ``wiki/pages/`` that isn't cleanly addressable.
@@ -585,11 +624,13 @@ class WikiStore:
 
     def backlinks(self, slug: str) -> tuple[str, ...]:
         """Slugs of pages that link to ``slug`` at the current HEAD."""
+        slug = self.resolve_slug(slug)
         validate_slug(slug)
         return self.backlinks_cache.referrers(slug, head_or_none(self.root))
 
     def history(self, slug: str) -> list[CommitInfo]:
         """Per-page commit history (newest first), tracking renames."""
+        slug = self.resolve_slug(slug)
         validate_slug(slug)
         return page_history(self.root, slug, wiki_dir=self.config.wiki_dir)
 
@@ -600,6 +641,7 @@ class WikiStore:
         include_log: bool = True,
     ) -> str:
         """Raw ``git log -p`` stream — the EXPANSION-pattern helper."""
+        slugs = [self.resolve_slug(s) for s in slugs]
         return topic_evolution(
             self.root,
             slugs,
@@ -673,6 +715,17 @@ class WikiStore:
         page_path = self._page_path(slug)
         if page_path.exists():
             raise OutmemError(f"Page already exists: {slug}. Use extend_page() to edit it.")
+        owner = self._alias_index().get(slug)
+        if owner is not None:
+            # Writing here would succeed (no file at that path) and then win
+            # resolution file-first, silently retargeting every [[slug]] in
+            # the corpus from `owner` to this new stub. Lint would report it
+            # afterwards, by which point the links have changed meaning.
+            raise OutmemError(
+                f"{slug!r} is an alias of {owner!r}; writing a page here would "
+                f"silently retarget every [[{slug}]] link. Remove the alias from "
+                f"{owner!r} first, or choose another slug."
+            )
         now = utc_now()
         frontmatter = WikiFrontmatter(
             title=title,
@@ -709,6 +762,11 @@ class WikiStore:
         is regenerated and staged in the same commit (title or tag
         edits will surface there).
         """
+        # Resolve BEFORE anything else: read() would follow the alias but
+        # _page_relpath(slug) would not, so the commit would stage a path
+        # that doesn't exist — after the page and index.md were already
+        # rewritten on disk.
+        slug = self.resolve_slug(slug)
         if slug == INDEX_SLUG:
             raise OutmemError(
                 "Cannot edit the reserved 'index' slug — `wiki/index.md` "
@@ -979,6 +1037,7 @@ class WikiStore:
         # The cached backlinks key off HEAD; invalidate so the next
         # caller picks up the new state.
         self.backlinks_cache.invalidate()
+        self._alias_map = None
 
     def push(self) -> None:
         """``git push`` to the configured remote / branch."""
@@ -1172,6 +1231,7 @@ class WikiStore:
         )
         # Backlinks are HEAD-keyed; invalidate so the next reader rebuilds.
         self.backlinks_cache.invalidate()
+        self._alias_map = None
         try:
             return current_head(self.root)
         except OutmemError:
