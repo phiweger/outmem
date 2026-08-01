@@ -128,13 +128,28 @@ surface them.
 
 ```bash
 outmem lint
+outmem lint --error-only     # exit non-zero only for errors
 # → exit 0 if clean, 1 for warnings only, 2 for errors
 ```
 
-Static checks: broken wikilinks, malformed frontmatter, slug /
-filename mismatch (errors); orphans, stale provenance, index
-drift (warnings). For semantic near-duplicate / contradiction
-detection, see [features.md](features.md#semantic-index).
+Static checks. **Errors:** broken wikilinks, malformed frontmatter, slug /
+filename mismatch, two pages claiming one slug. **Warnings:** orphans,
+stale provenance, provenance citing a sha256 the registry no longer holds,
+`.sources.db` disagreeing with disk in either direction, frontmatter that
+only parses after self-heal, and *dead slug mentions* — a slug written as
+prose (`Volltext-Digest: clinical:old-name`) that resolves to no page.
+
+That last one matters because a broken-`[[link]]` check cannot see it:
+prose isn't a link, so nothing validates it, and dead references pile up
+silently after a namespace is reorganised. It only fires when the token's
+namespace already exists in the wiki, which keeps times (`12:30`) and
+ratios (`3:1`) out.
+
+`--error-only` is for CI on a wiki that carries known warnings you don't
+want to block on — they are still printed.
+
+For semantic near-duplicate / contradiction detection, see
+[features.md](features.md#semantic-index).
 
 ## Sync derived artefacts after manual edits
 
@@ -194,12 +209,14 @@ a page either works everywhere or fails everywhere:
 | Backlink graph | full frontmatter honoured | links still scanned from raw text |
 | bm25 keyword net (backs the default `rerank(bm25)`) | indexed | omitted **+ WARNING** |
 | Semantic index | indexed | omitted **+ WARNING**, and `outmem reindex` exits 2 |
-| `outmem lint` | — | `frontmatter-invalid` error |
+| `outmem lint` | `frontmatter-repairable` **warning** | `frontmatter-invalid` error |
 
 Before this was shared, each reader decided independently and three of
 them dropped the page with no signal at all — so a page could be
 `read_page`-able yet missing from the TOC and from the default search
-path, with nothing in the repo detecting it.
+path, with nothing in the repo detecting it. Lint was the last holdout:
+it parsed directly and so reported a page as a hard error while every
+other reader served it happily.
 
 For pages already committed (e.g. pulled from a remote, which the hook
 won't have seen), repair on demand:

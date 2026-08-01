@@ -217,3 +217,143 @@ def test_cli_lint_default_command_help() -> None:
 def _unused_io() -> None:
     """Keeps the io import live for any future tests that need it."""
     _ = io.StringIO("")
+
+
+# ---------------------------------------------------------------------------
+# Integrity checks added for the slug-stability work
+# ---------------------------------------------------------------------------
+
+
+def test_dead_slug_mention_flags_prose_references(tmp_path: Path) -> None:
+    """A dangling-link check is by construction blind to a slug written as
+    prose. That is exactly where dead references accumulate after a
+    namespace is reorganised — one production wiki carried them for months."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("sop:mikrobiologie:geraete:vitek2", title="Vitek", body="v")
+    store.write_page(
+        "notes:digest",
+        title="Digest",
+        body="Volltext-Digest: sop:mikrobiologie:vitek2 (alte Struktur)\n",
+    )
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    dead = [f for f in report.findings if f.kind == "dead-slug-mention"]
+    assert len(dead) == 1
+    assert "sop:mikrobiologie:vitek2" in dead[0].message
+    assert dead[0].severity == Severity.WARNING
+
+
+def test_dead_slug_mention_ignores_times_ratios_and_live_pages(tmp_path: Path) -> None:
+    """Slug grammar is permissive enough that `12:30` and `3:1` parse as
+    slugs, and `clinical:x: prose` uses the second colon as punctuation.
+    The namespace gate is what keeps those out."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("clinical:leishmaniose", title="Leish", body="x")
+    store.write_page("clinical:sepsis", title="Sepsis", body="see [[clinical:leishmaniose]]")
+    store.write_page(
+        "notes:dosing",
+        title="Dosing",
+        body=(
+            "clinical:leishmaniose: L-AmB 3 mg/kg, Abnahme 12:30, Verhaeltnis 3:1\n\n"
+            "Link: [[clinical:sepsis]]\n"
+        ),
+    )
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    dead = [f for f in report.findings if f.kind == "dead-slug-mention"]
+    assert dead == [], [f.message for f in dead]
+
+
+def test_duplicate_slug_is_an_error(tmp_path: Path) -> None:
+    """Two files claiming one slug silently collided before — the loser
+    vanished from every slug-keyed check with no signal."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("alpha", title="Alpha", body="a")
+    rogue = store.pages_path / "beta.md"
+    rogue.write_text("---\ntitle: Rogue\nslug: alpha\n---\n\nb\n", encoding="utf-8")
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    dupes = [f for f in report.findings if f.kind == "duplicate-slug"]
+    assert len(dupes) == 1
+    assert dupes[0].severity == Severity.ERROR
+
+
+def test_repairable_frontmatter_warns_instead_of_erroring(tmp_path: Path) -> None:
+    """A page that `read_page` self-heals must not be a CI-failing ERROR in
+    lint while every other reader serves it — but it should still say
+    'persist this'."""
+    store = WikiStore.init(tmp_path / "w")
+    page = store.pages_path / "flu.md"
+    page.write_text(
+        "---\ntitle: Influenza (Teil 1): Erkrankungen\nslug: flu\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    kinds = {f.kind for f in report.findings}
+    assert "frontmatter-repairable" in kinds
+    assert "frontmatter-invalid" not in kinds
+
+
+def test_sources_registry_symmetry_both_directions(tmp_path: Path) -> None:
+    """Nothing reconciled `.sources.db` against disk, so a registry could
+    drift to double-digit percent junk unnoticed."""
+    from outmem.sources import SourceRegistry, compute_sha256
+
+    store = WikiStore.init(tmp_path / "w")
+    store.sources_path.mkdir(parents=True, exist_ok=True)
+    # (a) a row whose file is gone
+    reg = SourceRegistry.load(store.sources_path)
+    reg.register("gone/deadbeefcafe/x.md", sha256="a" * 64, size_bytes=10)
+    # (b) a file with no row
+    stray = store.sources_path / "stray.md"
+    stray.write_text("unregistered\n", encoding="utf-8")
+
+    report = lint_wiki(
+        store.wiki_path,
+        log_dir=store.log_path,
+        raw_dir=store.raw_path,
+        sources_dir=store.sources_path,
+    )
+    kinds = {f.kind for f in report.findings}
+    assert "source-orphaned" in kinds
+    assert "source-unregistered" in kinds
+    assert compute_sha256(stray)  # sanity: the helper gc will reuse
+
+
+def test_provenance_sha_mismatch_detects_a_rehashed_source(tmp_path: Path) -> None:
+    """`stale-provenance` only stats the file. A source re-ingested after a
+    content change lives at a new path, so a page citing the old sha points
+    at content it was never compacted from."""
+    from outmem.sources import SourceRegistry
+
+    store = WikiStore.init(tmp_path / "w")
+    store.sources_path.mkdir(parents=True, exist_ok=True)
+    src = store.sources_path / "deck.md"
+    src.write_text("v2 content\n", encoding="utf-8")
+    reg = SourceRegistry.load(store.sources_path)
+    reg.register("deck.md", sha256="b" * 64, size_bytes=11)
+
+    store.write_page(
+        "pricing",
+        title="Pricing",
+        body="p",
+        provenance=[{"path": "deck.md", "sha256": "a" * 64}],  # the OLD sha
+    )
+    store.write_page("ref", title="Ref", body="See [[pricing]].")
+    report = lint_wiki(
+        store.wiki_path,
+        log_dir=store.log_path,
+        raw_dir=store.raw_path,
+        sources_dir=store.sources_path,
+    )
+    mism = [f for f in report.findings if f.kind == "provenance-sha-mismatch"]
+    assert len(mism) == 1
+    assert mism[0].severity == Severity.WARNING
+
+
+def test_cli_lint_error_only_ignores_warnings(tmp_path: Path) -> None:
+    """A wiki carrying known warnings shouldn't fail CI just because a new
+    warning-severity check shipped."""
+    from outmem.cli.__main__ import main
+
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("orphan", title="Lonely", body="no links here")
+    assert main(["lint", "--root", str(store.root)]) == 1
+    assert main(["lint", "--root", str(store.root), "--error-only"]) == 0

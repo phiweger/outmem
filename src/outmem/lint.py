@@ -3,9 +3,16 @@
 Read-only mechanical checks against the on-disk wiki. Catches the
 class of problems that don't need an LLM:
 
-- Pages with malformed or missing frontmatter
+- Pages with malformed or missing frontmatter (and pages that only parse
+  after self-heal — repairable, so a warning, not an error)
+- Two pages claiming the same slug
 - Broken ``[[wikilink]]`` references (target slug doesn't exist)
-- Stale provenance (cited ``raw/`` or ``sources/`` file is missing)
+- Slugs written as *prose* that no longer resolve — a dangling-link check
+  is blind to these, and they are where dead references accumulate after
+  a namespace is reorganised
+- Stale provenance (cited ``raw/`` or ``sources/`` file is missing) and
+  provenance citing a sha256 the registry no longer holds
+- ``.sources.db`` disagreeing with what is on disk, in either direction
 - Orphan pages (zero inbound wikilinks, not referenced from ``log/``)
 - Index drift (``wiki/index.md`` doesn't reflect current pages — happens
   when humans edit the wiki via Obsidian without running outmem)
@@ -22,6 +29,7 @@ feed straight into CI.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -29,7 +37,13 @@ from pathlib import Path
 from typing import Any
 
 from outmem.frontmatter import ProvenanceEntry, parse_wiki_page
-from outmem.index import INDEX_FILENAME, INDEX_SLUG, editorial_pages, render_index
+from outmem.index import (
+    INDEX_FILENAME,
+    INDEX_SLUG,
+    editorial_pages,
+    load_page_text,
+    render_index,
+)
 from outmem.slug import PAGES_DIR, extract_wikilinks, relpath_to_slug
 
 
@@ -107,7 +121,9 @@ def lint_wiki(
     pages = _load_pages(wiki_dir, pages_dir, report)
 
     _check_wikilinks(pages, report)
+    _check_dead_slug_mentions(pages, report)
     _check_provenance(pages, raw_dir=raw_dir, sources_dir=sources_dir, report=report)
+    _check_sources_registry(sources_dir, report)
     _check_orphans(pages, log_dir=log_dir, report=report)
     _check_index_drift(wiki_dir, pages_dir, report)
 
@@ -139,7 +155,13 @@ def _load_pages(
         expected_slug = relpath_to_slug(path.relative_to(pages_dir))
         rel = f"{wiki_dir.name}/{PAGES_DIR}/{path.relative_to(pages_dir).as_posix()}"
         try:
-            frontmatter, body = parse_wiki_page(path.read_text(encoding="utf-8"))
+            # Same loader every other reader uses, so a page that
+            # ``read_page`` self-heals isn't a CI-failing ERROR here while
+            # the rest of outmem serves it happily. The repair is reported
+            # below at WARNING instead — you still want to persist it.
+            frontmatter, body, repaired = load_page_text(
+                path.read_text(encoding="utf-8")
+            )
         except Exception as exc:
             report.findings.append(
                 LintFinding(
@@ -150,6 +172,35 @@ def _load_pages(
                 )
             )
             continue
+        if repaired:
+            report.findings.append(
+                LintFinding(
+                    kind="frontmatter-repairable",
+                    severity=Severity.WARNING,
+                    path=rel,
+                    message=(
+                        "frontmatter only parses after repair (usually an "
+                        "unquoted ': ' in a value) — persist the fix with "
+                        "`store.repair_pages(dry_run=False)` or a commit "
+                        "through the pre-commit hook"
+                    ),
+                )
+            )
+        if frontmatter.slug in pages:
+            # Silently overwriting here used to lose a page from every
+            # slug-keyed check below (links, orphans) with no signal.
+            report.findings.append(
+                LintFinding(
+                    kind="duplicate-slug",
+                    severity=Severity.ERROR,
+                    path=rel,
+                    message=(
+                        f"slug {frontmatter.slug!r} is already claimed by "
+                        f"{pages[frontmatter.slug].rel_path} — one of the two "
+                        "must change, they cannot both be linked to"
+                    ),
+                )
+            )
         if frontmatter.slug != expected_slug:
             report.findings.append(
                 LintFinding(
@@ -176,6 +227,75 @@ def _load_pages(
     return pages
 
 
+# A slug-shaped token: two or more ``:``-joined segments, matching the slug
+# grammar in outmem.slug. Single-segment tokens are excluded — a bare word
+# like "sepsis" is prose, not a reference.
+_SLUG_TOKEN_RE = re.compile(
+    r"(?<![\w:-])[a-z0-9]+(?:-[a-z0-9]+)*(?::[a-z0-9]+(?:-[a-z0-9]+)*)+(?![\w-])"
+)
+
+
+def _check_dead_slug_mentions(
+    pages: dict[str, _LoadedPage],
+    report: LintReport,
+) -> None:
+    """Flag slugs written as prose that no longer resolve.
+
+    A ``broken-wikilink`` check is *by construction* blind to these: a slug
+    sitting in running text (``"Volltext-Digest: clinical:pflegeheim-x"``)
+    or in a ``provenance.upstream`` string is not a ``[[link]]``, so nothing
+    validates it. That is exactly where dead references accumulate after a
+    namespace is reorganised, and they can sit undetected for months.
+
+    False positives are the whole difficulty here. Slug grammar is permissive
+    enough that ``12:30`` (a time) and ``3:1`` (a ratio) parse as slugs, and
+    a sentence like ``clinical:leishmaniose: L-AmB 3 mg/kg`` uses the second
+    colon as punctuation. The gate: only consider a token whose **namespace
+    prefix already exists in this wiki**. A namespace survives a
+    reorganisation (``sop:mikrobiologie:vitek2`` →
+    ``sop:mikrobiologie:geraete:vitek2`` keeps ``sop``), while ``12`` and
+    ``3`` are not namespaces, so times and ratios drop out.
+    """
+    known = set(pages.keys())
+    # Every namespace prefix in use, at any depth: `abx`, `abx:side-effects`.
+    namespaces: set[str] = set()
+    for slug in known:
+        segments = slug.split(":")
+        for i in range(1, len(segments)):
+            namespaces.add(":".join(segments[:i]))
+    if not namespaces:
+        return
+
+    for page in pages.values():
+        # Drop the linked spans first — a real [[link]] is _check_wikilinks'
+        # job, and double-reporting it here would be noise.
+        prose = page.body
+        for link in extract_wikilinks(page.body):
+            prose = prose.replace(link.raw, " ")
+        seen: set[str] = set()
+        for match in _SLUG_TOKEN_RE.finditer(prose):
+            token = match.group(0)
+            if token in known or token in seen:
+                continue
+            namespace = token.rsplit(":", 1)[0]
+            if namespace not in namespaces:
+                continue  # not a wiki namespace — a time, a ratio, prose
+            seen.add(token)
+            report.findings.append(
+                LintFinding(
+                    kind="dead-slug-mention",
+                    severity=Severity.WARNING,
+                    path=page.rel_path,
+                    message=(
+                        f"text mentions {token!r}, which is not a page — the "
+                        f"{namespace!r} namespace exists, so this is probably a "
+                        "slug left behind by a rename. Update it or make it a "
+                        "[[link]] so it gets checked."
+                    ),
+                )
+            )
+
+
 def _check_wikilinks(
     pages: dict[str, _LoadedPage],
     report: LintReport,
@@ -194,6 +314,58 @@ def _check_wikilinks(
                         message=f"[[{target}]] refers to a page that does not exist",
                     )
                 )
+
+
+def _check_sources_registry(
+    sources_dir: Path | None,
+    report: LintReport,
+) -> None:
+    """Reconcile ``.sources.db`` against what is actually on disk.
+
+    Both directions matter and neither was checked before. A row whose
+    file is gone makes ``list_sources`` advertise material the agent then
+    can't read; a file with no row is invisible to provenance. Because
+    nothing reconciled them, a registry can drift to double-digit
+    percentages of junk without anyone noticing.
+
+    Reported here, actioned by ``outmem sources gc``.
+    """
+    if sources_dir is None or not sources_dir.is_dir():
+        return
+    from outmem.sources import REGISTRY_FILENAME, SourceRegistry
+
+    registry = SourceRegistry.load(sources_dir)
+    registered = set(registry.entries)
+    for rel_path in sorted(registered):
+        if not (sources_dir / rel_path).is_file():
+            report.findings.append(
+                LintFinding(
+                    kind="source-orphaned",
+                    severity=Severity.WARNING,
+                    path=f"{sources_dir.name}/{rel_path}",
+                    message=(
+                        "registered in .sources.db but the file is gone — "
+                        "run `outmem sources gc` to review and remove"
+                    ),
+                )
+            )
+    on_disk = {
+        p.relative_to(sources_dir).as_posix()
+        for p in sources_dir.rglob("*")
+        if p.is_file() and p.name != REGISTRY_FILENAME
+    }
+    for rel_path in sorted(on_disk - registered):
+        report.findings.append(
+            LintFinding(
+                kind="source-unregistered",
+                severity=Severity.WARNING,
+                path=f"{sources_dir.name}/{rel_path}",
+                message=(
+                    "file under sources/ with no .sources.db row — it has no "
+                    "provenance and no ingestion history"
+                ),
+            )
+        )
 
 
 def _check_provenance(
@@ -221,6 +393,62 @@ def _check_provenance(
                         ),
                     )
                 )
+                continue
+            # The file existing is only half the question. A source that was
+            # re-ingested after its content changed lives at a new
+            # sha-addressed path, so a page still citing the old sha points
+            # at content that is no longer what the page was compacted from.
+            cited_sha = _provenance_sha(entry)
+            if cited_sha and sources_dir is not None:
+                actual = _registry_sha(sources_dir, ref)
+                if actual is not None and actual != cited_sha:
+                    report.findings.append(
+                        LintFinding(
+                            kind="provenance-sha-mismatch",
+                            severity=Severity.WARNING,
+                            path=page.rel_path,
+                            message=(
+                                f"cites {ref!r} with sha256 {cited_sha[:12]}… but "
+                                f"the registry has {actual[:12]}… — the source was "
+                                "re-ingested; re-check the page against it"
+                            ),
+                        )
+                    )
+
+
+def _provenance_sha(entry: Any) -> str | None:
+    """The ``sha256`` a dict-shaped provenance entry claims, if any."""
+    if isinstance(entry, dict):
+        candidate = entry.get("sha256")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _registry_sha(sources_dir: Path, ref: str) -> str | None:
+    """The sha256 ``.sources.db`` holds for ``ref``, or None if unknown.
+
+    Cached per sources_dir: ``_check_provenance`` runs per provenance
+    entry across every page, and re-opening the sqlite registry each time
+    would make lint O(entries) database opens.
+    """
+    key = str(sources_dir)
+    cached = _REGISTRY_SHA_CACHE.get(key)
+    if cached is None:
+        from outmem.sources import SourceRegistry
+
+        try:
+            registry = SourceRegistry.load(sources_dir)
+        except Exception:
+            cached = {}
+        else:
+            cached = {rel: e.sha256 for rel, e in registry.entries.items()}
+        _REGISTRY_SHA_CACHE[key] = cached
+    # Provenance may cite the path with or without the `sources/` prefix.
+    return cached.get(ref) or cached.get(ref.removeprefix(f"{sources_dir.name}/"))
+
+
+_REGISTRY_SHA_CACHE: dict[str, dict[str, str]] = {}
 
 
 def _provenance_ref(entry: Any) -> str | None:

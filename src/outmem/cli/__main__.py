@@ -496,7 +496,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
     sys.stdout.write(format_report(report))
     if report.has_errors:
         return 2
-    if report.has_findings:
+    if report.has_findings and not args.error_only:
         return 1
     return 0
 
@@ -910,6 +910,13 @@ def build_parser() -> argparse.ArgumentParser:
         "lint",
         help="Run static checks over the wiki (orphans, broken links, drift).",
         parents=[root_parent],
+    )
+    p_lint.add_argument(
+        "--error-only",
+        action="store_true",
+        help="Exit non-zero only for errors, not warnings. Warnings are still "
+        "printed. Use in CI on a wiki that carries known warnings (orphans, "
+        "dead slug mentions) you don't want to block on.",
     )
     p_lint.set_defaults(func=cmd_lint)
 
