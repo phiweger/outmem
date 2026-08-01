@@ -11,7 +11,7 @@ That's the canonical dev setup.
 
 | Extra | Pulls in | Enables |
 |---|---|---|
-| `dev` | `pytest`, `pytest-asyncio`, `ruff`, `mypy`, `types-pyyaml` | `pytest`, `ruff check`, `mypy src/outmem` |
+| `dev` | `pytest`, `pytest-asyncio`, `hypothesis`, `ruff`, `mypy`, `types-pyyaml` | `pytest`, `ruff check`, `mypy src/outmem` |
 | `agent` | `pydantic-ai`, `jinja2` | `outmem ask`, `outmem.agent.*`, the PydanticAI adapter tests |
 | `semantic` | `pydantic-ai`, `sqlite-vec` | `outmem similar` / `reindex`, vector store |
 | `dashboard` | `fastapi`, `uvicorn[standard]`, `markdown-it-py`, `jinja2` | `outmem dashboard`, `outmem.dashboard.*` tests |
@@ -29,6 +29,28 @@ pytest -q
 ruff check src/outmem tests evals
 mypy src/outmem
 outmem --version
+```
+
+### Property-based tests
+
+`tests/test_properties.py` uses [Hypothesis](https://hypothesis.readthedocs.io/)
+for the pure functions with algebraic invariants — key normalisation,
+frontmatter round-tripping, slug↔path round-tripping, and the derivation rule
+`sources backfill` shares with the ingest-time refusal.
+
+It is scoped deliberately. The most expensive bugs in outmem's history were
+round-trip failures that shipped because the example-based tests happened not
+to contain the input that broke: a tag written `007` came back as `7`, and a
+body opening with an indented code block lost its indent. Both are properties a
+generator finds mechanically. Anything touching git, SQLite or the filesystem
+stays example-based — Hypothesis would be slow there and the value is in
+integration, not algebra.
+
+The profile sets `derandomize=True`, so a bad seed can't fail an unrelated PR's
+CI. To explore beyond the fixed examples:
+
+```bash
+pytest tests/test_properties.py --hypothesis-seed=random -p no:randomly
 ```
 
 If you'd rather keep the dev environment isolated:

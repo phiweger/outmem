@@ -37,7 +37,15 @@ from outmem.slug import validate_slug
 
 log = logging.getLogger(__name__)
 
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
+# `[ \t]*` on the delimiter lines, NOT `\s*`. `\s*` after the closing
+# `---` is greedy across newlines, so it ate the body's own leading
+# whitespace along with the blank separator line — an indented code block
+# opening a page came back as a paragraph, and the pre-commit hook then
+# persisted the damage. The two `\n?` consume the delimiter's newline and
+# at most one blank separator; anything beyond that is the author's.
+_FRONTMATTER_RE = re.compile(
+    r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?\r?\n?(.*)$", re.DOTALL
+)
 
 # Provenance entries may be plain strings or dicts (upstream-ingestion metadata).
 ProvenanceEntry = str | dict[str, Any]

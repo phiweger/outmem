@@ -169,12 +169,16 @@ def normalize_document_key(raw: str) -> str:
         head, dot, ext = key.rpartition(".")
         if not (dot and f".{ext}" in ALLOWED_EXTENSIONS):
             break
-        stripped = collapse(head)
-        if not stripped:
-            break  # the whole key was an extension; keep it over nothing
-        key = stripped
+        # Stripping down to nothing means the key was only ever a file
+        # type — `--as .md` names no document. Refuse rather than store a
+        # key that still carries an extension, which would break the
+        # "identity survives a format change" guarantee for that row.
+        key = collapse(head)
     if not key:
-        raise OutmemError(f"{raw!r} is not a usable document identity (it is empty).")
+        raise OutmemError(
+            f"{raw!r} is not a usable document identity — a key names a "
+            "document, not a file type."
+        )
     return key
 
 

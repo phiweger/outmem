@@ -15,6 +15,31 @@ from outmem.frontmatter import (
 )
 
 
+def test_leading_indentation_survives_the_frontmatter_split() -> None:
+    """A body opening with an indented code block must keep its indent.
+
+    The delimiter pattern used ``\\s*`` after the closing ``---``, which is
+    greedy across newlines and ate the body's own leading whitespace along
+    with the blank separator line — turning a code block into a paragraph.
+    The pre-commit hook then re-serialised and persisted the damage.
+    Found by ``tests/test_properties.py`` on a body of a single space.
+    """
+    page = "---\ntitle: X\nslug: x\n---\n\n    def f():\n        return 1\n"
+    _fm, body = parse_wiki_page(page)
+    assert body.startswith("    def f():")
+
+
+def test_whitespace_only_body_is_preserved() -> None:
+    _fm, body = parse_wiki_page("---\ntitle: X\nslug: x\n---\n\n   ")
+    assert body == "   "
+
+
+def test_extra_blank_lines_after_frontmatter_belong_to_the_body() -> None:
+    """Exactly one blank separator is structural; the rest is content."""
+    _fm, body = parse_wiki_page("---\ntitle: X\nslug: x\n---\n\n\n\nprose\n")
+    assert body == "\n\nprose\n"
+
+
 def test_parse_required_fields(sample_page_text: str) -> None:
     fm, body = parse_wiki_page(sample_page_text)
     assert fm.title == "Pricing formula"
