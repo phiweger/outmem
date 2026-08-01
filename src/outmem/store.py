@@ -87,7 +87,7 @@ from outmem.index import (
     navigate_index,
 )
 from outmem.search import DEFAULT_RESULT_BYTES, SearchResult, rg_available, search
-from outmem.slug import PAGES_DIR, slug_to_relpath, validate_slug
+from outmem.slug import PAGES_DIR, relpath_to_slug, slug_to_relpath, validate_slug
 from outmem.sources import (
     REGISTRY_FILENAME,
     SOURCES_DIR,
@@ -747,6 +747,122 @@ class WikiStore:
             ],
             subject=commit_subject or f"compact: {slug}",
         )
+
+    def rename_page(
+        self,
+        old_slug: str,
+        new_slug: str,
+        *,
+        alias: bool = True,
+        rewrite_links: bool = True,
+        commit_subject: str | None = None,
+    ) -> str:
+        """Move a page to a new slug, rewriting inbound links. One commit.
+
+        Reorganising a namespace by hand means moving the file, editing
+        ``slug:``, and finding every inbound ``[[link]]`` — one production
+        wiki rewrote 583 of them via a throwaway script that shipped two
+        bugs. Doing it here means that work is written once, with tests.
+
+        ``alias=True`` (default) records ``old_slug`` in the moved page's
+        ``aliases:``, so the old name keeps resolving. That matters even
+        with a perfect link rewrite: references *outside* the wiki —
+        tickets, configs, a shipped answer citing a slug — are ones
+        outmem cannot reach. The alias is the safety net under the
+        rewrite, not a replacement for it.
+
+        Returns the new HEAD SHA.
+        """
+        old_slug = self.resolve_slug(old_slug)
+        validate_slug(old_slug)
+        validate_slug(new_slug)
+        if old_slug == new_slug:
+            raise OutmemError(f"Cannot rename {old_slug!r} to itself.")
+        if INDEX_SLUG in (old_slug, new_slug):
+            raise OutmemError("The reserved 'index' slug cannot be renamed.")
+        old_path = self._page_path(old_slug)
+        if not old_path.exists():
+            raise OutmemError(f"No such wiki page: {old_slug}")
+        new_path = self._page_path(new_slug)
+        if new_path.exists():
+            raise OutmemError(f"Page already exists: {new_slug}")
+        owner = self._alias_index().get(new_slug)
+        if owner is not None and owner != old_slug:
+            raise OutmemError(
+                f"{new_slug!r} is an alias of {owner!r}; renaming here would "
+                f"silently retarget every [[{new_slug}]] link."
+            )
+
+        frontmatter, body = parse_wiki_page(
+            old_path.read_text(encoding="utf-8"), fallback_slug=old_slug
+        )
+        frontmatter.slug = new_slug
+        if alias and old_slug not in frontmatter.aliases:
+            frontmatter.aliases = [*frontmatter.aliases, old_slug]
+        touch_updated(frontmatter)
+
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(serialize_wiki_page(frontmatter, body), encoding="utf-8")
+        old_path.unlink()
+        touched = [self._page_relpath(old_slug), self._page_relpath(new_slug)]
+
+        if rewrite_links:
+            touched.extend(self._rewrite_links_to(old_slug, new_slug))
+
+        self._alias_map = None  # the page moved; any cached map is stale
+        self._regenerate_index()
+        touched.append(f"{self.config.wiki_dir}/{INDEX_FILENAME}")
+        return self._commit_paths(
+            touched,
+            subject=commit_subject or f"rename: {old_slug} -> {new_slug}",
+        )
+
+    def _rewrite_links_to(self, old_slug: str, new_slug: str) -> list[str]:
+        """Point every ``[[old_slug]]`` at ``new_slug``. Returns paths touched.
+
+        Matches the whole wikilink rather than substituting the slug as
+        raw text — a naive text replace also hits ``[[old:slug:child]]``
+        (a different page) and any prose that happens to contain the
+        slug, which is exactly the class of bug a hand-rolled rename
+        script produces.
+        """
+        import re as _re
+
+        from outmem.slug import _WIKILINK_RE
+
+        touched: list[str] = []
+        roots = [(self.pages_path, True), (self.log_path, False)]
+        for root, is_page in roots:
+            if not root.is_dir():
+                continue
+            for path in sorted(root.rglob("*.md")):
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if old_slug not in text:
+                    continue
+
+                def _sub(match: _re.Match[str]) -> str:
+                    inner = match.group(0)[2:-2]
+                    target, sep, display = inner.partition("|")
+                    if target.strip() != old_slug:
+                        return match.group(0)
+                    return f"[[{new_slug}{sep}{display}]]"
+
+                rewritten = _WIKILINK_RE.sub(_sub, text)
+                if rewritten == text:
+                    continue
+                path.write_text(rewritten, encoding="utf-8")
+                if is_page:
+                    rel = relpath_to_slug(path.relative_to(self.pages_path))
+                    touched.append(self._page_relpath(rel))
+                else:
+                    touched.append(
+                        f"{self.config.log_dir}/"
+                        f"{path.relative_to(self.log_path).as_posix()}"
+                    )
+        return touched
 
     def extend_page(
         self,

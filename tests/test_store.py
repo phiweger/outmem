@@ -1050,3 +1050,86 @@ class TestAliases:
         kinds = {f.kind for f in report.findings}
         assert "alias-conflict" in kinds
         assert "alias-shadowed" in kinds
+
+
+class TestRenamePage:
+    """`outmem rename` — file, frontmatter, inbound links and the alias, in
+    one commit. Both bugs from a real hand-rolled rename script are pinned."""
+
+    def _wiki(self, tmp_path: Path) -> WikiStore:
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("rki:ratgeber:influenza", title="Flu", body="body\n")
+        store.write_page("ref", title="Ref", body="See [[rki:ratgeber:influenza]].\n")
+        store.append_log(topic="t", content="- see [[rki:ratgeber:influenza]]\n")
+        return store
+
+    def test_moves_file_and_rewrites_links(self, tmp_path: Path) -> None:
+        store = self._wiki(tmp_path)
+        store.rename_page("rki:ratgeber:influenza", "clinical:influenza")
+        assert store.read("clinical:influenza").title == "Flu"
+        assert "[[clinical:influenza]]" in store.read("ref").body
+        assert not (store.pages_path / "rki" / "ratgeber" / "influenza.md").exists()
+
+    def test_multi_segment_namespace_keeps_every_segment(self, tmp_path: Path) -> None:
+        """Regression: a hand-rolled slug_to_path dropped the FIRST segment,
+        writing rki:ratgeber:x to ratgeber/x.md."""
+        store = self._wiki(tmp_path)
+        store.rename_page("rki:ratgeber:influenza", "a:b:c:d")
+        assert (store.pages_path / "a" / "b" / "c" / "d.md").is_file()
+
+    def test_old_slug_still_resolves_via_alias(self, tmp_path: Path) -> None:
+        store = self._wiki(tmp_path)
+        store.rename_page("rki:ratgeber:influenza", "clinical:influenza")
+        assert store.read("rki:ratgeber:influenza").slug == "clinical:influenza"
+
+    def test_prose_containing_the_slug_is_untouched(self, tmp_path: Path) -> None:
+        """Regression: a text-substituting script also rewrote prose, and its
+        guard against that blocked a legitimate case (`clinical:x: dose ...`
+        where the second colon is punctuation)."""
+        store = self._wiki(tmp_path)
+        store.write_page(
+            "notes", title="N",
+            body="rki:ratgeber:influenza: 3 mg/kg laut [[rki:ratgeber:influenza]]\n",
+        )
+        store.rename_page("rki:ratgeber:influenza", "clinical:influenza")
+        body = store.read("notes").body
+        assert "rki:ratgeber:influenza: 3 mg/kg" in body  # prose untouched
+        assert "[[clinical:influenza]]" in body  # link rewritten
+
+    def test_does_not_rewrite_a_longer_slug_that_shares_the_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        store = self._wiki(tmp_path)
+        store.write_page("rki:ratgeber:influenza:kinder", title="K", body="k\n")
+        store.write_page("r2", title="R2", body="See [[rki:ratgeber:influenza:kinder]].\n")
+        store.rename_page("rki:ratgeber:influenza", "clinical:influenza")
+        assert "[[rki:ratgeber:influenza:kinder]]" in store.read("r2").body
+
+    def test_rewrites_the_log_too(self, tmp_path: Path) -> None:
+        store = self._wiki(tmp_path)
+        store.rename_page("rki:ratgeber:influenza", "clinical:influenza")
+        logs = "\n".join(p.read_text() for p in store.log_path.rglob("*.md"))
+        assert "[[clinical:influenza]]" in logs
+
+    def test_lands_as_one_commit_and_lints_clean(self, tmp_path: Path) -> None:
+        from outmem.lint import lint_wiki
+
+        store = self._wiki(tmp_path)
+        before = store.head()
+        store.rename_page("rki:ratgeber:influenza", "clinical:influenza")
+        assert len(store.history("clinical:influenza")) >= 1
+        assert store.head() != before
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        assert [f for f in report.findings if f.severity == "error"] == []
+
+    def test_refuses_an_occupied_target(self, tmp_path: Path) -> None:
+        store = self._wiki(tmp_path)
+        store.write_page("taken", title="T", body="t\n")
+        with pytest.raises(OutmemError, match="already exists"):
+            store.rename_page("rki:ratgeber:influenza", "taken")
+
+    def test_display_text_is_preserved(self, tmp_path: Path) -> None:
+        store = self._wiki(tmp_path)
+        store.write_page("d", title="D", body="See [[rki:ratgeber:influenza|Grippe]].\n")
+        store.rename_page("rki:ratgeber:influenza", "clinical:influenza")
+        assert "[[clinical:influenza|Grippe]]" in store.read("d").body

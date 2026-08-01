@@ -501,6 +501,18 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rename(args: argparse.Namespace) -> int:
+    store = _open_store(args)
+    sha = store.rename_page(
+        args.old_slug,
+        args.new_slug,
+        alias=not args.no_alias,
+        rewrite_links=not args.no_rewrite,
+    )
+    print(sha)
+    return 0
+
+
 def cmd_sources_gc(args: argparse.Namespace) -> int:
     store = _open_store(args)
     audit = store.sources_gc(dry_run=not args.apply)
@@ -934,6 +946,28 @@ def build_parser() -> argparse.ArgumentParser:
         "record-run",
         help="Record a successful agent run (timestamp + HEAD).", parents=[root_parent])
     p_record.set_defaults(func=cmd_record_run)
+
+    p_rename = sub.add_parser(
+        "rename",
+        help="Move a page to a new slug, rewriting inbound wikilinks.",
+        parents=[root_parent],
+    )
+    p_rename.add_argument("old_slug")
+    p_rename.add_argument("new_slug")
+    p_rename.add_argument(
+        "--no-alias",
+        action="store_true",
+        help="Don't record the old slug in `aliases:`. The old name then stops "
+        "resolving, which breaks references outside the wiki that outmem "
+        "cannot rewrite (tickets, configs, shipped answers).",
+    )
+    p_rename.add_argument(
+        "--no-rewrite",
+        action="store_true",
+        help="Don't rewrite inbound [[wikilinks]] (they keep resolving via the "
+        "alias, but stay pointed at the old name).",
+    )
+    p_rename.set_defaults(func=cmd_rename)
 
     p_sources = sub.add_parser(
         "sources",

@@ -103,6 +103,27 @@ read-modify-write. Use `xargs -P` across a batch.
 Allowed source types: `.md`, `.txt`, `.csv`, `.json`, `.mmd`,
 `.yaml` / `.yml`. Binary files are rejected — convert upstream.
 
+## Renaming / reorganising
+
+```bash
+outmem rename rki:ratgeber:influenza clinical:influenza
+outmem rename old new --no-alias      # don't keep the old name resolving
+outmem rename old new --no-rewrite    # leave inbound [[links]] pointing at the old slug
+```
+
+Moves the file, updates `slug:`, rewrites every inbound `[[wikilink]]` across
+`wiki/pages/` and `log/`, and records the old slug in `aliases:` — all in one
+`rename: <old> -> <new>` commit.
+
+The alias is the point, not a nicety. A link rewrite can only reach what is
+*inside* the wiki; references outside it — tickets, configs, a shipped answer
+citing a slug — are ones outmem cannot touch. The alias keeps those resolving.
+
+Link rewriting matches whole wikilinks, so prose containing the slug is left
+alone and `[[old:slug:child]]` (a different page) isn't caught by a prefix
+match. `outmem lint` reports surviving alias-resolved links as
+`wikilink-via-alias` warnings so the aliases don't become permanent debt.
+
 ## Source registry maintenance
 
 ```bash

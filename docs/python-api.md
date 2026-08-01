@@ -132,6 +132,22 @@ store.record_ingestion(
 )
 ```
 
+## Renaming
+
+```python
+store.rename_page("rki:ratgeber:influenza", "clinical:influenza")
+# moves the file, updates slug:, rewrites inbound [[links]] in pages + log,
+# appends the old slug to aliases: — one `rename: old -> new` commit
+
+store.resolve_slug("rki:ratgeber:influenza")   # "clinical:influenza"
+store.read("rki:ratgeber:influenza")           # still works, .slug is canonical
+```
+
+Aliases resolve **file-first**: a live page always wins its own name, so a
+stale alias can never shadow a real page. They are followable but not
+discoverable — `list_slugs()`, the TOC and the retrieval corpora stay
+canonical-only, one entry per file.
+
 ## Sync
 
 ```python
