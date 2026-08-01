@@ -90,7 +90,7 @@ git:
 semantic:
   embedding_model: openai:text-embedding-3-small
   db_filename: .vectors.db                # tracked in git, sibling of wiki/
-  index: pages+sources                    # or `pages` — see below
+  index: pages                            # or `pages+sources` — see below
   embed_frontmatter: false                # prepend "<title> — <tags>" to chunks
   chunk_size: 2000                        # target characters per chunk
   chunk_max: 8000                         # hard ceiling for oversized paragraphs
@@ -109,14 +109,19 @@ logfire:
 
 #### `semantic.index` — what gets embedded
 
-`pages+sources` (default) indexes both `wiki/pages/` and `wiki/sources/`.
-`pages` indexes only curated pages.
+`pages` (default) indexes only curated pages. `pages+sources` additionally
+indexes `wiki/sources/`.
 
-Reach for `pages` on a source-heavy wiki. Raw sources are near-duplicates
-of the pages distilled from them, and the vector search takes a
-fixed-size KNN *before* anything can filter by kind — so a store that is
-half raw source spends roughly half its candidate window on material that
-is then discarded, pushing curated pages out of reach. Narrowing the
+**`pages` is the default because an indexed source can never be an answer.**
+`search_wiki`'s semantic path maps each matched chunk back to a page slug and
+drops everything that isn't under `wiki/pages/` — so a source chunk is fetched
+into the fixed-size KNN window and then discarded. It cannot influence the
+answer; it can only displace a page that would have. On a store that is half
+raw source, roughly half of every candidate window is spent that way.
+
+Index sources when you use `find_similar` / `outmem similar` over raw
+material — that is the one path that can actually return them, and it's what
+the agent's pre-write duplicate check uses. Narrowing the
 scope also prunes already-indexed source chunks on the next
 `outmem reindex` (they show up in the `removed` count).
 

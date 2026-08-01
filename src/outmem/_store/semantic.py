@@ -371,7 +371,7 @@ def load_for_index(
 def indexable_files_on_disk(store: WikiStore) -> list[str]:
     """Every repo-relative path that would normally be indexed.
 
-    Honours ``semantic.index`` (``"pages+sources"`` or ``"pages"``).
+    Honours ``semantic.index`` (``"pages"`` default, or ``"pages+sources"``).
     Scoping to ``pages`` keeps raw ingested material out of the vector
     store: sources are near-duplicates of the pages distilled from them,
     and because the vector search takes a fixed-``k`` KNN before anything

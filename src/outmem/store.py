@@ -1113,7 +1113,7 @@ class WikiStore:
 
         Embeds files concurrently (≤ ``max_concurrency`` in flight);
         ``on_progress(done, total)`` fires per file. What gets walked
-        follows ``semantic.index`` (``"pages"`` | ``"pages+sources"``).
+        follows ``semantic.index`` (``"pages"`` default | ``"pages+sources"``).
 
         The summary's ``dropped_paths`` lists wiki pages that exist on disk
         but did not make it into the index — check them, they are

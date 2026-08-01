@@ -607,6 +607,10 @@ class TestWikiStoreSemanticIntegration:
         self, wiki_with_semantic: WikiStore, tmp_path: Path
     ) -> None:
         store = wiki_with_semantic
+        # Sources are opt-in since the default became `pages` — search_wiki
+        # discards non-page chunks, so indexing them only serves find_similar,
+        # which is exactly what this test exercises.
+        store.config.outmem.semantic.index = "pages+sources"
         source = tmp_path / "drugs.md"
         source.write_text("ivermectin dosing for cats.\n", encoding="utf-8")
         entry = store.add_source(source)
@@ -918,12 +922,23 @@ class TestIndexScope:
         src.write_text("raw pricing deck, cost-plus 35%\n", encoding="utf-8")
         return store
 
-    def test_default_scope_indexes_pages_and_sources(self, tmp_path: Path) -> None:
+    def test_default_scope_is_pages_only(self, tmp_path: Path) -> None:
+        """Default is `pages`: search_wiki maps chunks back to page slugs and
+        drops the rest, so an indexed source can never be an answer — it can
+        only displace a page in the fixed-k window."""
         from outmem._store.semantic import indexable_files_on_disk
 
         store = self._wiki_with_a_source(tmp_path)
         rels = indexable_files_on_disk(store)
         assert any(r.endswith("pages/pricing.md") for r in rels)
+        assert not any("sources/" in r for r in rels)
+
+    def test_opting_in_indexes_sources_too(self, tmp_path: Path) -> None:
+        from outmem._store.semantic import indexable_files_on_disk
+
+        store = self._wiki_with_a_source(tmp_path)
+        store.config.outmem.semantic.index = "pages+sources"
+        rels = indexable_files_on_disk(store)
         assert any("sources/deck.md" in r for r in rels)
 
     def test_pages_scope_excludes_sources(self, tmp_path: Path) -> None:
@@ -951,11 +966,11 @@ class TestIndexScope:
         cfg_path = root / "config.yaml"
         cfg_path.write_text(
             cfg_path.read_text(encoding="utf-8").replace(
-                "index: pages+sources", "index: nonsense"
+                "index: pages", "index: nonsense"
             ),
             encoding="utf-8",
         )
-        assert load_yaml_config(root).semantic.index == "pages+sources"
+        assert load_yaml_config(root).semantic.index == "pages"
 
     def test_scope_round_trips_through_config_yaml(self, tmp_path: Path) -> None:
         from outmem.config import load_yaml_config
@@ -965,12 +980,12 @@ class TestIndexScope:
         cfg_path = root / "config.yaml"
         cfg_path.write_text(
             cfg_path.read_text(encoding="utf-8").replace(
-                "index: pages+sources", "index: pages"
+                "index: pages", "index: pages+sources"
             ),
             encoding="utf-8",
         )
         cfg = load_yaml_config(root)
-        assert cfg.semantic.index == "pages"
+        assert cfg.semantic.index == "pages+sources"
         assert cfg.semantic.embed_frontmatter is False  # default preserved
 
 
@@ -1055,6 +1070,7 @@ class TestEmbedFrontmatter:
 
         store = WikiStore.init(tmp_path / "w")
         store.config.outmem.semantic.embed_frontmatter = True
+        store.config.outmem.semantic.index = "pages+sources"
         src = store.sources_path / "deck.md"
         src.parent.mkdir(parents=True, exist_ok=True)
         src.write_text("raw text\n", encoding="utf-8")

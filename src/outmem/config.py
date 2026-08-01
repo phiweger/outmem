@@ -66,13 +66,16 @@ DEFAULT_SEMANTIC_SIMILARITY_THRESHOLD = 0.80
 DEFAULT_SEMANTIC_TOP_K = 5
 DEFAULT_SEMANTIC_REINDEX_CONCURRENCY = 8  # in-flight embed calls during reindex
 
-# What `outmem reindex` walks. `pages` keeps raw ingested sources out of the
-# vector store; `pages+sources` (the default, and the historical behaviour)
-# indexes both.
+# What `outmem reindex` walks. `pages` is the default: the page-retrieval path
+# (`_semantic_pages`) discards every chunk that isn't under wiki/pages/, so an
+# indexed source can never *be* an answer to `search_wiki` — it can only
+# occupy a slot in the fixed-k vector search and displace a page that would
+# have been. `pages+sources` additionally embeds sources, which is worth it
+# only if you rely on `find_similar` / `outmem similar` over raw material.
 SEMANTIC_INDEX_PAGES = "pages"
 SEMANTIC_INDEX_PAGES_AND_SOURCES = "pages+sources"
 SEMANTIC_INDEX_CHOICES = (SEMANTIC_INDEX_PAGES, SEMANTIC_INDEX_PAGES_AND_SOURCES)
-DEFAULT_SEMANTIC_INDEX = SEMANTIC_INDEX_PAGES_AND_SOURCES
+DEFAULT_SEMANTIC_INDEX = SEMANTIC_INDEX_PAGES
 # Prepend "<title> — <tags>" to every chunk before embedding. Off by default:
 # flipping it re-embeds every page on the next reindex.
 DEFAULT_SEMANTIC_EMBED_FRONTMATTER = False
@@ -164,13 +167,17 @@ class SemanticSettings:
     *how* the index is built and queried when a ``semantic``/``hyde``/
     ``*+semantic`` retrieval strategy or ``find_similar`` needs it.
 
-    ``index`` scopes *what gets indexed*: ``pages+sources`` (default,
-    everything) or ``pages`` (curated wiki pages only). Raw sources are
-    near-duplicates of the pages distilled from them, and the vector
-    search takes a fixed-``k`` KNN before anything can filter by kind, so
-    on a source-heavy wiki they crowd curated pages out of the candidate
-    window. Narrowing to ``pages`` also prunes already-indexed source
-    chunks on the next ``outmem reindex``.
+    ``index`` scopes *what gets indexed*: ``pages`` (default, curated wiki
+    pages only) or ``pages+sources``.
+
+    ``pages`` is the default because ``search_wiki``'s semantic path maps
+    matched chunks back to page slugs and drops everything else — an
+    indexed source is fetched into the fixed-``k`` window and then
+    discarded, so it can never be an answer, only a displaced page. Index
+    sources when you use ``find_similar`` / ``outmem similar`` over raw
+    material, which is the one path that can return them. Narrowing back
+    to ``pages`` prunes already-indexed source chunks on the next
+    ``outmem reindex``.
 
     ``embed_frontmatter`` prepends ``"<title> — <tags>"`` to every chunk
     before embedding. Off by default: turning it on changes what is
@@ -183,7 +190,7 @@ class SemanticSettings:
         semantic:
           embedding_model: openai:text-embedding-3-small
           db_filename: .vectors.db          # relative to wiki root
-          index: pages+sources              # or: pages
+          index: pages                      # or: pages+sources
           embed_frontmatter: false          # prepend "<title> — <tags>"
           chunk_size: 2000
           chunk_max: 8000
@@ -676,9 +683,9 @@ def starter_yaml(
         "semantic:\n"
         f"  embedding_model: {DEFAULT_SEMANTIC_MODEL}\n"
         f"  db_filename: {DEFAULT_SEMANTIC_DB_FILENAME}\n"
-        "  # What to index: `pages+sources` (default) or `pages` to keep raw\n"
-        "  # ingested sources out of the vector store (they crowd curated\n"
-        "  # pages out of the candidate window on source-heavy wikis).\n"
+        "  # What to index: `pages` (default) or `pages+sources`. Sources are\n"
+        "  # never returned by search_wiki (it maps chunks back to page slugs\n"
+        "  # and drops the rest), so indexing them only helps find_similar.\n"
         f"  index: {DEFAULT_SEMANTIC_INDEX}\n"
         "  # Prepend \"<title> \u2014 <tags>\" to every chunk before embedding, so\n"
         "  # titles/tags affect retrieval. Turning this on re-embeds every\n"
