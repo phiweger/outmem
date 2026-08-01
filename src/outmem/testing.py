@@ -108,11 +108,16 @@ class AddressingCase:
 def resolve_like_outmem(store: WikiStore, slug: str) -> str | None:
     """The reference resolver — outmem's own answer, in one place.
 
-    Also the implementation a delegating consumer should copy. It is the
-    oracle every case is measured against, so it cannot drift from what
-    the library actually does.
+    Also the implementation a delegating consumer should copy, so it is
+    written exactly as the docs and the failure message quote it rather
+    than in some equivalent-but-different form. A reader comparing the
+    two should find nothing to reconcile.
+
+    It is the oracle every case is measured against, so it cannot drift
+    from what the library actually does.
     """
-    return store.resolve_slug(slug) if store.exists(slug) else None
+    canonical = store.resolve_slug(slug)
+    return canonical if store.exists(canonical) else None
 
 
 def build_conformance_wiki(root: Path) -> WikiStore:
@@ -123,6 +128,9 @@ def build_conformance_wiki(root: Path) -> WikiStore:
     invalid slug, an alias shadowed by a live page. Those are exactly the
     cases a reimplemented resolver gets wrong, so a corpus without them
     would test only the easy half.
+
+    Needs ``git`` and ``rg`` on PATH, like any wiki outmem creates. If
+    your CI runs the harness, it needs them too.
     """
     store = WikiStore.init(root)
     pages = store.pages_path

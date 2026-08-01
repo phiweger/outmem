@@ -562,18 +562,35 @@ class WikiStore:
         titles some other way ends up walking ``wiki/pages/`` itself and
         building its own slug map, which is how a consumer's addressing
         silently falls behind the library's (:mod:`outmem.testing`).
+
+        Only the pages *at this level* are parsed, not the whole wiki —
+        drilling into a namespace is a per-click operation, and paying
+        for every page on each click makes the cost scale with the wiki
+        rather than with what is on screen. A page whose frontmatter will
+        not parse is absent from ``titles`` rather than blocking the
+        level; :meth:`unreadable` says which and why.
         """
         level = navigate_index(self.list_slugs(), prefix)
         if not titles or not level.pages:
             return level
-        from outmem.index import load_editorial_pages
+        import dataclasses
 
-        wanted = set(level.pages)
-        loaded, _failures = load_editorial_pages(self.pages_path)
-        level.titles.update(
-            {p.slug: p.frontmatter.title for p in loaded if p.slug in wanted}
-        )
-        return level
+        from outmem.index import load_page_text
+
+        found: dict[str, str] = {}
+        for slug in level.pages:
+            path = self.pages_path / slug_to_relpath(slug)
+            try:
+                frontmatter, _body, _repaired = load_page_text(
+                    path.read_text(encoding="utf-8"), fallback_slug=slug
+                )
+            except (OSError, UnicodeDecodeError, FrontmatterError):
+                continue
+            found[slug] = frontmatter.title
+        # Replace rather than mutate: IndexLevel is frozen, and filling a
+        # dict in place would make that promise a lie to anyone holding
+        # the earlier reference.
+        return dataclasses.replace(level, titles=found)
 
     def repair_pages(
         self, *, dry_run: bool = True, commit_subject: str | None = None

@@ -19,6 +19,20 @@ log = logging.getLogger(__name__)
 
 ProgressFn = Callable[[int, int], None]
 
+# At most this many lines when stderr is not a TTY. A `\r`-updated
+# counter costs one line on a terminal however many ticks it has, but
+# captured output gets one line *per tick* — so reindexing a few thousand
+# pages buried everything else in the log, including the install line
+# above it. Progress you cannot scroll past is not progress you can read.
+_CAPTURED_TICKS = 10
+
+
+def _is_milestone(done: int, total: int) -> bool:
+    """Whether this tick is worth a line when output is being captured."""
+    if done <= 1 or done >= total:
+        return True  # always show the first and the last
+    return done % max(1, total // _CAPTURED_TICKS) == 0
+
 
 def report_progress(
     on_progress: ProgressFn | None,
@@ -29,13 +43,23 @@ def report_progress(
     unit: str = "items",
 ) -> None:
     """Emit one progress tick. With ``on_progress`` set, call it (guarded);
-    otherwise write ``label: done/total unit`` to stderr."""
+    otherwise write ``label: done/total unit`` to stderr.
+
+    On a TTY every tick redraws one ``\\r``-updated line. When stderr is
+    captured (CI, a redirected log, a subprocess reading the tail) the
+    output is throttled to ~:data:`_CAPTURED_TICKS` lines plus the first
+    and last, so a long operation stays visible without flooding the log
+    it shares with everything else.
+    """
     if on_progress is not None:
         try:
             on_progress(done, total)
         except Exception as exc:  # a progress callback must never break the op
             log.warning("on_progress raised (%s); ignoring", exc)
         return
-    end = "\r" if (sys.stderr.isatty() and done < total) else "\n"
+    tty = sys.stderr.isatty()
+    if not tty and not _is_milestone(done, total):
+        return
+    end = "\r" if (tty and done < total) else "\n"
     sys.stderr.write(f"{label}: {done}/{total} {unit}{end}")
     sys.stderr.flush()

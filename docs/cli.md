@@ -496,6 +496,12 @@ stderr, then a summary like:
 reindex: 12 re-embedded, 334 unchanged, 0 removed, 47 chunks added, 18234 embed tokens
 ```
 
+Progress goes to stderr. On a terminal it is one `\r`-updated line; when
+stderr is captured (CI, a redirected log, a subprocess reading the tail) it is
+throttled to about a dozen lines plus the first and last, so a long reindex
+stays visible without burying everything else that shares the log. Pass an
+`on_progress` callback via the Python API to route every tick elsewhere.
+
 The embedding-token count is the spend you can multiply by your provider's
 $/M-tokens to get cost. When Logfire is enabled, the same numbers land on
 an `outmem.reindex` span. `--path` reindexes one repo-relative *file*;

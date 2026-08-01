@@ -194,3 +194,45 @@ def test_index_tree_can_carry_titles(store: WikiStore) -> None:
 def test_index_tree_titles_are_opt_in(store: WikiStore) -> None:
     """Filling them costs a parse per page; the default stays a walk."""
     assert store.index_tree().titles == {}
+
+
+def test_index_tree_titles_parse_only_this_level(tmp_path: Path) -> None:
+    """Drilling into a namespace is a per-click operation. Loading every
+    page to title the handful on screen makes the cost scale with the
+    wiki instead of with the view."""
+    store = WikiStore.init(tmp_path / "wiki")
+    for i in range(30):
+        namespace = "shown" if i < 3 else f"other{i}"
+        directory = store.pages_path / namespace
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "p.md").write_text(
+            f"---\ntitle: Page {i}\nslug: {namespace}:p\n---\n\nb\n", encoding="utf-8"
+        )
+
+    opened: list[Path] = []
+    original = Path.read_text
+
+    def counting(self: Path, *args: object, **kwargs: object) -> str:
+        if self.suffix == ".md":
+            opened.append(self)
+        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "read_text", counting)
+        level = store.index_tree("shown", titles=True)
+
+    assert len(level.pages) == 1
+    assert len(opened) == 1, [p.name for p in opened]
+
+
+def test_index_tree_titles_skip_an_unparseable_page(tmp_path: Path) -> None:
+    """A page that won't parse must not take the whole level down with
+    it — the slug is still listed, the title is simply absent."""
+    store = WikiStore.init(tmp_path / "wiki")
+    store.write_page("ok", title="Fine", body="b")
+    (store.pages_path / "broken.md").write_text(
+        "---\ntitle: [unclosed\n---\n\nb\n", encoding="utf-8"
+    )
+    level = store.index_tree(titles=True)
+    assert "broken" in level.pages
+    assert level.titles == {"ok": "Fine"}

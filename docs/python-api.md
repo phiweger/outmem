@@ -358,7 +358,12 @@ def test_addressing_surface_is_unchanged():
 ```
 
 `outmem.testing` imports nothing beyond the store — no pytest — so it works
-with any runner.
+with any runner. `build_conformance_wiki` creates a real wiki, so it needs
+`git` and `rg` on PATH like any other outmem wiki; if your CI runs the harness,
+it needs them too. The fixture deliberately contains states `outmem lint`
+reports (a mismatched declared slug, a filename deriving an invalid slug) —
+those are the cases a reimplemented resolver gets wrong, so a corpus without
+them would test only the easy half.
 
 ## Error handling
 
