@@ -158,7 +158,7 @@ def cmd_extend(args: argparse.Namespace) -> int:
     if not body.strip():
         print("extend: refusing to write empty body (read from stdin).", file=sys.stderr)
         return 2
-    sha = store.extend_page(args.slug, body=body)
+    sha = store.extend_page(args.slug, body=body, provenance=args.provenance)
     print(sha)
     return 0
 
@@ -516,10 +516,12 @@ def cmd_rename(args: argparse.Namespace) -> int:
 
 def cmd_stale(args: argparse.Namespace) -> int:
     store = _open_store(args)
-    stale = store.stale_pages()
+    stale, failures = store.stale_pages()
+    dropped = _report_dropped_pages([str(f.path) for f in failures])
     if not stale:
-        _status("stale: no page cites a superseded source")
-        return 0
+        if not dropped:
+            _status("stale: no page cites a superseded source")
+        return dropped
     by_page: dict[str, list[Any]] = {}
     for c in stale:
         by_page.setdefault(c.slug, []).append(c)
@@ -528,25 +530,29 @@ def cmd_stale(args: argparse.Namespace) -> int:
         print(f"  [[{slug}]]")
         for c in by_page[slug]:
             print(f"      cites   {c.cited}")
-            print(f"      current {c.current}")
+            missing = "" if c.current_exists else "  (no longer registered)"
+            print(f"      current {c.current}{missing}")
     print(
-        "\nRead the diff between the cited and current version, then "
-        "`outmem extend` the page or `outmem log` why it still holds."
+        "\nRead the diff between the cited and current version, then re-compact "
+        "the page with `outmem extend <slug> --provenance sources/<current>` "
+        "(which updates the citation, so the page stops being reported), or "
+        "`outmem log` why it still holds."
     )
-    return 1
+    return dropped or 1
 
 
 def cmd_sources_backfill(args: argparse.Namespace) -> int:
     store = _open_store(args)
-    candidates = store.propose_document_keys()
+    candidates, failures = store.propose_document_keys()
+    dropped = _report_dropped_pages([str(f.path) for f in failures])
     if not candidates:
-        _status("sources: every row already has an identity")
-        return 0
+        if not dropped:
+            _status("sources: every row already has an identity")
+        return dropped
     clear = [c for c in candidates if not c.is_ambiguous]
     ambiguous = [c for c in candidates if c.is_ambiguous]
     if clear:
-        verb = "assigned" if args.apply else "would assign"
-        print(f"{verb} an identity to {len(clear)} row(s):")
+        print(f"{len(clear)} row(s) can be assigned an identity:")
         for c in clear[:20]:
             print(f"  {c.rows[0]}\n      -> {c.document_key}")
         if len(clear) > 20:
@@ -561,10 +567,11 @@ def cmd_sources_backfill(args: argparse.Namespace) -> int:
         )
         for c in ambiguous[:10]:
             print(f"  {c.document_key}")
-            for rel in c.rows:
+            for rel in [*c.rows, *c.held_by]:
                 pages = c.citing_pages.get(rel) or []
                 cited = ", ".join(f"[[{p}]]" for p in pages) if pages else "(no page cites it)"
-                print(f"      {rel}\n          cited by {cited}")
+                held = "  (already holds this identity)" if rel in c.held_by else ""
+                print(f"      {rel}{held}\n          cited by {cited}")
                 origin = c.origins.get(rel)
                 if origin:
                     print(f"          from     {origin}")
@@ -572,11 +579,20 @@ def cmd_sources_backfill(args: argparse.Namespace) -> int:
         if len(ambiguous) > 10:
             print(f"  ... and {len(ambiguous) - 10} more")
     if args.apply and clear:
-        store.assign_document_keys([(c.rows[0], c.document_key) for c in clear])
-        _status(f"sources: assigned {len(clear)} identit(ies)")
+        # Report what was written, not what was proposed: assign re-checks
+        # each key inside a write transaction and skips any that a
+        # concurrent ingest claimed in between.
+        written = store.assign_document_keys([(c.rows[0], c.document_key) for c in clear])
+        _status(f"sources: assigned {written} identit(ies)")
+        if written != len(clear):
+            print(
+                f"outmem: {len(clear) - written} row(s) were skipped — their "
+                "identity was claimed after this run started. Re-run to see them.",
+                file=sys.stderr,
+            )
     elif not args.apply:
         print("\n(dry run — re-run with --apply to write the unambiguous ones)")
-    return 0
+    return dropped
 
 
 def cmd_sources_gc(args: argparse.Namespace) -> int:
@@ -988,6 +1004,15 @@ def build_parser() -> argparse.ArgumentParser:
         "extend",
         help="Replace body of an existing page (body on stdin).", parents=[root_parent])
     p_extend.add_argument("slug")
+    p_extend.add_argument(
+        "--provenance",
+        action="append",
+        default=None,
+        help="Replace the page's source pointers. Repeat for multiple. "
+        "Use when re-compacting against a newer source version — this is "
+        "what stops `outmem stale` reporting the page. Omit to leave "
+        "provenance untouched.",
+    )
     p_extend.set_defaults(func=cmd_extend)
 
     p_log = sub.add_parser(

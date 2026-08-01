@@ -148,16 +148,29 @@ v2 = store.add_source("/path/to/paper-v2.md", into_subdir="research",
                       as_key="research/marino-2026")
 store.get_source(entry.rel_path).superseded_by == v2.rel_path
 
-store.source_citations()   # {source rel_path: [slug, …]} — the reverse
-                           # provenance edge, in one walk of wiki/pages/
+citations, failures = store.source_citations()   # {source rel_path: [slug, …]}
+                           # the reverse provenance edge, in one walk of pages/
 
-for c in store.stale_pages():
-    c.slug, c.cited, c.current, c.document_key
+stale, failures = store.stale_pages()
+for c in stale:
+    c.slug, c.cited, c.current, c.document_key, c.current_exists
+
+# Re-compact against the new version — this is what clears the report.
+store.extend_page(c.slug, body=new_body, provenance=[f"sources/{c.current}"])
 ```
 
 `stale_pages()` follows the chain to the newest version and **reports only** —
 whether a page still holds is a judgement call for a human or an explicit agent
 run, not a side effect of ingest.
+
+Both return the loader's `failures` alongside the result, per the shared loader
+contract: a page whose frontmatter will not parse is a page the check could not
+run on, and reporting a clean wiki while silently skipping it is the failure
+this contract exists to prevent. `outmem stale` exits 2 when there are any.
+
+`extend_page(provenance=…)` **replaces** the page's source pointers; omit it and
+they are untouched. Without it there is no way to update the field, so a page
+reported by `stale_pages()` would keep citing the superseded version forever.
 
 Omit `as_key` and the identity is derived from the path; `add_source` raises
 `OutmemError` when that derivation is already another document's identity,
@@ -183,10 +196,12 @@ for a page.
 For wikis registered before identity existed:
 
 ```python
-for cand in store.propose_document_keys():
-    cand.document_key, cand.rows, cand.citing_pages, cand.origins, cand.is_ambiguous
+candidates, failures = store.propose_document_keys()
+for cand in candidates:
+    cand.document_key, cand.rows, cand.held_by, cand.citing_pages, cand.origins
+    cand.is_ambiguous   # several rows derive it, OR the name is already held
 
-store.assign_document_keys([(rel_path, key), …])   # never overwrites an existing key
+store.assign_document_keys([(rel_path, key), …])   # returns the count written
 ```
 
 ## Renaming

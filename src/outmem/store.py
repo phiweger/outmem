@@ -30,6 +30,7 @@ from outmem._store import sources as _sources
 from outmem._time import ensure_utc, utc_now
 
 if TYPE_CHECKING:
+    from outmem.index import PageLoadFailure
     from outmem.semantic import Match, ReindexResult, VectorStore
     from outmem.sources import KeyCandidate, RegistryAudit, StaleCitation
 
@@ -870,6 +871,7 @@ class WikiStore:
         slug: str,
         *,
         body: str,
+        provenance: Sequence[ProvenanceEntry] | None = None,
         commit_subject: str | None = None,
     ) -> str:
         """Replace the body of an existing page and commit.
@@ -878,6 +880,12 @@ class WikiStore:
         commit message defaults to ``extend: <slug>``. ``wiki/index.md``
         is regenerated and staged in the same commit (title or tag
         edits will surface there).
+
+        ``provenance`` *replaces* the page's source pointers. Pass it when
+        re-compacting a page against a newer version of its source —
+        without it there is no way to update the field, so a page reported
+        by ``outmem stale`` would keep citing the superseded version and
+        keep being reported, forever. Omit it and provenance is untouched.
         """
         # Resolve BEFORE anything else: read() would follow the alias but
         # _page_relpath(slug) would not, so the commit would stage a path
@@ -890,6 +898,8 @@ class WikiStore:
                 "is auto-maintained by outmem on every page write."
             )
         page = self.read(slug)
+        if provenance is not None:
+            page.frontmatter.provenance = list(provenance)
         touch_updated(page.frontmatter)
         page_text = serialize_wiki_page(page.frontmatter, body)
         page.path.write_text(page_text, encoding="utf-8")
@@ -996,27 +1006,33 @@ class WikiStore:
             commit=commit,
         )
 
-    def source_citations(self) -> dict[str, list[str]]:
+    def source_citations(self) -> tuple[dict[str, list[str]], list[PageLoadFailure]]:
         """``source rel_path -> [slug, …]`` from every page's ``provenance:``.
 
         The reverse of the provenance edge, built in one walk. Nothing
         stored it because nothing consumed it — it is what turns
         provenance from an audit trail into a liveness signal.
+
+        Returns the loader's failures alongside the map, per the shared
+        loader contract: a page whose frontmatter will not parse is not
+        in the map, so a caller that drops the failures would report "no
+        page cites a superseded source" for a wiki that does. Silence is
+        the one answer this feature must never give.
         """
         from outmem.index import load_editorial_pages
+        from outmem.lint import provenance_ref
 
         out: dict[str, list[str]] = {}
-        pages, _failures = load_editorial_pages(self.pages_path)
+        pages, failures = load_editorial_pages(self.pages_path)
         for page in pages:
             for entry in page.frontmatter.provenance:
-                ref = entry if isinstance(entry, str) else entry.get("path")
-                if not isinstance(ref, str):
+                ref = provenance_ref(entry)
+                if ref is None:
                     continue
-                ref = ref.removeprefix(f"{SOURCES_DIR}/")
-                out.setdefault(ref, []).append(page.slug)
-        return out
+                out.setdefault(ref.removeprefix(f"{SOURCES_DIR}/"), []).append(page.slug)
+        return out, failures
 
-    def stale_pages(self) -> list[StaleCitation]:
+    def stale_pages(self) -> tuple[list[StaleCitation], list[PageLoadFailure]]:
         """Pages whose provenance cites a source version since superseded.
 
         The payoff of supersession: a source moving to v2 tells you exactly
@@ -1024,11 +1040,15 @@ class WikiStore:
         only — deciding whether a page still stands is a judgement call,
         and on clinical content that belongs to a human (or an explicit
         agent run over this list), not to a side effect of ingest.
+
+        Returns the loader failures too — a page that would not parse is
+        a page this check could not run on, and reporting a clean wiki
+        while silently skipping it is the failure this exists to prevent.
         """
         from outmem.sources import StaleCitation
 
         registry = _sources.get_registry(self)
-        citations = self.source_citations()
+        citations, failures = self.source_citations()
         out: list[StaleCitation] = []
         for rel_path, slugs in sorted(citations.items()):
             entry = registry.entries.get(rel_path)
@@ -1050,39 +1070,42 @@ class WikiStore:
                         cited=rel_path,
                         current=current,
                         document_key=entry.document_key or "",
+                        current_exists=current in registry.entries,
                     )
                 )
-        return out
+        return out, failures
 
-    def propose_document_keys(self) -> list[KeyCandidate]:
+    def propose_document_keys(self) -> tuple[list[KeyCandidate], list[PageLoadFailure]]:
         """Candidate ``document_key`` groupings for rows that predate identity."""
         from outmem.sources import propose_document_keys
 
-        return propose_document_keys(
-            _sources.get_registry(self), self.source_citations()
-        )
+        citations, failures = self.source_citations()
+        return propose_document_keys(_sources.get_registry(self), citations), failures
 
     def assign_document_keys(self, pairs: Sequence[tuple[str, str]]) -> int:
         """Set ``document_key`` on rows that have none. Commits once.
 
-        Only ever called with unambiguous candidates — see
-        :meth:`propose_document_keys`. Refuses to overwrite an existing key,
-        so re-running is safe and an explicit ``--as`` always wins.
+        Goes through :meth:`SourceRegistry.adopt_document_key`, which
+        re-checks inside a write transaction that no live row already
+        holds the key. Doing the UPDATE directly here meant backfill could
+        put two live rows on one identity — the very merge ``add_source``
+        refuses to perform, done silently by outmem's own migration
+        command. Rows that fail that check are skipped, so the count
+        returned is what was actually written.
         """
+        from outmem.sources import DocumentKeyConflict
+
         registry = _sources.get_registry(self)
-        con = registry._connection()
         written = 0
-        with con:
-            for rel_path, key in pairs:
-                entry = registry.entries.get(rel_path)
-                if entry is None or entry.document_key is not None:
-                    continue
-                con.execute(
-                    "UPDATE sources SET document_key = ? WHERE rel_path = ?",
-                    (key, rel_path),
-                )
-                entry.document_key = key
-                written += 1
+        for rel_path, key in pairs:
+            entry = registry.entries.get(rel_path)
+            if entry is None or entry.document_key is not None:
+                continue
+            try:
+                registry.adopt_document_key(rel_path, key)
+            except DocumentKeyConflict:
+                continue
+            written += 1
         if written:
             self._commit_paths(
                 [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],

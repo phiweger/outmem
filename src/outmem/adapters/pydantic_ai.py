@@ -667,10 +667,12 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             _log_error("write_page", exc)
             return f"(write_page failed: {exc})"
 
-    def extend_page(slug: str, body: str) -> str:
+    def extend_page(
+        slug: str, body: str, provenance: list[str | dict[str, Any]] | None = None
+    ) -> str:
         """Replace the body of an existing wiki page.
 
-        REQUIRES BOTH ARGUMENTS in a single call. Frontmatter (title,
+        REQUIRES BOTH slug and body in a single call. Frontmatter (title,
         slug, provenance, tags, created) is preserved; ``updated`` is
         bumped to now. Produces exactly one commit (``extend: <slug>``)
         and returns the new HEAD SHA.
@@ -684,13 +686,26 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 body="The pricing formula is now cost-plus 40%, revised Q2.\\n",
             )
 
+        Pass ``provenance`` only when re-compacting the page against a
+        *different* source version than it currently cites — it REPLACES
+        the existing pointers, and it is what stops the page being
+        reported as citing a superseded source:
+
+            extend_page(
+                slug="abx:amikacin",
+                body="15 mg/kg once daily, per the 2026 edition.\\n",
+                provenance=["sources/fachinfo/e77a10b4c503/document.md"],
+            )
+
         Args:
             slug: Existing page slug.
             body: The complete replacement body.
+            provenance: Optional replacement source pointers. Omit to
+                leave the page's existing provenance untouched.
         """
         _log_call("extend_page", slug=slug, body=body)
         try:
-            return store.extend_page(slug, body=body)
+            return store.extend_page(slug, body=body, provenance=provenance)
         except WritebackError:
             raise
         except SlugError as exc:

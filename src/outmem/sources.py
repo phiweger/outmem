@@ -119,6 +119,21 @@ class SourceEntry:
     """
 
 
+class DocumentKeyConflict(OutmemError):
+    """A document identity is already held by a different live row.
+
+    Carries the claimant so the caller can build a message with the
+    evidence in it; the bare string is a usable fallback.
+    """
+
+    def __init__(self, document_key: str, claimant: SourceEntry) -> None:
+        self.document_key = document_key
+        self.claimant = claimant
+        super().__init__(
+            f"{document_key!r} is already the identity of {claimant.rel_path!r}."
+        )
+
+
 def normalize_document_key(raw: str) -> str:
     """Canonical form of a document identity.
 
@@ -133,17 +148,33 @@ def normalize_document_key(raw: str) -> str:
     external identifier survives intact: ``doi/10.1001-jama-2026`` keeps
     its dot because ``.1001-jama-2026`` is not a source type.
 
+    Stripping repeats until stable, which makes the function
+    **idempotent** — ``report.csv.md`` and ``report.csv`` land on the
+    same key. Idempotence is not cosmetic here: the refusal message
+    prints a key and tells the operator to pass it back as ``--as``, so a
+    key that normalises to something else would silently fail to link the
+    two versions it was suggested to link.
+
     Note the direction this moves in — dropping the extension makes
     *collisions* more likely, and a collision is a refusal, never a
     merge. ``report.md`` and ``report.csv`` under one ``--into`` now stop
     and ask instead of quietly becoming unrelated documents.
     """
-    key = "/".join(part for part in raw.strip().lower().split("/") if part)
+
+    def collapse(value: str) -> str:
+        return "/".join(part for part in value.strip().lower().split("/") if part)
+
+    key = collapse(raw)
+    while True:
+        head, dot, ext = key.rpartition(".")
+        if not (dot and f".{ext}" in ALLOWED_EXTENSIONS):
+            break
+        stripped = collapse(head)
+        if not stripped:
+            break  # the whole key was an extension; keep it over nothing
+        key = stripped
     if not key:
         raise OutmemError(f"{raw!r} is not a usable document identity (it is empty).")
-    head, dot, ext = key.rpartition(".")
-    if dot and head and f".{ext}" in ALLOWED_EXTENSIONS:
-        key = head
     return key
 
 
@@ -167,6 +198,18 @@ def derive_document_key(rel_path: str, sha256: str) -> str | None:
     if len(parts) >= 2 and parts[-2] == sha256[:SHA_PREFIX_LEN]:
         return normalize_document_key("/".join([*parts[:-2], parts[-1]]))
     return None
+
+
+def candidate_document_key(rel_path: str, sha256: str) -> str:
+    """The identity a row's path implies — the rule, in one place.
+
+    Both readers of that rule need to agree: the ingest-time refusal in
+    ``add_source`` and the grouping in :func:`propose_document_keys`. If
+    they ever disagree, ``outmem sources backfill`` proposes an identity
+    that a re-ingest would not derive, and the two halves of one
+    invariant drift apart silently.
+    """
+    return derive_document_key(rel_path, sha256) or normalize_document_key(rel_path)
 
 
 def distinguishing_segment(origin: str | None, other: str | None) -> str | None:
@@ -233,7 +276,12 @@ class SourceRegistry:
     # ------------------------------------------------------------------
 
     def latest_for(self, document_key: str) -> SourceEntry | None:
-        """The current (un-superseded) version of ``document_key``, if any."""
+        """The current (un-superseded) version of ``document_key``, if any.
+
+        Reads the in-memory snapshot, so it is a *view*, not a decision
+        procedure. Anything that writes an identity resolves it inside
+        the write transaction instead — see :meth:`register`.
+        """
         candidates = [
             e
             for e in self.entries.values()
@@ -242,6 +290,36 @@ class SourceRegistry:
         if not candidates:
             return None
         return max(candidates, key=lambda e: e.registered_at)
+
+    def _live_claimants(
+        self, con: sqlite3.Connection, document_key: str, *, excluding: str
+    ) -> list[SourceEntry]:
+        """Un-superseded rows holding ``document_key``, newest first.
+
+        Reads the DB rather than :attr:`entries` because it runs inside a
+        write transaction: the snapshot was taken when this process
+        opened the registry, and a concurrent ``outmem ingest`` — which
+        the docs bless via ``xargs -P`` — may have claimed the key since.
+        """
+        rows = con.execute(
+            "SELECT rel_path, sha256, size_bytes, registered_at, document_key, "
+            "superseded_by, origin_path FROM sources "
+            "WHERE document_key = ? AND superseded_by IS NULL AND rel_path != ? "
+            "ORDER BY registered_at DESC, rel_path",
+            (document_key, excluding),
+        ).fetchall()
+        return [
+            SourceEntry(
+                rel_path=r["rel_path"],
+                sha256=r["sha256"],
+                registered_at=parse_iso_z(r["registered_at"]),
+                size_bytes=int(r["size_bytes"]),
+                document_key=r["document_key"],
+                superseded_by=r["superseded_by"],
+                origin_path=r["origin_path"],
+            )
+            for r in rows
+        ]
 
     def register(
         self,
@@ -252,6 +330,7 @@ class SourceRegistry:
         when: datetime | None = None,
         document_key: str | None = None,
         origin_path: str | None = None,
+        derived_key: bool = False,
     ) -> SourceEntry:
         """Add or refresh an entry. Returns the canonical entry.
 
@@ -266,30 +345,42 @@ class SourceRegistry:
         point, and it is what lets ``outmem stale`` find the pages that
         still cite it.
 
+        ``derived_key=True`` says the key was *inferred* from the path
+        rather than declared, which inverts the meaning of an existing
+        claimant: a declared key means "supersede that", an inferred one
+        means "I cannot tell whether this is the next version or a
+        different document" — so it raises
+        :class:`DocumentKeyConflict` instead of linking.
+
+        The whole identity decision happens inside one ``BEGIN
+        IMMEDIATE`` transaction, reading the DB rather than the in-memory
+        snapshot. Deciding it from the snapshot let two concurrent
+        ingests both see v1 as the live head, each supersede it, and
+        leave two live rows for one document — a page compacted from the
+        losing head would then never appear in ``outmem stale``.
+
         Note the sha is part of ``rel_path``, so a revised document is
-        always a *new row*; the pre-existing ``!= sha256`` refresh branch
-        below is only reachable for callers that build paths themselves.
+        always a *new row*; the ``!= sha256`` refresh branch below is only
+        reachable for callers that build paths themselves.
         """
         existing = self.entries.get(rel_path)
         if existing and existing.sha256 == sha256:
             return existing
 
         ts = when.replace(microsecond=0) if when else utc_now()
-        predecessor = self.latest_for(document_key) if document_key else None
-        if predecessor is not None and predecessor.rel_path == rel_path:
-            predecessor = None  # re-registering the same path, not a new version
-
-        entry = SourceEntry(
-            rel_path=rel_path,
-            sha256=sha256,
-            registered_at=ts,
-            size_bytes=size_bytes,
-            ingestions=[],
-            document_key=document_key,
-            origin_path=origin_path,
-        )
         con = self._connection()
-        with con:
+        # IMMEDIATE, not the implicit deferred transaction: the claimant
+        # lookup below is a read that a later write depends on, and two
+        # deferred transactions upgrading to a write is the one case
+        # SQLite resolves by returning BUSY rather than waiting.
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            predecessor = None
+            if document_key is not None:
+                claimants = self._live_claimants(con, document_key, excluding=rel_path)
+                if claimants and derived_key:
+                    raise DocumentKeyConflict(document_key, claimants[0])
+                predecessor = claimants[0] if claimants else None
             con.execute(
                 "INSERT OR REPLACE INTO sources "
                 "(rel_path, sha256, size_bytes, registered_at, document_key, "
@@ -307,9 +398,63 @@ class SourceRegistry:
                     "UPDATE sources SET superseded_by = ? WHERE rel_path = ?",
                     (rel_path, predecessor.rel_path),
                 )
-        if predecessor is not None:
+        except BaseException:
+            con.rollback()
+            raise
+        con.commit()
+
+        entry = SourceEntry(
+            rel_path=rel_path,
+            sha256=sha256,
+            registered_at=ts,
+            size_bytes=size_bytes,
+            ingestions=[],
+            document_key=document_key,
+            origin_path=origin_path,
+        )
+        if predecessor is not None and predecessor.rel_path in self.entries:
             self.entries[predecessor.rel_path].superseded_by = rel_path
         self.entries[rel_path] = entry
+        return entry
+
+    def adopt_document_key(self, rel_path: str, document_key: str) -> SourceEntry:
+        """Declare the identity of a row that already exists.
+
+        The path for ``--as`` on content already registered, which is
+        exactly what ``outmem sources backfill`` tells the operator to do
+        to resolve an ambiguous group. Refuses when a *different* live row
+        already holds the key (the same rule as ``register``), and when
+        the row already holds a different key — changing an established
+        identity would strand the supersession edges pointing at it, so
+        that is a deliberate operation, not a side effect of re-ingest.
+        """
+        entry = self.entries.get(rel_path)
+        if entry is None:
+            raise OutmemError(f"cannot set identity: {rel_path!r} is not registered.")
+        if entry.document_key == document_key:
+            return entry
+        if entry.document_key is not None:
+            raise OutmemError(
+                f"{rel_path!r} is already the identity {entry.document_key!r}. "
+                f"Refusing to silently rename it to {document_key!r} — supersession "
+                "edges point at the old identity. Use `outmem sources gc` and "
+                "re-ingest if the identity is genuinely wrong."
+            )
+        con = self._connection()
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            claimants = self._live_claimants(con, document_key, excluding=rel_path)
+            if claimants:
+                raise DocumentKeyConflict(document_key, claimants[0])
+            con.execute(
+                "UPDATE sources SET document_key = ? WHERE rel_path = ?",
+                (document_key, rel_path),
+            )
+        except BaseException:
+            con.rollback()
+            raise
+        con.commit()
+        entry.document_key = document_key
         return entry
 
     def record_ingestion(
@@ -382,6 +527,55 @@ def is_allowed_source(path: Path) -> bool:
     return path.suffix.lower() in ALLOWED_EXTENSIONS
 
 
+@dataclass(frozen=True)
+class SourcePlacement:
+    """Where a source *would* land, computed without touching the disk."""
+
+    dest: Path
+    rel_path: str
+    sha256: str
+
+
+def plan_source_copy(
+    source: Path,
+    sources_dir: Path,
+    *,
+    into_subdir: str | None = None,
+    rename: str | None = None,
+) -> SourcePlacement:
+    """Validate ``source`` and compute its destination — no writes.
+
+    Split out of :func:`copy_source` so a caller can decide whether to
+    accept an ingest *before* anything lands on disk. Copying first meant
+    every refused ingest left an unregistered orphan under
+    ``wiki/sources/`` that ``outmem lint`` then flagged and
+    ``outmem sources gc`` deliberately refuses to delete — routine, since
+    a ``<drug>/output/<hash>/document.md`` pipeline is refused on its
+    second document by design.
+    """
+    if not source.exists() or not source.is_file():
+        raise OutmemError(f"source not found: {source}")
+    if not is_allowed_source(source):
+        raise OutmemError(
+            f"source has disallowed extension {source.suffix!r}; "
+            f"allowed: {sorted(ALLOWED_EXTENSIONS)}"
+        )
+
+    filename = rename or source.name
+    if "/" in filename or ".." in filename:
+        raise OutmemError(f"unsafe destination filename: {filename!r}")
+
+    if into_subdir and (into_subdir.startswith("/") or ".." in into_subdir.split("/")):
+        raise OutmemError(f"unsafe into_subdir: {into_subdir!r}")
+
+    sha = compute_sha256(source)
+    parent = sources_dir / into_subdir if into_subdir else sources_dir
+    dest = parent / sha[:SHA_PREFIX_LEN] / filename
+    return SourcePlacement(
+        dest=dest, rel_path=str(dest.relative_to(sources_dir)), sha256=sha
+    )
+
+
 def copy_source(
     source: Path,
     sources_dir: Path,
@@ -409,37 +603,14 @@ def copy_source(
     Raises :class:`OutmemError` for binary / disallowed file types or
     unsafe path components.
     """
-    if not source.exists() or not source.is_file():
-        raise OutmemError(f"source not found: {source}")
-    if not is_allowed_source(source):
-        raise OutmemError(
-            f"source has disallowed extension {source.suffix!r}; "
-            f"allowed: {sorted(ALLOWED_EXTENSIONS)}"
-        )
-
-    filename = rename or source.name
-    if "/" in filename or ".." in filename:
-        raise OutmemError(f"unsafe destination filename: {filename!r}")
-
-    if into_subdir and (
-        into_subdir.startswith("/") or ".." in into_subdir.split("/")
-    ):
-        raise OutmemError(f"unsafe into_subdir: {into_subdir!r}")
-
-    sha = compute_sha256(source)
-    short = sha[:SHA_PREFIX_LEN]
-
-    parent = sources_dir / into_subdir if into_subdir else sources_dir
-    hash_dir = parent / short
-    hash_dir.mkdir(parents=True, exist_ok=True)
-
-    dest = hash_dir / filename
-    rel_path = str(dest.relative_to(sources_dir))
-
+    placement = plan_source_copy(
+        source, sources_dir, into_subdir=into_subdir, rename=rename
+    )
+    placement.dest.parent.mkdir(parents=True, exist_ok=True)
     # Same content → same hash dir → idempotent.
-    if not dest.exists():
-        shutil.copy2(source, dest)
-    return dest, rel_path
+    if not placement.dest.exists():
+        shutil.copy2(source, placement.dest)
+    return placement.dest, placement.rel_path
 
 
 def read_source_text(
@@ -644,6 +815,15 @@ def gc_registry(sources_dir: Path, *, dry_run: bool = True) -> RegistryAudit:
     con = registry._connection()
     with con:
         for rel_path in audit.missing_files:
+            # Splice the row out of its version chain before deleting it.
+            # Leaving the pointer dangling makes `outmem stale` tell the
+            # reader to diff against a path that is in neither the registry
+            # nor the filesystem.
+            successor = registry.entries[rel_path].superseded_by
+            con.execute(
+                "UPDATE sources SET superseded_by = ? WHERE superseded_by = ?",
+                (successor, rel_path),
+            )
             # FK ON DELETE CASCADE takes the ingestion chain with it — an
             # ingestion of content nobody can read has no recoverable meaning.
             con.execute("DELETE FROM sources WHERE rel_path = ?", (rel_path,))
@@ -651,6 +831,10 @@ def gc_registry(sources_dir: Path, *, dry_run: bool = True) -> RegistryAudit:
             "DELETE FROM ingestions WHERE rel_path NOT IN (SELECT rel_path FROM sources)"
         )
     for rel_path in audit.missing_files:
+        successor = registry.entries[rel_path].superseded_by
+        for entry in registry.entries.values():
+            if entry.superseded_by == rel_path:
+                entry.superseded_by = successor
         registry.entries.pop(rel_path, None)
     return audit
 
@@ -663,6 +847,14 @@ class StaleCitation:
     cited: str  # rel_path the page's provenance names
     current: str  # rel_path of the version that replaced it
     document_key: str
+    current_exists: bool = True
+    """Whether ``current`` is still a registered row.
+
+    A supersession pointer can outlive its target — ``outmem sources gc``
+    splices chains it prunes, but a registry edited out-of-band can still
+    leave one dangling. Telling the reader to diff against a path that is
+    in neither the registry nor the filesystem is worse than saying so.
+    """
 
 
 @dataclass(frozen=True)
@@ -670,7 +862,7 @@ class KeyCandidate:
     """A proposed ``document_key`` for rows that predate identity."""
 
     document_key: str
-    rows: list[str]  # rel_paths sharing this candidate
+    rows: list[str]  # un-keyed rel_paths sharing this candidate
     citing_pages: dict[str, list[str]]  # rel_path -> slugs whose provenance cites it
     origins: dict[str, str | None] = field(default_factory=dict)
     """rel_path -> where that file was ingested from, when known.
@@ -679,19 +871,27 @@ class KeyCandidate:
     ``parsed/fachinfo/amikacin/…`` and ``parsed/fachinfo/aztreonam/…``
     are visibly different documents even when nothing cites either yet.
     """
+    held_by: list[str] = field(default_factory=list)
+    """rel_paths that *already* hold this identity, if any.
+
+    A candidate whose name is taken is not assignable, however few
+    un-keyed rows share it: writing it would put two live rows on one
+    identity, which is precisely the merge ``add_source`` refuses to
+    perform — done silently, by outmem's own migration command.
+    """
 
     @property
     def is_ambiguous(self) -> bool:
-        """More than one row claims this candidate.
+        """This candidate cannot be assigned without a human.
 
-        Cannot be resolved mechanically: the rows are either versions of
-        one document or different documents that share a filename, and
-        nothing outmem *derives* distinguishes them. ``citing_pages`` and
-        ``origins`` are the evidence a human needs — two rows cited by
-        *different* pages are different documents; two cited by the same
-        page are versions.
+        Either several un-keyed rows derive it — they are versions of one
+        document or different documents sharing a filename, and nothing
+        outmem *derives* distinguishes them — or the name is already
+        held. ``citing_pages`` and ``origins`` are the evidence: two rows
+        cited by *different* pages are different documents; two cited by
+        the same page are versions.
         """
-        return len(self.rows) > 1
+        return len(self.rows) > 1 or bool(self.held_by)
 
 
 def propose_document_keys(
@@ -706,22 +906,24 @@ def propose_document_keys(
     citations = citations or {}
     groups: dict[str, list[str]] = {}
     origins: dict[str, str | None] = {}
+    claimed: dict[str, list[str]] = {}
     for entry in sorted(registry.entries.values(), key=lambda e: e.rel_path):
-        if entry.document_key is not None:
-            continue
-        # A pre-hash-dir flat row has no sha segment to strip; its own
-        # rel_path is already the candidate.
-        candidate = derive_document_key(entry.rel_path, entry.sha256)
-        if candidate is None:
-            candidate = normalize_document_key(entry.rel_path)
-        groups.setdefault(candidate, []).append(entry.rel_path)
         origins[entry.rel_path] = entry.origin_path
+        if entry.document_key is not None:
+            claimed.setdefault(entry.document_key, []).append(entry.rel_path)
+            continue
+        groups.setdefault(
+            candidate_document_key(entry.rel_path, entry.sha256), []
+        ).append(entry.rel_path)
     return [
         KeyCandidate(
             document_key=key,
-            origins={r: origins.get(r) for r in rows},
+            origins={r: origins.get(r) for r in [*rows, *claimed.get(key, [])]},
             rows=rows,
-            citing_pages={r: citations.get(r, []) for r in rows},
+            citing_pages={
+                r: citations.get(r, []) for r in [*rows, *claimed.get(key, [])]
+            },
+            held_by=claimed.get(key, []),
         )
         for key, rows in sorted(groups.items())
     ]

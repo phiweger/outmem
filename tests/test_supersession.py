@@ -303,7 +303,7 @@ class TestSourceCitations:
                 {"path": "sources/abx/aaaaaaaaaaaa/document.md", "source": "ingest"}
             ],
         )
-        citations = store.source_citations()
+        citations, _ = store.source_citations()
         assert citations["abx/aaaaaaaaaaaa/document.md"] == [
             "abx:amikacin",
             "abx:dosing",
@@ -312,7 +312,7 @@ class TestSourceCitations:
     def test_page_without_provenance_contributes_nothing(self, tmp_path: Path) -> None:
         store = WikiStore.init(tmp_path / "w")
         store.write_page("solo", title="Solo", body="no source\n")
-        assert store.source_citations() == {}
+        assert store.source_citations() == ({}, [])
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +343,7 @@ def _wiki_with_a_superseded_source(tmp_path: Path) -> tuple[WikiStore, str, str]
 class TestStalePages:
     def test_reports_the_page_that_cites_the_old_version(self, tmp_path: Path) -> None:
         store, old, new = _wiki_with_a_superseded_source(tmp_path)
-        stale = store.stale_pages()
+        stale, _ = store.stale_pages()
         assert len(stale) == 1
         assert stale[0].slug == "abx:amikacin"
         assert stale[0].cited == old
@@ -358,7 +358,7 @@ class TestStalePages:
             body="up to date\n",
             provenance=[f"sources/{new}"],
         )
-        stale = {c.slug for c in store.stale_pages()}
+        stale = {c.slug for c in store.stale_pages()[0]}
         assert "abx:amikacin-current" not in stale
 
     def test_follows_the_chain_to_the_newest_version(self, tmp_path: Path) -> None:
@@ -369,7 +369,7 @@ class TestStalePages:
         v3.write_text("amikacin dosing, 2027 edition\n", encoding="utf-8")
         e3 = store.add_source(v3, into_subdir="abx", rename="document.md",
                               as_key="abx/amikacin")
-        (stale,) = [c for c in store.stale_pages() if c.cited == old]
+        (stale,) = [c for c in store.stale_pages()[0] if c.cited == old]
         assert stale.current == e3.rel_path
         assert stale.current != mid
 
@@ -381,7 +381,7 @@ class TestStalePages:
         store.write_page(
             "p", title="P", body="b\n", provenance=[f"sources/{entry.rel_path}"]
         )
-        assert store.stale_pages() == []
+        assert store.stale_pages() == ([], [])
 
 
 class TestStaleCommand:
@@ -498,7 +498,7 @@ class TestProposeSourceKeys:
         self, tmp_path: Path
     ) -> None:
         store = _wiki_needing_backfill(tmp_path)
-        (clear,) = [c for c in store.propose_document_keys() if not c.is_ambiguous]
+        (clear,) = [c for c in store.propose_document_keys()[0] if not c.is_ambiguous]
         assert clear.document_key == "rki/ratgeber"
         assert clear.rows == ["rki/aaaaaaaaaaaa/ratgeber.md"]
 
@@ -509,7 +509,7 @@ class TestProposeSourceKeys:
         them would declare one the successor of the other and later drive
         a recheck of amikacin's page against aztreonam's source."""
         store = _wiki_needing_backfill(tmp_path)
-        (amb,) = [c for c in store.propose_document_keys() if c.is_ambiguous]
+        (amb,) = [c for c in store.propose_document_keys()[0] if c.is_ambiguous]
         assert amb.document_key == "abx/document"
         assert set(amb.rows) == {
             "abx/bbbbbbbbbbbb/document.md",
@@ -528,7 +528,7 @@ class TestProposeSourceKeys:
         reg = SourceRegistry.load(store.sources_path)
         reg.register("deadbeefcafe/notes.md", sha256="f" * 64, size_bytes=1)
         store._source_registry = None
-        (cand,) = store.propose_document_keys()
+        (cand,), _ = store.propose_document_keys()
         assert cand.document_key == "deadbeefcafe/notes"
 
     def test_rows_that_already_have_an_identity_are_skipped(
@@ -538,7 +538,7 @@ class TestProposeSourceKeys:
         src = tmp_path / "s.md"
         src.write_text("x\n", encoding="utf-8")
         store.add_source(src, as_key="explicit")
-        assert store.propose_document_keys() == []
+        assert store.propose_document_keys() == ([], [])
 
 
 class TestAssignSourceKeys:
@@ -572,7 +572,7 @@ class TestBackfillCommand:
         rc = main(["sources", "backfill", "--root", str(store.root)])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "would assign" in out
+        assert "can be assigned an identity" in out
         assert "rki/ratgeber" in out
         assert "dry run" in out
         reg = SourceRegistry.load(store.sources_path)
@@ -648,6 +648,310 @@ class TestBackfillCommand:
 
 
 # ---------------------------------------------------------------------------
+# One live row per identity — the invariant, from every angle that writes one
+# ---------------------------------------------------------------------------
+
+
+class TestOneLiveRowPerIdentity:
+    def test_backfill_never_assigns_a_name_another_row_holds(
+        self, tmp_path: Path
+    ) -> None:
+        """Two live rows on one identity is the merge add_source refuses to
+        perform. Backfill must not do it silently instead: latest_for()
+        would pick one head and the other would stay live forever, so a
+        page citing it never appears in `outmem stale`."""
+        store = WikiStore.init(tmp_path / "w")
+        store.sources_path.mkdir(parents=True, exist_ok=True)
+        reg = SourceRegistry.load(store.sources_path)
+        reg.register("abx/aaaaaaaaaaaa/document.md", sha256="a" * 64, size_bytes=1)
+        reg.register(
+            "abx/bbbbbbbbbbbb/document.md",
+            sha256="b" * 64,
+            size_bytes=2,
+            document_key="abx/document",  # the name the refusal itself suggests
+        )
+        store._source_registry = None
+
+        (cand,), _ = store.propose_document_keys()
+        assert cand.is_ambiguous
+        assert cand.held_by == ["abx/bbbbbbbbbbbb/document.md"]
+        assert main(["sources", "backfill", "--root", str(store.root), "--apply"]) == 0
+        reloaded = SourceRegistry.load(store.sources_path)
+        assert reloaded.entries["abx/aaaaaaaaaaaa/document.md"].document_key is None
+
+    def test_assign_refuses_a_claimed_key_even_when_asked_directly(
+        self, tmp_path: Path
+    ) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        store.sources_path.mkdir(parents=True, exist_ok=True)
+        reg = SourceRegistry.load(store.sources_path)
+        reg.register("a/aaaaaaaaaaaa/d.md", sha256="a" * 64, size_bytes=1)
+        reg.register(
+            "a/bbbbbbbbbbbb/d.md", sha256="b" * 64, size_bytes=2, document_key="a/d"
+        )
+        store._source_registry = None
+        assert store.assign_document_keys([("a/aaaaaaaaaaaa/d.md", "a/d")]) == 0
+
+    def test_identity_is_decided_against_the_db_not_a_stale_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        """Two processes each hold a snapshot from before the other wrote.
+        Deciding supersession from `self.entries` let both see v1 as the
+        live head and both supersede it, leaving two live rows."""
+        store = WikiStore.init(tmp_path / "w")
+        store.sources_path.mkdir(parents=True, exist_ok=True)
+        first = SourceRegistry.load(store.sources_path)
+        first.register(
+            "d/aaaaaaaaaaaa/x.md", sha256="a" * 64, size_bytes=1, document_key="d/x"
+        )
+        # Two independent handles, both snapshotted while v1 is the only row.
+        proc_a = SourceRegistry.load(store.sources_path)
+        proc_b = SourceRegistry.load(store.sources_path)
+        proc_a.register(
+            "d/bbbbbbbbbbbb/x.md", sha256="b" * 64, size_bytes=2, document_key="d/x"
+        )
+        proc_b.register(
+            "d/cccccccccccc/x.md", sha256="c" * 64, size_bytes=3, document_key="d/x"
+        )
+
+        reloaded = SourceRegistry.load(store.sources_path)
+        live = [
+            e
+            for e in reloaded.entries.values()
+            if e.document_key == "d/x" and e.superseded_by is None
+        ]
+        assert len(live) == 1, [e.rel_path for e in live]
+
+    def test_a_derived_key_still_refuses_across_snapshots(
+        self, tmp_path: Path
+    ) -> None:
+        """The same staleness let two different documents both pass the
+        clash check and land on one identity — the outcome the refusal
+        exists to prevent."""
+        store = WikiStore.init(tmp_path / "w")
+        a = tmp_path / "a.md"
+        a.write_text("amikacin\n", encoding="utf-8")
+        store.add_source(a, into_subdir="abx", rename="document.md")
+        stale_store = WikiStore.open(store.root)
+        stale_store.list_sources()  # take a snapshot
+        store.add_source(  # a third party claims nothing new, but re-reads
+            a, into_subdir="abx", rename="document.md"
+        )
+        b = tmp_path / "b.md"
+        b.write_text("aztreonam\n", encoding="utf-8")
+        with pytest.raises(OutmemError, match="already the identity of"):
+            stale_store.add_source(b, into_subdir="abx", rename="document.md")
+
+
+class TestAsKeyOnAlreadyRegisteredContent:
+    def test_as_key_lands_when_the_content_is_unchanged(self, tmp_path: Path) -> None:
+        """`sources backfill` tells the operator to 're-ingest each with
+        `--as <name>`'. The bytes are already registered, so returning
+        early on the sha match made that instruction a no-op that
+        reported success."""
+        store = WikiStore.init(tmp_path / "w")
+        src = tmp_path / "document.md"
+        src.write_text("amikacin\n", encoding="utf-8")
+        first = store.add_source(src, into_subdir="abx")
+        con = SourceRegistry.load(store.sources_path)._connection()
+        with con:  # simulate the pre-0.7 row backfill can't resolve
+            con.execute("UPDATE sources SET document_key = NULL")
+        store._source_registry = None
+
+        again = store.add_source(src, into_subdir="abx", as_key="fachinfo/amikacin")
+        assert again.rel_path == first.rel_path
+        assert again.document_key == "fachinfo/amikacin"
+        assert SourceRegistry.load(store.sources_path).entries[
+            first.rel_path
+        ].document_key == "fachinfo/amikacin"
+
+    def test_repeating_the_same_key_is_a_no_op(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        src = tmp_path / "d.md"
+        src.write_text("x\n", encoding="utf-8")
+        store.add_source(src, as_key="a/b")
+        again = store.add_source(src, as_key="a/b")
+        assert again.document_key == "a/b"
+        assert again.superseded_by is None
+
+    def test_changing_an_established_identity_is_refused(self, tmp_path: Path) -> None:
+        """Supersession edges point at the old identity; silently renaming
+        it would strand them."""
+        store = WikiStore.init(tmp_path / "w")
+        src = tmp_path / "d.md"
+        src.write_text("x\n", encoding="utf-8")
+        store.add_source(src, as_key="a/one")
+        with pytest.raises(OutmemError, match="already the identity"):
+            store.add_source(src, as_key="a/two")
+
+    def test_as_key_colliding_with_a_live_row_is_refused(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        other = tmp_path / "other.md"
+        other.write_text("aztreonam\n", encoding="utf-8")
+        store.add_source(other, as_key="abx/taken")
+        src = tmp_path / "d.md"
+        src.write_text("amikacin\n", encoding="utf-8")
+        entry = store.add_source(src)
+        con = SourceRegistry.load(store.sources_path)._connection()
+        with con:  # an un-keyed row, as backfill would find it
+            con.execute(
+                "UPDATE sources SET document_key = NULL WHERE rel_path = ?",
+                (entry.rel_path,),
+            )
+        store._source_registry = None
+        with pytest.raises(OutmemError, match="already the identity of"):
+            store.add_source(src, as_key="abx/taken")
+
+
+class TestRefusalLeavesNoOrphan:
+    def test_a_refused_ingest_does_not_copy_the_file(self, tmp_path: Path) -> None:
+        """Copying first meant every refusal left an unregistered file that
+        lint flags and `sources gc` refuses to delete — routine, since a
+        <drug>/output/<hash>/document.md pipeline is refused by design on
+        its second document."""
+        store = WikiStore.init(tmp_path / "w")
+        a = tmp_path / "a.md"
+        a.write_text("amikacin\n", encoding="utf-8")
+        store.add_source(a, into_subdir="abx", rename="document.md")
+        before = sorted(p.name for p in store.sources_path.rglob("*") if p.is_file())
+
+        b = tmp_path / "b.md"
+        b.write_text("aztreonam\n", encoding="utf-8")
+        with pytest.raises(OutmemError):
+            store.add_source(b, into_subdir="abx", rename="document.md")
+
+        after = sorted(p.name for p in store.sources_path.rglob("*") if p.is_file())
+        assert after == before
+        assert store.sources_gc().unregistered == []
+
+    def test_an_unusable_as_key_leaves_nothing_behind(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        src = tmp_path / "d.md"
+        src.write_text("x\n", encoding="utf-8")
+        with pytest.raises(OutmemError, match="not a usable document identity"):
+            store.add_source(src, as_key="  //  ")
+        assert store.sources_gc().unregistered == []
+
+
+class TestGcRepairsVersionChains:
+    def test_deleting_a_row_splices_the_chain_rather_than_dangling(
+        self, tmp_path: Path
+    ) -> None:
+        """`outmem stale` would otherwise point the reader at a path that is
+        in neither the registry nor the filesystem."""
+        store = WikiStore.init(tmp_path / "w")
+        rels = []
+        for i, text in enumerate(("v1\n", "v2\n", "v3\n")):
+            src = tmp_path / f"v{i}.md"
+            src.write_text(text, encoding="utf-8")
+            rels.append(
+                store.add_source(src, rename="d.md", as_key="a/d").rel_path
+            )
+        store.write_page(
+            "p", title="P", body="b\n", provenance=[f"sources/{rels[0]}"]
+        )
+        # v2's file disappears out-of-band; gc drops the row.
+        (store.sources_path / rels[1]).unlink()
+        store.sources_gc(dry_run=False)
+
+        (stale,), _ = store.stale_pages()
+        assert stale.current == rels[2]
+        assert stale.current_exists
+
+    def test_a_dangling_pointer_is_reported_as_such(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        store.sources_path.mkdir(parents=True, exist_ok=True)
+        reg = SourceRegistry.load(store.sources_path)
+        reg.register("a/aaaaaaaaaaaa/d.md", sha256="a" * 64, size_bytes=1)
+        con = reg._connection()
+        with con:  # a registry edited out-of-band
+            con.execute(
+                "UPDATE sources SET superseded_by = 'a/gone/d.md' WHERE rel_path = ?",
+                ("a/aaaaaaaaaaaa/d.md",),
+            )
+        store._source_registry = None
+        store.write_page(
+            "p", title="P", body="b\n", provenance=["sources/a/aaaaaaaaaaaa/d.md"]
+        )
+        (stale,), _ = store.stale_pages()
+        assert not stale.current_exists
+        main(["stale", "--root", str(store.root)])
+
+
+class TestStaleSeesEveryProvenanceShape:
+    def test_source_and_file_keys_are_read_too(self, tmp_path: Path) -> None:
+        """lint resolves and sha-checks these shapes; a narrower extractor
+        here meant a silent miss of the exact failure mode `outmem stale`
+        exists to catch."""
+        store, old, _new = _wiki_with_a_superseded_source(tmp_path)
+        store.write_page(
+            "via-source", title="A", body="a\n", provenance=[{"source": f"sources/{old}"}]
+        )
+        store.write_page(
+            "via-file", title="B", body="b\n", provenance=[{"file": f"sources/{old}"}]
+        )
+        stale, _ = store.stale_pages()
+        assert {"via-source", "via-file"} <= {c.slug for c in stale}
+
+    def test_an_unparseable_page_is_reported_not_swallowed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A page this check could not run on must not read as a clean
+        wiki — that is the silence the shared loader contract exists to
+        prevent."""
+        store = WikiStore.init(tmp_path / "w")
+        broken = store.pages_path / "broken.md"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text("---\ntitle: [unclosed\n---\n\nbody\n", encoding="utf-8")
+
+        _stale, failures = store.stale_pages()
+        assert [f.path.name for f in failures] == ["broken.md"]
+        assert main(["stale", "--root", str(store.root)]) == 2
+        assert "broken.md" in capsys.readouterr().err
+
+
+class TestExtendCanUpdateProvenance:
+    def test_recompacting_clears_the_stale_report(self, tmp_path: Path) -> None:
+        """Without this there is no exit from `outmem stale`: extend_page
+        preserved frontmatter verbatim and write_page refuses an existing
+        page, so a reported page stayed reported forever."""
+        store, _old, new = _wiki_with_a_superseded_source(tmp_path)
+        assert store.stale_pages()[0]  # pre-condition
+
+        store.extend_page(
+            "abx:amikacin",
+            body="15 mg/kg once daily, per the 2026 edition.\n",
+            provenance=[f"sources/{new}"],
+        )
+        assert store.stale_pages() == ([], [])
+        assert store.read("abx:amikacin").frontmatter.provenance == [f"sources/{new}"]
+
+    def test_omitting_provenance_leaves_it_untouched(self, tmp_path: Path) -> None:
+        store, old, _new = _wiki_with_a_superseded_source(tmp_path)
+        store.extend_page("abx:amikacin", body="revised wording only\n")
+        assert store.read("abx:amikacin").frontmatter.provenance == [f"sources/{old}"]
+
+    def test_cli_extend_accepts_provenance(self, tmp_path: Path) -> None:
+        import io
+
+        store, _old, new = _wiki_with_a_superseded_source(tmp_path)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sys.stdin", io.StringIO("re-compacted\n"))
+            rc = main(
+                [
+                    "extend",
+                    "--root",
+                    str(store.root),
+                    "abx:amikacin",
+                    "--provenance",
+                    f"sources/{new}",
+                ]
+            )
+        assert rc == 0
+        assert store.stale_pages() == ([], [])
+
+
+# ---------------------------------------------------------------------------
 # The whole point, end to end
 # ---------------------------------------------------------------------------
 
@@ -678,9 +982,9 @@ def test_v06_wiki_backfills_then_supersedes_then_surfaces_the_page(
         body="summary\n",
         provenance=[f"sources/{e1.rel_path}"],
     )
-    assert store.stale_pages() == []  # no identity, so no supersession
+    assert store.stale_pages() == ([], [])  # no identity, so no supersession
 
-    (cand,) = store.propose_document_keys()
+    (cand,), _ = store.propose_document_keys()
     assert not cand.is_ambiguous
     store.assign_document_keys([(cand.rows[0], cand.document_key)])
 
@@ -695,7 +999,7 @@ def test_v06_wiki_backfills_then_supersedes_then_surfaces_the_page(
     e2 = store.add_source(
         v2, into_subdir="rki", rename="ratgeber.md", as_key="rki/ratgeber"
     )
-    (stale,) = store.stale_pages()
+    (stale,), _ = store.stale_pages()
     assert stale.slug == "rki:ratgeber"
     assert stale.cited == e1.rel_path
     assert stale.current == e2.rel_path

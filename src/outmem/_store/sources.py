@@ -17,14 +17,15 @@ from outmem.exceptions import OutmemError
 from outmem.sources import (
     REGISTRY_FILENAME,
     SOURCES_DIR,
+    DocumentKeyConflict,
     IngestionRecord,
     SourceEntry,
     SourceRegistry,
-    compute_sha256,
+    candidate_document_key,
     copy_source,
-    derive_document_key,
     distinguishing_segment,
     normalize_document_key,
+    plan_source_copy,
     read_source_text,
 )
 
@@ -80,42 +81,54 @@ def add_source(
 ) -> SourceEntry:
     source_path = Path(source).expanduser()
     registry = get_registry(store)
-    dest, rel_path = copy_source(
-        source_path,
-        store.sources_path,
-        into_subdir=into_subdir,
-        rename=rename,
+    # Plan before copying: a refused ingest must not leave an
+    # unregistered orphan under wiki/sources/ that lint then flags and gc
+    # refuses to delete.
+    placement = plan_source_copy(
+        source_path, store.sources_path, into_subdir=into_subdir, rename=rename
     )
-    sha = compute_sha256(dest)
+    rel_path, sha = placement.rel_path, placement.sha256
+    # Absolute: a relative origin is meaningless once recorded, and a
+    # relative/absolute mix makes `distinguishing_segment` diverge at the
+    # root and propose a name that distinguishes nothing.
+    origin = str(source_path.resolve())
+
     existing = registry.entries.get(rel_path)
     if existing and existing.sha256 == sha:
-        return existing
+        # Identical content is the same row, not a new version — but an
+        # explicit `--as` still has to land, because "re-ingest with
+        # `--as <name>`" is exactly what `sources backfill` tells the
+        # operator to do about an ambiguous group.
+        if as_key is None:
+            return existing
+        return _adopt_or_refuse(
+            registry, existing, normalize_document_key(as_key), origin
+        )
 
-    if as_key is not None:
-        document_key = normalize_document_key(as_key)
-    else:
-        candidate = derive_document_key(rel_path, sha) or normalize_document_key(rel_path)
-        # Refuse rather than guess. A candidate already claimed by a
-        # DIFFERENT document means we cannot tell "new version of that" from
-        # "different document, same filename" — and guessing wrong writes a
-        # supersession edge that would later drive a recheck of one drug's
-        # page against another's.
-        clashing = [
-            e
-            for e in registry.entries.values()
-            if e.document_key == candidate and e.rel_path != rel_path
-        ]
-        if clashing:
-            raise _ambiguous_identity_error(candidate, clashing[0], str(source_path))
-        document_key = candidate
-
-    entry = registry.register(
-        rel_path,
-        sha256=sha,
-        size_bytes=dest.stat().st_size,
-        document_key=document_key,
-        origin_path=str(source_path),
+    document_key = (
+        normalize_document_key(as_key)
+        if as_key is not None
+        else candidate_document_key(rel_path, sha)
     )
+    dest, rel_path = copy_source(
+        source_path, store.sources_path, into_subdir=into_subdir, rename=rename
+    )
+    try:
+        entry = registry.register(
+            rel_path,
+            sha256=sha,
+            size_bytes=dest.stat().st_size,
+            document_key=document_key,
+            origin_path=origin,
+            # A *derived* key that is already taken is unresolvable; a
+            # declared one means "supersede that".
+            derived_key=as_key is None,
+        )
+    except DocumentKeyConflict as conflict:
+        _unlink_orphan(dest, store.sources_path)
+        raise _ambiguous_identity_error(
+            conflict.document_key, conflict.claimant, origin
+        ) from None
     if commit:
         store._commit_paths(
             [
@@ -125,6 +138,30 @@ def add_source(
             subject=f"source: {rel_path}",
         )
     return entry
+
+
+def _adopt_or_refuse(
+    registry: SourceRegistry, existing: SourceEntry, key: str, origin: str
+) -> SourceEntry:
+    try:
+        return registry.adopt_document_key(existing.rel_path, key)
+    except DocumentKeyConflict as conflict:
+        raise _ambiguous_identity_error(
+            conflict.document_key, conflict.claimant, origin
+        ) from None
+
+
+def _unlink_orphan(dest: Path, sources_path: Path) -> None:
+    """Undo a copy whose registration was refused.
+
+    Only ever removes what this call created: the file, and its hash
+    directory if that left it empty. A hash directory is content
+    addressed, so an empty one has no other claimant.
+    """
+    dest.unlink(missing_ok=True)
+    parent = dest.parent
+    if parent != sources_path and parent.is_dir() and not any(parent.iterdir()):
+        parent.rmdir()
 
 
 def list_sources(store: WikiStore, *, include_missing: bool = False) -> list[SourceEntry]:

@@ -517,7 +517,7 @@ def _check_provenance(
     """Flag pages whose cited source files no longer exist."""
     for page in pages.values():
         for entry in page.provenance:
-            ref = _provenance_ref(entry)
+            ref = provenance_ref(entry)
             if ref is None:
                 continue
             if not _provenance_exists(ref, raw_dir=raw_dir, sources_dir=sources_dir):
@@ -590,8 +590,15 @@ def _registry_sha(sources_dir: Path, ref: str) -> str | None:
 _REGISTRY_SHA_CACHE: dict[str, dict[str, str]] = {}
 
 
-def _provenance_ref(entry: Any) -> str | None:
-    """Extract a path-shaped reference from a provenance entry."""
+def provenance_ref(entry: Any) -> str | None:
+    """Extract a path-shaped reference from a provenance entry.
+
+    Public because ``WikiStore.source_citations`` reads the same field
+    for ``outmem stale``. A second, narrower extractor there meant a page
+    citing its source under ``source:`` or ``file:`` — shapes lint
+    resolves and sha-checks — was invisible to staleness: a silent miss
+    of exactly the failure mode the feature exists to catch.
+    """
     if isinstance(entry, str):
         return entry
     if isinstance(entry, dict):

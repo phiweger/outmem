@@ -54,6 +54,9 @@ outmem write discounts \
 # → 40-char SHA, printed to stdout
 
 outmem extend pricing-formula <<< "Revised: cost-plus 40%."
+# --provenance replaces the page's source pointers (repeat for several);
+# omit it and they are left untouched. See "Staleness" below.
+outmem extend pricing-formula --provenance sources/deck/a1b2c3d4e5f6/q2.md <<< "…"
 outmem log pricing <<< "- saw a contradiction between deck and msa."
 outmem pull
 outmem push
@@ -246,15 +249,21 @@ from. Different citing pages, or different origins, means different documents:
 
 The hash segment is *verified* against the row's own sha256 rather than
 pattern-matched, so a directory legitimately named like a hash is never
-mistaken for one. An identity set explicitly with `--as` is never overwritten,
-so re-running is safe.
+mistaken for one. A name **already held** by another row is treated as
+ambiguous no matter how few rows derive it — assigning it would put two live
+rows on one identity, which is exactly the merge `--as` refuses to perform, and
+doing it silently in a migration would be worse. An identity set explicitly with
+`--as` is never overwritten, so re-running is safe.
+
+To resolve an ambiguous group, re-ingest each file with `--as`. The bytes are
+already registered, so this only sets the identity — nothing is copied twice.
 
 <a id="staleness"></a>
 ## Staleness — pages citing a superseded source
 
 ```bash
 outmem stale
-# → exit 0 if clean, 1 if any page cites a version that has been superseded
+# → 0 clean, 1 if any page cites a superseded version, 2 if a page failed to load
 ```
 
 The payoff of supersession. Every page's `provenance:` names the source
@@ -270,10 +279,22 @@ versions it was compacted from; when one of those moves to a new version,
 ```
 
 It follows the chain to the *newest* version, not just the next one, so you
-diff against something current. It **reports only** — deciding whether a page
-still stands is a judgement call, and on clinical content that belongs to a
-human (or to an explicit agent run over this list), not to a side effect of
-ingest. Wire it into CI as a warning gate, or run it after a batch re-ingest.
+diff against something current. A page whose frontmatter will not parse is a
+page this check could not run on, so those are named on stderr and the command
+exits 2 rather than reading as clean.
+
+To clear a report, re-compact the page and update its citation in the same
+step — `--provenance` replaces the pointers, and is the only way to change
+them:
+
+```bash
+outmem extend abx:amikacin --provenance sources/fachinfo/e77a10b4c503/document.md <<< "…"
+```
+
+It **reports only** — deciding whether a page still stands is a judgement call,
+and on clinical content that belongs to a human (or to an explicit agent run
+over this list), not to a side effect of ingest. Wire it into CI as a warning
+gate, or run it after a batch re-ingest.
 
 ## Import (existing markdown vault)
 
@@ -454,6 +475,7 @@ outmem dashboard --pull-on-request   # git pull --rebase before each request
 |------|---------|
 | `0`  | Success. |
 | `1`  | An `OutmemError` was raised (network, git, malformed input, etc.). |
-| `2`  | Bad invocation (e.g. empty body to `write`), or the command ran but found errors in the wiki (`lint` findings, `reindex` dropped pages). |
+| `2`  | Bad invocation (e.g. empty body to `write`), or the command ran but found errors in the wiki (`lint` findings, `reindex` dropped pages, `stale` pages that failed to load). |
 
 `outmem search` exits `1` when the pattern matched nothing (mirrors `rg`).
+`outmem stale` exits `1` when a page cites a superseded source.
