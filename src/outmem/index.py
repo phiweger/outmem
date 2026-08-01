@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -248,6 +248,21 @@ class IndexLevel:
     prefix: str
     namespaces: list[tuple[str, int]]
     pages: list[str]
+    titles: dict[str, str] = field(default_factory=dict)
+    """``slug -> title`` for the pages at this level, when asked for.
+
+    Empty unless the caller passed ``titles=True`` to
+    :meth:`~outmem.store.WikiStore.index_tree`, because filling it costs
+    a frontmatter parse per page while the rest of this object costs a
+    directory walk.
+
+    It exists because its absence was pushing consumers into a bug. A
+    browsing surface needs titles, so a caller with only slugs walks
+    ``wiki/pages/`` itself — and once you are walking, a slug map falls
+    out of the walk for free, so browsing and *addressing* get fused and
+    the addressing half then rots at the next release that changes how
+    names resolve. See :mod:`outmem.testing`.
+    """
 
 
 def navigate_index(slugs: Sequence[str], prefix: str = "") -> IndexLevel:

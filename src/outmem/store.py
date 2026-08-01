@@ -547,15 +547,33 @@ class WikiStore:
                 )
         return sorted(set(out))
 
-    def index_tree(self, prefix: str = "") -> IndexLevel:
+    def index_tree(self, prefix: str = "", *, titles: bool = False) -> IndexLevel:
         """Navigate the slug index (the TOC) one namespace level at a time.
 
         Groups :meth:`list_slugs` by the ``:`` namespace separator via
         :func:`outmem.index.navigate_index`. ``prefix=""`` returns the
         root level; pass a namespace from ``IndexLevel.namespaces`` back
         as ``prefix`` to drill in.
+
+        ``titles=True`` fills :attr:`IndexLevel.titles` with the
+        frontmatter title of each page at this level. Opt-in because it
+        costs a parse per page, where the rest is a directory walk — but
+        worth reaching for, since a browsing surface that has to fetch
+        titles some other way ends up walking ``wiki/pages/`` itself and
+        building its own slug map, which is how a consumer's addressing
+        silently falls behind the library's (:mod:`outmem.testing`).
         """
-        return navigate_index(self.list_slugs(), prefix)
+        level = navigate_index(self.list_slugs(), prefix)
+        if not titles or not level.pages:
+            return level
+        from outmem.index import load_editorial_pages
+
+        wanted = set(level.pages)
+        loaded, _failures = load_editorial_pages(self.pages_path)
+        level.titles.update(
+            {p.slug: p.frontmatter.title for p in loaded if p.slug in wanted}
+        )
+        return level
 
     def repair_pages(
         self, *, dry_run: bool = True, commit_subject: str | None = None

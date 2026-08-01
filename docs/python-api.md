@@ -281,6 +281,85 @@ mismatched one is reported here rather than raising — the page stays
 available either way. `list_slugs()` skips anything `read()` would reject, so
 the catalogue never advertises a page it can't open.
 
+## Resolving slugs — delegate, don't reimplement
+
+```python
+canonical = store.resolve_slug(slug)
+return canonical if store.exists(canonical) else None
+```
+
+That is the whole contract, and writing it this way means future addressing
+rules arrive for free. **Don't build your own slug map.** outmem has twice
+taught the store a new way to resolve a name — 0.7.0 stopped treating a
+missing `slug:` as fatal and began filtering ungrammatical ones, 0.8.0 added
+`aliases:` — and a consumer's own resolver falls behind silently, because the
+wiki is *sound* in both cases. `unreadable()` correctly says nothing is wrong.
+
+The usual reason people reimplement is a browsing surface: you need titles,
+and once you are walking `wiki/pages/` to get them, a slug map falls out of
+the walk for free. Take the titles from the TOC instead and the walk never
+happens:
+
+```python
+level = store.index_tree("abx", titles=True)
+level.namespaces      # [("abx:side-effects", 3), …] — drill in with prefix
+level.pages           # ["abx:penicillin", …]
+level.titles          # {"abx:penicillin": "Penicillin", …}
+```
+
+`titles=True` is opt-in because it costs a frontmatter parse per page, where
+the rest of `index_tree` is a directory walk.
+
+### Conformance harness
+
+If you genuinely can't delegate — you cache a resolution map, render offline,
+or run without a live store — pin your resolver against outmem's:
+
+```python
+from outmem.testing import assert_resolver_conforms, build_conformance_wiki
+
+def test_my_resolver(tmp_path):
+    store = build_conformance_wiki(tmp_path / "wiki")
+    assert_resolver_conforms(lambda s: my_resolve(store, s), store)
+```
+
+Your resolver takes a name and returns the canonical slug it addresses, or
+`None`. The harness feeds it every addressing case outmem knows — canonical,
+namespaced, aliased, declared-slug-mismatch, derived slug, ungrammatical,
+missing, reserved index — and reports every disagreement with the feature it
+belongs to and why the case exists.
+
+**The corpus is built by outmem, not supplied by you.** That is the point: your
+own wiki might contain no aliased page, so testing against it would have sailed
+straight through the 0.8.0 break. Because the fixture lives here, a behaviour
+added in a future release becomes a new case in *your* suite — your tests go red
+on upgrade without you having heard of the feature.
+
+A consequence worth knowing: a resolver that can't be pointed at a different
+wiki can't be conformance-tested. Parameterise it by store or root.
+
+Deliberate divergence is expressed by narrowing, so it lands in your suite as a
+decision rather than a silence — and use subtraction, so a feature added in 0.9
+is still checked:
+
+```python
+assert_resolver_conforms(r, store, features=ADDRESSING_FEATURES - {"reserved-index"})
+```
+
+The cheap variant, if the harness is more than you want: pin the feature set
+itself. Cruder — it says *something* changed without saying what — but it is one
+line.
+
+```python
+from outmem.testing import ADDRESSING_FEATURES
+
+def test_addressing_surface_is_unchanged():
+    assert ADDRESSING_FEATURES == {"canonical", "namespaces", "aliases", …}
+```
+
+`outmem.testing` imports nothing beyond the store — no pytest — so it works
+with any runner.
+
 ## Error handling
 
 Every operation that touches the filesystem can raise `OutmemError`
