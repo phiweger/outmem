@@ -93,6 +93,7 @@ from outmem.slug import PAGES_DIR, relpath_to_slug, slug_to_relpath, validate_sl
 from outmem.sources import (
     REGISTRY_FILENAME,
     SOURCES_DIR,
+    SOURCES_LOCAL_DIR,
     IngestionRecord,
     SourceEntry,
     SourceRef,
@@ -147,7 +148,6 @@ class WikiStoreConfig:
     remote: str = DEFAULT_REMOTE
     branch: str = DEFAULT_BRANCH
     wiki_dir: str = "wiki"
-    raw_dir: str = "raw"
     log_dir: str = "log"
     contributors_file: str = "CONTRIBUTORS.md"
     # When True, every commit-producing entry point on :class:`WikiStore`
@@ -245,9 +245,13 @@ class WikiStore:
         self.root = Path(config.root)
         self.wiki_path = self.root / config.wiki_dir
         self.pages_path = self.wiki_path / PAGES_DIR
-        self.raw_path = self.root / config.raw_dir
         self.log_path = self.root / config.log_dir
         self.sources_path = self.wiki_path / SOURCES_DIR
+        # Untracked sibling of ``sources/`` for material that may be read
+        # but not redistributed (licensed / copyrighted / embargoed). Its
+        # own registry lives inside it, so the tracked registry never
+        # records a local source's filename, hash, or origin path.
+        self.sources_local_path = self.wiki_path / SOURCES_LOCAL_DIR
         self.contributors_path = self.root / config.contributors_file
         self.agents_path = self.wiki_path / AGENTS_FILENAME
         self.state = OutmemState(self.root)
@@ -292,9 +296,10 @@ class WikiStore:
         the built-in defaults. ``.env`` is loaded into ``os.environ``
         without overriding pre-existing values.
 
-        Creates the subdirectories (``wiki/``, ``raw/``, ``log/``,
-        ``.outmem/``) if they don't yet exist. Does not initialise a
-        git repo — :meth:`init` is the explicit constructor for that.
+        Creates the subdirectories (``wiki/pages/``, ``wiki/sources/``,
+        ``log/``, ``.outmem/``) if they don't yet exist. Does not
+        initialise a git repo — :meth:`init` is the explicit
+        constructor for that.
         If a stale ``.git/index.lock`` is present and the user's
         ``config.yaml`` enables ``git.remove_stale_lock``, it gets
         cleaned up here.
@@ -351,7 +356,8 @@ class WikiStore:
 
         Creates the directory, initialises a git repo on ``branch``,
         writes a starter ``CONTRIBUTORS.md`` if one does not exist,
-        scaffolds ``raw/``, ``wiki/``, ``log/``, ``.outmem/``, seeds
+        scaffolds ``wiki/pages/``, ``wiki/sources/``, ``log/``,
+        ``.outmem/``, seeds
         ``config.yaml`` (machine config) and ``wiki/AGENTS.md`` (the
         user-editable wiki-conventions doc that gets loaded into the
         agent's system prompt every turn). ``.env`` is gitignored by
@@ -646,14 +652,17 @@ class WikiStore:
     ) -> SearchResult:
         """Run a ripgrep search anchored at the store.
 
-        ``scope`` is one of ``"wiki"``, ``"raw"``, ``"log"``, or ``"all"``.
-        Tier 1 of the agent's retrieval palette is ``scope="wiki"``;
-        Tier 2 falls through to ``"raw"`` (spec v0.5 §8).
+        ``scope`` is one of ``"wiki"``, ``"sources"``, ``"log"``, or
+        ``"all"``. Tier 1 of the agent's retrieval palette is
+        ``scope="wiki"``; Tier 2 falls through to ``"sources"``, which
+        spans both the tracked ``wiki/sources/`` tree and the untracked
+        ``wiki/sources-local/`` one.
         """
-        path = self._resolve_scope(scope)
+        path, paths = self._resolve_scope(scope)
         return search(
             pattern,
             root=path,
+            paths=paths,
             case_insensitive=case_insensitive,
             fixed_strings=fixed_strings,
             max_bytes=max_bytes,
@@ -1387,23 +1396,45 @@ class WikiStore:
     # Internals
     # ------------------------------------------------------------------
 
-    def _resolve_scope(self, scope: str) -> Path:
-        """Map ``scope`` ∈ {wiki, raw, log, all} to a search root.
+    def _resolve_scope(self, scope: str) -> tuple[Path, list[str] | None]:
+        """Map ``scope`` to ``(search_root, relative_paths)`` for ripgrep.
 
-        ``wiki`` scope resolves to ``wiki/pages/`` — the editorial-page
-        subtree — so ripgrep doesn't slosh through ``sources/`` or pick
-        up ``index.md`` / ``AGENTS.md``.
+        ``paths`` is ``None`` when the whole root is in scope, or a list
+        of root-relative subpaths when the scope spans several trees
+        (``sources``, which covers both the tracked and the local tree).
+
+        ``wiki`` resolves to ``wiki/pages/`` — the editorial-page subtree
+        — so ripgrep doesn't slosh through ``sources/`` or pick up
+        ``index.md`` / ``AGENTS.md``.
+
+        ``sources`` deliberately spans BOTH ``wiki/sources/`` and
+        ``wiki/sources-local/``. Searching only one of them is the sharp
+        edge this scope exists to remove: an agent told to "fall through
+        to the sources" must not silently miss half the corpus because
+        of a distribution policy it has no reason to know about.
         """
         if scope == "wiki":
-            return self.pages_path
-        if scope == "raw":
-            return self.raw_path
+            return self.pages_path, None
+        if scope == "sources":
+            # Only existing trees — sources-local/ is created lazily on
+            # first local ingest, and a read-only store skips layout
+            # creation entirely. An empty list means "nothing in scope",
+            # which `search` renders as a clean no-hits result rather
+            # than an rg failure on a missing path.
+            return self.wiki_path, [
+                d
+                for d, p in (
+                    (SOURCES_DIR, self.sources_path),
+                    (SOURCES_LOCAL_DIR, self.sources_local_path),
+                )
+                if p.is_dir()
+            ]
         if scope == "log":
-            return self.log_path
+            return self.log_path, None
         if scope == "all":
-            return self.root
+            return self.root, None
         raise OutmemError(
-            f"Unknown search scope {scope!r}; expected 'wiki', 'raw', 'log', or 'all'."
+            f"Unknown search scope {scope!r}; expected 'wiki', 'sources', 'log', or 'all'."
         )
 
     def _page_path(self, slug: str) -> Path:
@@ -1437,10 +1468,13 @@ class WikiStore:
         return f"{self.pages_prefix()}{slug_to_relpath(slug).as_posix()}"
 
     def _ensure_layout(self) -> None:
+        # ``sources-local/`` is intentionally absent: it is created on
+        # first local ingest, together with its .gitignore entry, so a
+        # wiki that never uses restricted material stays byte-identical
+        # to one from before the split existed.
         for sub in (
             self.wiki_path,
             self.pages_path,
-            self.raw_path,
             self.log_path,
             self.sources_path,
         ):
@@ -1468,22 +1502,59 @@ class WikiStore:
             return
         ensure_hook(self.root)
 
-    def _maybe_ignore_dotenv(self) -> None:
-        """Ensure ``.env`` is in the wiki's top-level ``.gitignore``.
+    def _ensure_gitignored(self, pattern: str, *, comment: str) -> bool:
+        """Append ``pattern`` to the wiki's top-level ``.gitignore``.
 
-        Idempotent — only appends if the pattern isn't already present.
-        Keeps secrets out of git.
+        Idempotent and conservative: a pattern already present in any
+        of its equivalent spellings is left alone, and an existing file
+        is only ever appended to. Returns ``True`` if a line was added.
+
+        Single funnel for every "outmem must keep this out of git" rule
+        so the equivalence check (bare / leading-slash / trailing-slash)
+        is written once — a second copy of it is how one caller ends up
+        appending a duplicate line on every run.
         """
         gitignore = self.root / ".gitignore"
         existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
         lines = {line.strip() for line in existing.splitlines() if line.strip()}
-        if ".env" in lines or "/.env" in lines:
-            return
-        additions = ["# secrets — never committed", ".env"]
+        bare = pattern.strip("/")
+        if lines & {bare, f"/{bare}", f"{bare}/", f"/{bare}/"}:
+            return False
         prefix = "" if not existing or existing.endswith("\n") else "\n"
         gitignore.write_text(
-            existing + prefix + "\n".join(additions) + "\n", encoding="utf-8"
+            existing + prefix + f"{comment}\n{pattern}\n", encoding="utf-8"
         )
+        return True
+
+    def _maybe_ignore_dotenv(self) -> None:
+        """Keep ``.env`` out of git. Called once at :meth:`init`."""
+        self._ensure_gitignored(".env", comment="# secrets — never committed")
+
+    def ensure_sources_local(self) -> Path:
+        """Create ``wiki/sources-local/`` and gitignore it. Returns the path.
+
+        Called on the first local ingest rather than at ``init`` so a
+        wiki that never touches restricted material keeps the exact
+        layout it had before this feature existed.
+
+        The ``.gitignore`` entry is written *before* the directory is
+        populated — the ordering matters, because a source copied in
+        first and ignored second is a source that a concurrent
+        ``git add -A`` can still catch.
+        """
+        if self.config.read_only:
+            raise OutmemError(
+                f"wiki at {self.root} is opened read-only; refused to create "
+                f"{SOURCES_LOCAL_DIR}/."
+            )
+        self._ensure_gitignored(
+            f"{self.config.wiki_dir}/{SOURCES_LOCAL_DIR}/",
+            comment=(
+                "# local-only sources — readable by the agent, never redistributed"
+            ),
+        )
+        self.sources_local_path.mkdir(parents=True, exist_ok=True)
+        return self.sources_local_path
 
     def _regenerate_index(self) -> None:
         """Rewrite ``wiki/index.md`` from the current wiki state.

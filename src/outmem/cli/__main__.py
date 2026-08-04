@@ -491,8 +491,9 @@ def cmd_lint(args: argparse.Namespace) -> int:
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
         sources_dir=store.sources_path,
+        sources_local_dir=store.sources_local_path,
+        repo_root=store.root,
     )
     sys.stdout.write(format_report(report))
     if report.has_errors:

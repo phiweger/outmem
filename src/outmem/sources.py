@@ -81,6 +81,21 @@ from outmem._time import format_iso_z, parse_iso_z, utc_now
 from outmem.exceptions import OutmemError
 
 SOURCES_DIR = "sources"
+
+# Untracked sibling of ``sources/``. Same layout, same registry schema,
+# same tooling — the only difference is that git never sees it, so it is
+# where material you may *read* but not *redistribute* belongs
+# (licensed corpora, copyrighted PDFs-converted-to-text, embargoed
+# drafts). Pages compiled from it are ordinary tracked wiki pages: the
+# derived knowledge ships, the source bytes do not.
+#
+# Each tree carries its OWN ``.sources.db``. That is deliberate rather
+# than incidental: the registry records ``rel_path`` (which embeds the
+# filename), ``sha256``, and ``origin_path`` (the absolute path on the
+# ingesting machine). A single shared registry would commit all three
+# for local sources, leaking exactly what the split exists to protect.
+SOURCES_LOCAL_DIR = "sources-local"
+
 REGISTRY_FILENAME = ".sources.db"
 
 # Bumped only when the sources/ingestions schema changes shape.

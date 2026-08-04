@@ -107,10 +107,10 @@ def test_grep_wiki_raw_scope_keeps_paths(tmp_path: Path) -> None:
     from outmem.store import WikiStore
 
     store = WikiStore.init(tmp_path / "w")
-    (store.raw_path / "deck.md").write_text(
+    (store.sources_path / "deck.md").write_text(
         "Slide 3: cost-plus 35%.\n", encoding="utf-8"
     )
-    out = _by_name(wiki_tools(store), "grep_wiki")(pattern="cost-plus", scope="raw")
+    out = _by_name(wiki_tools(store), "grep_wiki")(pattern="cost-plus", scope="sources")
     assert "deck.md" in out  # path preserved
 
 

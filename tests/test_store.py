@@ -57,7 +57,12 @@ class TestConstruction:
         store = WikiStore.init(tmp_path / "w")
         assert store.root.is_dir()
         assert (store.root / "wiki").is_dir()
-        assert (store.root / "raw").is_dir()
+        assert (store.root / "wiki/pages").is_dir()
+        assert (store.root / "wiki/sources").is_dir()
+        # sources-local/ is created lazily on first local ingest, so a
+        # wiki that never touches restricted material stays identical to
+        # one from before the split existed.
+        assert not (store.root / "wiki/sources-local").exists()
         assert (store.root / "log").is_dir()
         assert (store.root / ".outmem").is_dir()
         assert (store.root / ".outmem/.gitignore").exists()
@@ -390,10 +395,47 @@ class TestSearchAndGraph:
         result = fresh_store.search("cost-plus", fixed_strings=True)
         assert any(h.path == "pricing-formula.md" for h in result.hits)
 
-    def test_search_raw_scope(self, fresh_store: WikiStore) -> None:
-        (fresh_store.raw_path / "doc.md").write_text("raw text token-xyz\n")
-        result = fresh_store.search("token-xyz", scope="raw")
-        assert any(h.path == "doc.md" for h in result.hits)
+    def test_search_sources_scope_covers_tracked_tree(
+        self, fresh_store: WikiStore
+    ) -> None:
+        (fresh_store.sources_path / "doc.md").write_text("source text token-xyz\n")
+        result = fresh_store.search("token-xyz", scope="sources")
+        assert any(h.path.endswith("doc.md") for h in result.hits)
+
+    def test_search_sources_scope_covers_local_tree(
+        self, fresh_store: WikiStore
+    ) -> None:
+        """The trap this split exists to remove: an agent falling through
+        to the sources must see BOTH trees. Missing the local one would
+        silently hide half the corpus behind a distribution policy the
+        agent has no reason to know about."""
+        local = fresh_store.ensure_sources_local()
+        (local / "restricted.md").write_text("licensed text token-abc\n")
+        result = fresh_store.search("token-abc", scope="sources")
+        assert any(h.path.endswith("restricted.md") for h in result.hits)
+
+    def test_search_sources_scope_spans_both_trees_at_once(
+        self, fresh_store: WikiStore
+    ) -> None:
+        (fresh_store.sources_path / "open.md").write_text("shared token-both\n")
+        local = fresh_store.ensure_sources_local()
+        (local / "closed.md").write_text("licensed token-both\n")
+        hits = {h.path for h in fresh_store.search("token-both", scope="sources").hits}
+        assert any(p.endswith("open.md") for p in hits)
+        assert any(p.endswith("closed.md") for p in hits)
+
+    def test_search_sources_scope_is_empty_when_no_tree_exists(
+        self, tmp_path: Path
+    ) -> None:
+        """A read-only store skips layout creation, so neither tree need
+        exist. That must read as "no hits", not as an rg failure."""
+        seed = WikiStore.init(tmp_path / "w")
+        seed.write_page("p", title="P", body="body")
+        import shutil
+
+        shutil.rmtree(seed.sources_path)
+        store = WikiStore.open(seed.root, read_only=True)
+        assert store.search("anything", scope="sources").hits == ()
 
     def test_search_unknown_scope_raises(self, fresh_store: WikiStore) -> None:
         with pytest.raises(OutmemError, match="scope"):
@@ -518,7 +560,6 @@ class TestContributors:
 def test_config_dataclass_is_constructable() -> None:
     cfg = WikiStoreConfig(root=Path("/tmp/x"))
     assert cfg.wiki_dir == "wiki"
-    assert cfg.raw_dir == "raw"
     assert cfg.log_dir == "log"
 
 
@@ -1027,7 +1068,7 @@ class TestAliases:
         from outmem.lint import lint_wiki
 
         store = self._renamed(tmp_path)
-        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
         assert [f for f in report.findings if f.kind == "broken-wikilink"] == []
         assert [f for f in report.findings if f.kind == "wikilink-via-alias"]
 
@@ -1035,7 +1076,7 @@ class TestAliases:
         from outmem.lint import lint_wiki
 
         store = self._renamed(tmp_path)
-        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
         orphans = {f.path for f in report.findings if f.kind == "orphan-page"}
         assert not any("sepsis" in p for p in orphans)
 
@@ -1046,7 +1087,7 @@ class TestAliases:
         store.write_page("a", title="A", body="a\n", extra={"aliases": ["shared"]})
         store.write_page("b", title="B", body="b\n", extra={"aliases": ["shared"]})
         store.write_page("c", title="C", body="c\n", extra={"aliases": ["a"]})
-        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
         kinds = {f.kind for f in report.findings}
         assert "alias-conflict" in kinds
         assert "alias-shadowed" in kinds
@@ -1119,7 +1160,7 @@ class TestRenamePage:
         store.rename_page("rki:ratgeber:influenza", "clinical:influenza")
         assert len(store.history("clinical:influenza")) >= 1
         assert store.head() != before
-        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
         assert [f for f in report.findings if f.severity == "error"] == []
 
     def test_refuses_an_occupied_target(self, tmp_path: Path) -> None:

@@ -74,7 +74,12 @@ def search(
             resolved relative to it and confined within it.
         paths: Optional list of subdirectories or files (relative to
             ``root``) to restrict the search. ``None`` means search
-            everything under ``root``.
+            everything under ``root``; an explicitly *empty* list means
+            nothing is in scope and yields an empty result. The two are
+            not interchangeable — callers that compute a path list by
+            filtering (e.g. "every sources tree that exists") rely on
+            the empty case staying empty rather than silently widening
+            to the whole root.
         case_insensitive: ``rg -i``.
         fixed_strings: ``rg -F`` — treat the pattern as a literal string.
         max_bytes: Soft ceiling on the bytes of ``rg`` output we consume.
@@ -93,6 +98,11 @@ def search(
     root = root.resolve()
     if not root.is_dir():
         raise OutmemError(f"Search root does not exist or is not a directory: {root}")
+
+    if paths is not None and not paths:
+        # Explicitly empty scope. Short-circuit rather than invoking rg
+        # with no path (which would search the whole root).
+        return SearchResult(hits=(), truncated=False)
 
     resolved_paths = _resolve_search_paths(root, paths)
 
@@ -154,8 +164,12 @@ def _resolve_search_paths(
 
     Symlinks are followed during resolution; the result must still live
     under ``root`` or we refuse to search there.
+
+    ``None`` (search everything) is the only input that widens to
+    ``root``; an empty list is handled by the caller and never reaches
+    here.
     """
-    if not paths:
+    if paths is None:
         return [root]
     resolved: list[Path] = []
     for raw in paths:

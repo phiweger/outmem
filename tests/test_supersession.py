@@ -1061,7 +1061,6 @@ class TestSourceRefsSurviveRenames:
         report = lint_wiki(
             store.wiki_path,
             log_dir=store.log_path,
-            raw_dir=store.raw_path,
             sources_dir=store.sources_path,
         )
         assert [
@@ -1107,7 +1106,6 @@ class TestSourceRefsSurviveRenames:
         report = lint_wiki(
             store.wiki_path,
             log_dir=store.log_path,
-            raw_dir=store.raw_path,
             sources_dir=store.sources_path,
         )
         assert [f for f in report.findings if f.kind == "source-references-dead-slug"]
@@ -1133,7 +1131,6 @@ class TestLoadBearingAliases:
         report = lint_wiki(
             store.wiki_path,
             log_dir=store.log_path,
-            raw_dir=store.raw_path,
             sources_dir=store.sources_path,
         )
         (via,) = [f for f in report.findings if f.kind == "slug-mention-via-alias"]
@@ -1152,7 +1149,7 @@ class TestLoadBearingAliases:
         store.write_page("clinical:other", title="Other", body="Vgl. clinical:sepsis\n")
         store.rename_page("clinical:sepsis", "clinical:infektion:sepsis")
 
-        report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
         (via,) = [f for f in report.findings if f.kind == "slug-mention-via-alias"]
         assert "can eventually go" in via.message
 

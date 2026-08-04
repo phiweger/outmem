@@ -36,7 +36,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from outmem.exceptions import OutmemError
 from outmem.frontmatter import ProvenanceEntry, parse_wiki_page
+from outmem.git_ops import tracked_paths_under
 from outmem.index import (
     INDEX_FILENAME,
     INDEX_SLUG,
@@ -50,6 +52,7 @@ from outmem.slug import (
     extract_wikilinks,
     relpath_to_slug,
 )
+from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
 
 
 class Severity(StrEnum):
@@ -99,15 +102,23 @@ def lint_wiki(
     wiki_dir: Path,
     *,
     log_dir: Path | None = None,
-    raw_dir: Path | None = None,
     sources_dir: Path | None = None,
+    sources_local_dir: Path | None = None,
+    repo_root: Path | None = None,
 ) -> LintReport:
     """Run every static check against ``wiki_dir``.
 
     ``log_dir`` is consulted for orphan detection — a page mentioned
-    only in ``log/<date>.md`` still counts as referenced. ``raw_dir``
-    and ``sources_dir`` are consulted for stale-provenance checks (if
-    the cited source file is missing, the page is flagged).
+    only in ``log/<date>.md`` still counts as referenced.
+    ``sources_dir`` and ``sources_local_dir`` are consulted for
+    stale-provenance checks (if the cited source file is missing, the
+    page is flagged); a page may legitimately cite either tree.
+
+    ``repo_root`` enables the containment checks that make the
+    tracked/local split trustworthy rather than merely conventional —
+    see :func:`_check_local_source_containment`. Without it those
+    checks are skipped, so callers that care (the CLI does) must pass
+    it.
     """
     report = LintReport()
 
@@ -131,11 +142,19 @@ def lint_wiki(
     pinned = _source_pinned_aliases(sources_dir, _alias_map(pages))
     _check_wikilinks(pages, pinned, report)
     _check_dead_slug_mentions(pages, pinned, report)
-    _check_provenance(pages, raw_dir=raw_dir, sources_dir=sources_dir, report=report)
+    _check_provenance(
+        pages,
+        sources_dir=sources_dir,
+        sources_local_dir=sources_local_dir,
+        report=report,
+    )
     _check_sources_registry(sources_dir, report)
     _check_source_slug_coupling(pages, sources_dir, report)
     _check_orphans(pages, log_dir=log_dir, report=report)
     _check_index_drift(wiki_dir, pages_dir, report)
+    _check_local_source_containment(
+        sources_local_dir=sources_local_dir, repo_root=repo_root, report=report
+    )
 
     return report
 
@@ -599,8 +618,8 @@ def _check_source_slug_coupling(
 def _check_provenance(
     pages: dict[str, _LoadedPage],
     *,
-    raw_dir: Path | None,
     sources_dir: Path | None,
+    sources_local_dir: Path | None,
     report: LintReport,
 ) -> None:
     """Flag pages whose cited source files no longer exist."""
@@ -609,7 +628,9 @@ def _check_provenance(
             ref = provenance_ref(entry)
             if ref is None:
                 continue
-            if not _provenance_exists(ref, raw_dir=raw_dir, sources_dir=sources_dir):
+            if not _provenance_exists(
+                ref, sources_dir=sources_dir, sources_local_dir=sources_local_dir
+            ):
                 report.findings.append(
                     LintFinding(
                         kind="stale-provenance",
@@ -741,21 +762,31 @@ def provenance_ref(entry: Any) -> str | None:
 def _provenance_exists(
     ref: str,
     *,
-    raw_dir: Path | None,
     sources_dir: Path | None,
+    sources_local_dir: Path | None,
 ) -> bool:
-    """A provenance reference resolves if the file exists in either
-    ``raw/`` or ``sources/`` (matching either the bare path or the
-    appropriate directory prefix)."""
+    """A provenance reference resolves if the cited file exists in either
+    source tree.
+
+    Both the bare form (``<sha>/file.md``, relative to a tree) and the
+    prefixed form (``sources/<sha>/file.md``, relative to ``wiki/``) are
+    accepted, because both appear in the wild — the registry keys on the
+    former and pages tend to cite the latter.
+
+    Note the prefixes are not ambiguous despite sharing a stem:
+    ``"sources-local/x"`` does not start with ``"sources/"``, so a local
+    ref never resolves against the tracked tree by accident.
+    """
     candidates: list[Path] = []
-    if raw_dir is not None:
-        candidates.append(raw_dir / ref)
-        if ref.startswith("raw/"):
-            candidates.append(raw_dir.parent / ref)
-    if sources_dir is not None:
-        candidates.append(sources_dir / ref)
-        if ref.startswith("sources/"):
-            candidates.append(sources_dir.parent / ref)
+    for tree, prefix in (
+        (sources_dir, f"{SOURCES_DIR}/"),
+        (sources_local_dir, f"{SOURCES_LOCAL_DIR}/"),
+    ):
+        if tree is None:
+            continue
+        candidates.append(tree / ref)
+        if ref.startswith(prefix):
+            candidates.append(tree.parent / ref)
     return any(p.exists() for p in candidates)
 
 
@@ -818,6 +849,67 @@ def _scan_log_for_mentions(log_dir: Path | None, slugs: Iterable[str]) -> set[st
             if slug in text:
                 mentioned.add(slug)
     return mentioned
+
+
+def _check_local_source_containment(
+    *,
+    sources_local_dir: Path | None,
+    repo_root: Path | None,
+    report: LintReport,
+) -> None:
+    """Verify nothing under ``wiki/sources-local/`` reached git.
+
+    This is the check that turns the tracked/local split from a naming
+    convention into an enforced boundary. The whole point of the local
+    tree is that its bytes never leave the machine; if git is tracking
+    them, that guarantee is already broken and the user needs to know
+    loudly — an ERROR, not a warning, because the remedy (history
+    rewrite + rotate anything sensitive) gets harder the longer it sits.
+
+    Skipped when either path is unknown, so library callers that only
+    want the page-level checks don't pay for a git invocation.
+    """
+    if sources_local_dir is None or repo_root is None:
+        return
+    if not sources_local_dir.is_dir():
+        return
+
+    try:
+        rel_dir = sources_local_dir.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        # Local tree lives outside the repo — unusual, but then git
+        # cannot be tracking it and there is nothing to check.
+        return
+
+    try:
+        tracked = tracked_paths_under(repo_root, rel_dir)
+    except OutmemError:
+        # No git, or git failed. Containment is unverifiable rather than
+        # violated; staying quiet beats a spurious error.
+        return
+
+    if not tracked:
+        return
+
+    shown = ", ".join(tracked[:3])
+    if len(tracked) > 3:
+        shown += f", … ({len(tracked)} total)"
+    report.findings.append(
+        LintFinding(
+            kind="local-source-tracked",
+            severity=Severity.ERROR,
+            path=rel_dir,
+            message=(
+                f"git is tracking {len(tracked)} file(s) under {rel_dir}/ "
+                f"({shown}). This tree exists to hold material that must "
+                "not be redistributed, so tracked bytes are already in "
+                "history and will ship with any clone or push. Untrack "
+                f"them (`git rm --cached -r {rel_dir}`), confirm "
+                f"`{rel_dir}/` is in .gitignore, and rewrite history if "
+                "the commits were pushed."
+            ),
+        )
+    )
 
 
 def _check_index_drift(wiki_dir: Path, pages_dir: Path, report: LintReport) -> None:

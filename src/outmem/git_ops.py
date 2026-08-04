@@ -203,6 +203,29 @@ def path_is_dirty(repo_path: Path, rel_path: str) -> bool:
     return bool(raw.strip())
 
 
+def tracked_paths_under(repo_path: Path, rel_dir: str) -> list[str]:
+    """Repo-relative paths git tracks under ``rel_dir``.
+
+    Empty when the directory is untracked, absent, or fully ignored —
+    which is the expected state for ``wiki/sources-local/``. A non-empty
+    result there means the gitignore rule was removed, added too late,
+    or bypassed with ``git add -f``, and the bytes are now in history.
+
+    Uses ``ls-files --cached`` rather than reading ``.gitignore``: the
+    question is what git *is* tracking, not what it was configured to
+    skip. A file already committed stays tracked no matter what the
+    ignore file says afterwards, and that is precisely the case worth
+    catching.
+    """
+    if not is_git_repo(repo_path):
+        return []
+    raw = _run_git(
+        ["ls-files", "--cached", "--", rel_dir],
+        cwd=repo_path,
+    )
+    return [line for line in raw.splitlines() if line.strip()]
+
+
 def commit_as(
     repo_path: Path,
     *,

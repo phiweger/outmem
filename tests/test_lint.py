@@ -74,7 +74,7 @@ def test_stale_provenance_is_warning(tmp_path: Path) -> None:
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
+        sources_dir=store.sources_path,
     )
     stale = [f for f in report.findings if f.kind == "stale-provenance"]
     assert any("deleted.md" in f.message for f in stale)
@@ -94,20 +94,22 @@ def test_stale_provenance_dict_entry(tmp_path: Path) -> None:
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
+        sources_dir=store.sources_path,
     )
     assert any(f.kind == "stale-provenance" for f in report.findings)
 
 
 def test_present_provenance_not_flagged(tmp_path: Path) -> None:
     store = WikiStore.init(tmp_path / "w")
-    (store.raw_path / "real.md").write_text("real source\n", encoding="utf-8")
-    store.write_page("alpha", title="Alpha", body="body", provenance=["raw/real.md"])
+    (store.sources_path / "real.md").write_text("real source\n", encoding="utf-8")
+    store.write_page(
+        "alpha", title="Alpha", body="body", provenance=["sources/real.md"]
+    )
     store.write_page("ref", title="Ref", body="See [[alpha]].")
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
+        sources_dir=store.sources_path,
     )
     stale = [f for f in report.findings if f.kind == "stale-provenance"]
     assert stale == []
@@ -235,7 +237,7 @@ def test_dead_slug_mention_flags_prose_references(tmp_path: Path) -> None:
         title="Digest",
         body="Volltext-Digest: sop:mikrobiologie:vitek2 (alte Struktur)\n",
     )
-    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
     dead = [f for f in report.findings if f.kind == "dead-slug-mention"]
     assert len(dead) == 1
     assert "sop:mikrobiologie:vitek2" in dead[0].message
@@ -257,7 +259,7 @@ def test_dead_slug_mention_ignores_times_ratios_and_live_pages(tmp_path: Path) -
             "Link: [[clinical:sepsis]]\n"
         ),
     )
-    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
     dead = [f for f in report.findings if f.kind == "dead-slug-mention"]
     assert dead == [], [f.message for f in dead]
 
@@ -273,7 +275,7 @@ def test_a_renamed_page_mentioned_in_prose_is_not_called_dead(tmp_path: Path) ->
     store.rename_page("clinical:sepsis", "clinical:infektion:sepsis")
 
     assert store.read("clinical:sepsis").slug == "clinical:infektion:sepsis"
-    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
     assert [f for f in report.findings if f.kind == "dead-slug-mention"] == []
     # Prose is editable, so the old name is still debt worth retiring —
     # reported truthfully, the way `wikilink-via-alias` treats a link.
@@ -295,7 +297,6 @@ def test_a_source_referencing_an_aliased_slug_is_silent(tmp_path: Path) -> None:
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
         sources_dir=store.sources_path,
     )
     assert [f for f in report.findings if f.kind == "source-references-dead-slug"] == []
@@ -313,7 +314,6 @@ def test_a_slug_with_no_page_and_no_alias_is_still_dead(tmp_path: Path) -> None:
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
         sources_dir=store.sources_path,
     )
     assert len([f for f in report.findings if f.kind == "dead-slug-mention"]) == 1
@@ -328,7 +328,7 @@ def test_alias_namespaces_do_not_widen_the_false_positive_gate(tmp_path: Path) -
     store.write_page("clinical:sepsis", title="Sepsis", body="s")
     store.write_page("notes:dosing", title="Dosing", body="Abnahme 12:30, Verhaeltnis 3:1\n")
     store.rename_page("clinical:sepsis", "clinical:infektion:sepsis")
-    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
     assert [f for f in report.findings if f.kind == "dead-slug-mention"] == []
 
 
@@ -339,7 +339,7 @@ def test_duplicate_slug_is_an_error(tmp_path: Path) -> None:
     store.write_page("alpha", title="Alpha", body="a")
     rogue = store.pages_path / "beta.md"
     rogue.write_text("---\ntitle: Rogue\nslug: alpha\n---\n\nb\n", encoding="utf-8")
-    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
     dupes = [f for f in report.findings if f.kind == "duplicate-slug"]
     assert len(dupes) == 1
     assert dupes[0].severity == Severity.ERROR
@@ -355,7 +355,7 @@ def test_repairable_frontmatter_warns_instead_of_erroring(tmp_path: Path) -> Non
         "---\ntitle: Influenza (Teil 1): Erkrankungen\nslug: flu\n---\n\nbody\n",
         encoding="utf-8",
     )
-    report = lint_wiki(store.wiki_path, log_dir=store.log_path, raw_dir=store.raw_path)
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path)
     kinds = {f.kind for f in report.findings}
     assert "frontmatter-repairable" in kinds
     assert "frontmatter-invalid" not in kinds
@@ -378,7 +378,6 @@ def test_sources_registry_symmetry_both_directions(tmp_path: Path) -> None:
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
         sources_dir=store.sources_path,
     )
     kinds = {f.kind for f in report.findings}
@@ -410,7 +409,6 @@ def test_provenance_sha_mismatch_detects_a_rehashed_source(tmp_path: Path) -> No
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
         sources_dir=store.sources_path,
     )
     mism = [f for f in report.findings if f.kind == "provenance-sha-mismatch"]
@@ -443,7 +441,6 @@ def test_source_referencing_a_dead_slug_is_flagged(tmp_path: Path) -> None:
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
         sources_dir=store.sources_path,
     )
     hits = [f for f in report.findings if f.kind == "source-references-dead-slug"]
@@ -461,7 +458,6 @@ def test_source_referencing_a_live_slug_is_not_flagged(tmp_path: Path) -> None:
     report = lint_wiki(
         store.wiki_path,
         log_dir=store.log_path,
-        raw_dir=store.raw_path,
         sources_dir=store.sources_path,
     )
     assert [f for f in report.findings if f.kind == "source-references-dead-slug"] == []
