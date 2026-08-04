@@ -4,7 +4,7 @@ Subcommands mirror :class:`outmem.store.WikiStore` operations:
 
 * ``outmem init <path>`` — scaffold a new wiki
 * ``outmem read <slug>`` — print a wiki page
-* ``outmem search <pattern>`` — ripgrep over wiki/raw/log
+* ``outmem search <pattern>`` — ripgrep over wiki/sources/log
 * ``outmem history <slug>`` — per-page commit log
 * ``outmem evolution <slug> [slug...]`` — temporal-evolution diff stream
 * ``outmem write <slug> --title T < body`` — create a page from stdin
@@ -1049,7 +1049,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("pattern")
     p_search.add_argument(
         "--scope",
-        choices=("wiki", "raw", "log", "all"),
+        choices=("wiki", "sources", "log", "all"),
         default="wiki",
     )
     p_search.add_argument("-i", "--ignore-case", action="store_true")

@@ -10,9 +10,9 @@ description: >
 
 # search — find what we already know
 
-Compiled knowledge is cheaper to read than raw sources are to
+Compiled knowledge is cheaper to read than source documents are to
 re-derive, and the wiki is *your* prior work — start there and only
-fall through to raw material when the wiki was silent.
+fall through to the source documents when the wiki was silent.
 
 ## Tools at a glance
 
@@ -21,7 +21,7 @@ The full search/navigation/read surface — reach for the right one:
 | Tool | Reach for it when |
 |------|-------------------|
 | `search_wiki(question, k)` | **Primary recall.** Question-shaped lookup — ranks whole pages by relevance using the wiki's configured strategy (default `rerank(bm25)`). |
-| `grep_wiki(pattern, scope)` | The *exact line* a literal/regex string sits on, or to search `raw/` sources / the gap `log` (`scope="raw"` / `"log"`). |
+| `grep_wiki(pattern, scope)` | The *exact line* a literal/regex string sits on, or to search the source documents / the gap `log` (`scope="sources"` / `"log"`). |
 | `search_index(prefix)` | **Browse the structure.** Walk the slug namespaces (the table of contents) one level at a time to orient on an unfamiliar wiki. |
 | `list_pages()` | A flat dump of *every* slug — a cheap existence check. |
 | `read_page(slug, peek)` | Open a page; `peek=True` returns just the title + first ~1000 chars for a cheap skim before a full read. |
@@ -50,21 +50,21 @@ human-driven workflow.
    top-level namespaces with page counts — so you can `search_index(prefix="…")`
    to drill in, rather than guessing search terms blind.
 
-2. **Need an exact line, or to search raw sources / the log?** Use
+2. **Need an exact line, or to search the sources / the log?** Use
    `grep_wiki` — literal/regex ripgrep, not relevance ranking:
 
    ```python
    grep_wiki(pattern="cost-plus 35%", scope="wiki")   # exact line in a page
-   grep_wiki(pattern="cost-plus", scope="raw")         # the raw/ source documents
+   grep_wiki(pattern="cost-plus", scope="sources")     # source documents, both trees
    grep_wiki(pattern="...", scope="log")               # the gap log
    ```
 
-   `scope="raw"` is Tier 2: uncompiled source material — slower to read
+   `scope="sources"` is Tier 2: uncompiled source material — slower to read
    and less authoritative than a wiki page. If you find an answer there,
    that's a strong signal to write the compacted version back to the
    wiki at the end of the turn (see the `write` skill).
 
-   Equivalent CLI: `outmem search "<pattern>" --scope wiki|raw|log`.
+   Equivalent CLI: `outmem search "<pattern>" --scope wiki|sources|log`.
 
 3. **Read the candidate page** (skim first if you're unsure):
 
@@ -74,7 +74,7 @@ human-driven workflow.
    ```
 
    The full read returns the whole file (frontmatter + body); its
-   frontmatter `provenance` field tells you which raw files the page
+   frontmatter `provenance` field tells you which source files the page
    was compiled from. Use `peek=True` to triage a candidate cheaply —
    confirm it's the right page before committing the whole body to
    context.
@@ -107,9 +107,9 @@ registered sources.
 
 ## Anti-patterns
 
-- **Don't reach for `raw/` before `wiki/`.** You will re-derive an
+- **Don't reach for the sources before the pages.** You will re-derive an
   answer that's already compiled, costing context and time.
-- **Don't surface contradictions silently.** If `wiki/` and `raw/`
+- **Don't surface contradictions silently.** If a page and a source
   disagree, lead the response with the contradiction — that's the
   highest-signal finding the turn can produce.
 - **Don't chain more than three searches without a candidate

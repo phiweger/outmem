@@ -105,6 +105,31 @@ human-driven workflow.
    `pages_touched` is exactly the slugs you wrote or extended in this
    turn — not the slugs you read.
 
+## Local-only sources
+
+Some material may be read but not redistributed — licensed corpora,
+copyrighted text, embargoed drafts. That lives in
+`wiki/sources-local/`, a sibling tree git never sees (`outmem ingest
+--local` puts it there).
+
+For you at the keyboard, it changes almost nothing: it is greppable
+via `grep_wiki(scope="sources")` like everything else, readable via
+`read_source`, and citable in `provenance:` — a citation is not a
+redistribution. `list_sources` prefixes each row so you can tell
+which tree it came from.
+
+What *does* change is how you compact it. A page built from a
+local-only source travels even though the source does not, so it must
+carry your synthesis rather than the original's prose. Summarise,
+restructure, quote briefly where exact wording carries the meaning —
+do not transcribe long passages into a page. The wiki is the thing
+you are allowed to hand someone; keep it that way.
+
+Two things are handled for you, so don't work around them: local
+sources never enter the semantic index (the vector DB stores chunk
+text verbatim and is committed), and `outmem lint` errors if any of
+those bytes reach git.
+
 ## When NOT to ingest
 
 - **The source restates an already-compacted page.** Skip — record an
@@ -112,7 +137,7 @@ human-driven workflow.
   the row reflects the no-op, then `append_log` a one-line note.
 - **The source contradicts the wiki.** Surface the contradiction in
   `append_log` *first*; only then choose extend vs leave-alone. Don't
-  silently overwrite — `[[wiki/raw disagreement]]` is the highest-signal
+  silently overwrite — a page/source disagreement is the highest-signal
   finding the turn can produce.
 - **The source is non-text / binary.** `read_source` will reject it; pick
   a different file or pre-convert the source outside outmem.
@@ -129,7 +154,7 @@ human-driven workflow.
   source-shaped dumping ground.
 - **Logging the source verbatim.** Compaction means re-stating in your
   own words against the wiki's grammar; verbatim copies belong in
-  `raw/`, not `wiki/pages/`.
+  the source trees, not `wiki/pages/`.
 
 ## After ingesting
 

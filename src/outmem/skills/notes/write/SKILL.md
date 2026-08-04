@@ -28,7 +28,7 @@ write_page(
     slug="pricing-formula",
     title="Pricing formula",
     body="The 2026 pricing formula is cost-plus 35%.\n\nApplies to all SKUs.\n",
-    provenance=["raw/pricing-deck-2026-Q1.md"],
+    provenance=["sources/a1b2c3d4e5f6/pricing-deck-2026-Q1.md"],
     tags=["pricing", "contracts"],
 )
 ```
@@ -55,7 +55,7 @@ Equivalent CLI (body via stdin):
 ```bash
 outmem write <slug> \
     --title "<Human-readable title>" \
-    --provenance raw/<source-file>.md \
+    --provenance sources/<sha>/<source-file>.md \
     --tag <tag> \
     <<< "<complete markdown body>"
 ```
@@ -132,7 +132,7 @@ When you write a new page, outmem fills in `slug`, `created`, and
 `updated` from arguments and the current time. You supply:
 
 - `title` (required, human-readable)
-- `provenance` (list of raw/ paths, or dict entries with richer
+- `provenance` (list of source paths, or dict entries with richer
   ingestion metadata; preserve any frontmatter the raw files
   carried — see `references/frontmatter.md`)
 - `tags` (optional)

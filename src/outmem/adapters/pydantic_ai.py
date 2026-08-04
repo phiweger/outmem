@@ -123,25 +123,32 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         scope: str = "wiki",
         case_insensitive: bool = False,
     ) -> str:
-        """Literal/regex **ripgrep** over the wiki, raw sources, or the log.
+        """Literal/regex **ripgrep** over the wiki, the sources, or the log.
 
         The precise-match counterpart to ``search_wiki``: use ``grep_wiki``
         when you need the *exact line* a string appears on, or to search
-        material ``search_wiki`` can't — ``scope="raw"`` (the original
-        source documents under ``raw/``) and ``scope="log"`` (the gap log).
-        Returns ``slug:line:text`` rows for ``scope="wiki"`` (feed the slug
-        to ``read_page``) and ``path:line:text`` for raw/log hits.
+        material ``search_wiki`` can't — ``scope="sources"`` (the original
+        source documents) and ``scope="log"`` (the gap log). Returns
+        ``slug:line:text`` rows for ``scope="wiki"`` (feed the slug to
+        ``read_page``) and ``path:line:text`` for sources/log hits.
+
+        ``scope="sources"`` covers every registered source, both the ones
+        that ship with the wiki (``sources/…``) and local-only material
+        that does not (``sources-local/…``). You can read either with
+        ``read_source``; the path prefix in a hit tells you which is
+        which, and matters only if you are deciding what may be quoted
+        verbatim to an outside audience.
 
         For "which pages answer this question?" use ``search_wiki`` instead
         — it ranks whole pages by relevance; this only finds literal matches.
 
         Example:
             grep_wiki(pattern="cost-plus 35%", scope="wiki")
-            grep_wiki(pattern="penicillin", scope="raw")
+            grep_wiki(pattern="penicillin", scope="sources")
 
         Args:
             pattern: Regex pattern, or a literal string.
-            scope: One of ``"wiki"``, ``"raw"``, ``"log"``, ``"all"``. Default ``"wiki"``.
+            scope: One of ``"wiki"``, ``"sources"``, ``"log"``, ``"all"``. Default ``"wiki"``.
             case_insensitive: ``True`` to ignore case (``rg -i``).
         """
         _log_call("grep_wiki", pattern=pattern, scope=scope, case_insensitive=case_insensitive)
@@ -164,7 +171,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         Use this after ``search_wiki`` has surfaced a candidate slug,
         ``search_index`` has led you to one, or when you already know
         which page you want. To read a raw source document rather than a
-        wiki page, use ``grep_wiki`` with ``scope="raw"`` to locate it.
+        wiki page, use ``grep_wiki`` with ``scope="sources"`` to locate it.
 
         Slugs may be flat (``pricing-formula``) or namespaced with
         ``:`` separators (``abx:penicillin``,
@@ -195,7 +202,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             _log_error("read_page", exc)
             return (
                 f"(no such wiki page: {slug!r} — try `list_pages` to see "
-                "what exists, or `grep_wiki` with scope='raw' for source material)"
+                "what exists, or `grep_wiki` with scope='sources' for source material)"
             )
         if peek:
             body = page.body
@@ -334,12 +341,20 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             return f"(evolution failed: {exc})"
 
     def list_sources() -> str:
-        """List every registered source under ``wiki/sources/``.
+        """List every registered source document.
 
-        Returns ``relative/path  sha:...  N ingestion(s)`` rows, one
-        per registered file. Use when answering "what raw material do
-        we have?" or before deciding whether to write a new page from
-        a source you already cited before.
+        Returns ``path  sha:...  N ingestion(s)`` rows, one per
+        registered file. Use when answering "what source material do we
+        have?" or before deciding whether to write a new page from a
+        source you already cited before.
+
+        Paths are prefixed by which tree holds them: ``sources/…`` ships
+        with the wiki, ``sources-local/…`` stays on this machine because
+        it may be read but not redistributed (licensed or copyrighted
+        material). Both are equally readable via ``read_source`` and
+        equally citable in ``provenance:`` — the distinction only
+        matters when deciding whether long verbatim quotation is
+        appropriate in a page.
 
         Example:
             list_sources()
@@ -355,7 +370,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 prompts = [f'"{i.prompt}"' if i.prompt else "(no prompt)" for i in entry.ingestions]
                 ingestions_summary = f"  {len(entry.ingestions)} ingestion(s): {'; '.join(prompts)}"
             lines.append(
-                f"{entry.rel_path}  sha:{entry.sha256[:12]}…  "
+                f"{entry.citation_path}  sha:{entry.sha256[:12]}…  "
                 f"{entry.size_bytes}B{ingestions_summary}"
             )
         return "\n".join(lines)
@@ -368,12 +383,19 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         configured ``sources.max_chars`` (default 200k chars) — if
         the file is larger, the tail is truncated with a marker.
 
+        Works for both source trees. Local-only sources
+        (``sources-local/…``) are as readable as any other; what differs
+        is that their bytes never leave this machine, so prefer
+        summarising them in your own words over reproducing long
+        verbatim passages into a page.
+
         Example:
-            read_source(rel_path="veterinary/drugs.md")
+            read_source(rel_path="sources/a1b2c3/drugs.md")
+            read_source(rel_path="sources-local/d4e5f6/handbook.md")
 
         Args:
-            rel_path: Path relative to ``wiki/sources/`` (matches the
-                ``rel_path`` field from ``list_sources``).
+            rel_path: A path from ``list_sources`` (either the
+                tree-prefixed form or the bare one works).
         """
         _log_call("read_source", rel_path=rel_path)
         try:
@@ -601,7 +623,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 slug="pricing-formula",
                 title="Pricing formula",
                 body="The pricing formula is cost-plus 35%.\\n",
-                provenance=["raw/pricing-deck-2026-Q1.md"],
+                provenance=["sources/a1b2c3/pricing-deck.md"],
                 tags=["pricing", "contracts"],
             )
 
@@ -633,7 +655,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             title: Human-readable page title for the frontmatter.
             body: The complete markdown body (no frontmatter — that is generated).
             provenance: Optional list of source pointers. Each entry is
-                either a plain path string (e.g. ``"raw/...md"``) or a
+                either a plain path string (e.g. ``"sources/<sha>/deck.md"``) or a
                 dict carrying additional metadata (``path``, ``sha256``,
                 ``label``, etc.). Both shapes round-trip through the
                 frontmatter unchanged.
@@ -800,7 +822,7 @@ def wiki_tools(store: WikiStore) -> list[WikiTool]:
     """Return the PydanticAI tool palette bound to ``store``.
 
     Retrieval (``search_wiki`` — the strategy-driven page search;
-    ``grep_wiki`` — literal ripgrep over wiki/raw/log; ``read_page`` /
+    ``grep_wiki`` — literal ripgrep over wiki/sources/log; ``read_page`` /
     ``list_pages``), graph traversal (``find_backlinks`` /
     ``page_history``), the EXPANSION helper (``topic_evolution``), source
     inspection (``list_sources`` / ``read_source`` / ``find_similar`` when
