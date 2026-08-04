@@ -93,15 +93,22 @@ checks for these and refuses to proceed if either is missing.
 
 ## The 60-second mental model
 
-outmem maintains four directories under one wiki root:
+outmem maintains a handful of directories under one wiki root:
 
 | Directory   | Tracked in git | Who writes | What lives there |
 |-------------|----------------|------------|------------------|
-| `raw/`      | no             | upstream ingestion pipeline | plain-text/markdown source material |
 | `wiki/pages/` | **yes**      | agent + humans (via Obsidian) | compiled knowledge, one concept per file, nested as deeply as the slug demands, YAML frontmatter + `[[wikilinks]]` |
 | `wiki/sources/` | **yes**    | `outmem ingest` | ingested source documents, content-addressed under `[<into>/]<sha256[:12]>/<filename>` |
+| `wiki/sources-local/` | no (auto-gitignored) | `outmem ingest --local` | sources you may **read but not redistribute** — licensed, copyrighted, embargoed |
 | `log/`      | **yes**        | agent + humans | dated decision / observation trail |
 | `.outmem/`  | no (auto-gitignored) | outmem | non-git state (backlinks cache, last-run marker) |
+
+The two source trees are the same in every respect except one: git
+sees one and never sees the other. That split is what lets a wiki be
+compiled from a licensed handbook and still be shareable — the source
+bytes stay on your machine, the pages you derived from them travel.
+Both are equally readable, searchable, and citable by the agent. See
+[`docs/sources.md`](docs/sources.md).
 
 Plus three special wiki-root files:
 
@@ -123,8 +130,8 @@ The agent's loop per turn:
 
 1. **Orient** — read recent human commits (steering signal); choose
    *convergence* (look up a fact) or *expansion* (walk history).
-2. **Retrieve** — cheapest tool first: `rg wiki/pages/`, then `rg raw/`,
-   then `git log -p --follow` for the expansion path.
+2. **Retrieve** — cheapest tool first: `rg wiki/pages/`, then the
+   source documents, then `git log -p --follow` for the expansion path.
 3. **Compact** — produce at least one commit before responding
    (`compact:` for new pages, `extend:` for edits, `log:` for
    observations). **Mandatory** — runs that skip it raise `WritebackError`.
@@ -161,9 +168,9 @@ poke at outmem before scaffolding your own.
 outmem ask "what is our pricing formula and where does it come from?"
 ```
 
-Searches the wiki first, falls back to `raw/` if needed, and produces
-at least one commit before responding — either extending a wiki page
-(`extend: <slug>`) or logging the observation (`log: <topic>`).
+Searches the pages first, falls back to the source documents if needed,
+and produces at least one commit before responding — either extending a
+wiki page (`extend: <slug>`) or logging the observation (`log: <topic>`).
 
 ### Ingest a source document
 
@@ -179,6 +186,20 @@ write/extend pages with `provenance:` pointing at the registered
 source. Parallel `outmem ingest` runs are safe (SQLite serialises
 writers). See [docs/cli.md](docs/cli.md#ingestion-requires-outmemagent)
 for `--register-only`, re-ingest semantics, and file-type rules.
+
+**Material you can read but not redistribute** — a licensed corpus, a
+copyrighted book, an embargoed draft — takes `--local`:
+
+```bash
+outmem ingest /path/to/licensed-handbook.md --local --into reference
+```
+
+It lands in the gitignored `wiki/sources-local/` instead. The agent
+reads, greps, and cites it exactly as it would any other source; the
+bytes just never enter git, so the pages you compile from it stay
+shareable. `outmem lint` errors if any of them leak into a commit, and
+local material is never written into the (committed) semantic index.
+Full contract in [docs/sources.md](docs/sources.md).
 
 **When a source gets a new version**, name the document with `--as` so the
 revision supersedes its predecessor instead of landing beside it:
@@ -363,7 +384,7 @@ directory under `wiki/pages/`. Example frontmatter:
 title: Pricing formula
 slug: pricing-formula
 provenance:
-  - path: raw/pricing-deck-2026-Q1.md
+  - path: sources/a1b2c3d4e5f6/pricing-deck-2026-Q1.md
     drive_path: /shared/Sales/2026-Q1-pricing-deck.pdf
     sha256: 9e2c1f00aa
 created: 2026-01-15T10:30:00Z
@@ -521,6 +542,9 @@ agent = Agent(
 - [`docs/search.md`](docs/search.md) — the search & retrieval workflow:
   `search_wiki` (strategy-driven) + `grep_wiki` (literal), and the
   semantic tiers (when to reach for each).
+- [`docs/sources.md`](docs/sources.md) — the two source trees, what
+  `--local` is for, and the guarantees around material you may read
+  but not redistribute.
 - [`docs/python-api.md`](docs/python-api.md) — `WikiStore` + the
   PydanticAI adapter + the standalone agent runtime.
 - [`docs/growing-the-wiki.md`](docs/growing-the-wiki.md) — reading

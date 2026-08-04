@@ -28,7 +28,8 @@ from outmem import (
 ```python
 from outmem import WikiStore, AgentIdentity
 
-# Scaffold a new wiki (creates raw/, wiki/, log/, .outmem/, CONTRIBUTORS.md, .git/).
+# Scaffold a new wiki (creates wiki/pages/, wiki/sources/, log/, .outmem/,
+# CONTRIBUTORS.md, .git/).
 # Also seeds wiki/AGENTS.md with starter conventions (see docs/configuration.md).
 store = WikiStore.init("/srv/agent")
 
@@ -62,7 +63,8 @@ store.list_slugs()                 # ["acme-msa", "pricing-formula"]
 
 ```python
 result = store.search("cost-plus", scope="wiki")
-# scope: "wiki" | "raw" | "log" | "all"
+# scope: "wiki" | "sources" | "log" | "all"
+# "sources" spans wiki/sources/ AND wiki/sources-local/ — see docs/sources.md
 result.hits         # tuple[SearchHit, ...]; each SearchHit has .path, .line_number, .text
 result.truncated    # True if the byte-cap clipped output
 
@@ -90,7 +92,7 @@ sha = store.write_page(
     "discounts",
     title="Discount tiers",
     body="Standard discount tiers are 5% / 10% / 15%.\n",
-    provenance=["raw/pricing-deck-2026-Q1.md"],
+    provenance=["sources/a1b2c3d4e5f6/pricing-deck-2026-Q1.md"],
     tags=["pricing"],
 )
 # Commits "compact: discounts" under the agent identity. Returns 40-char SHA.
@@ -123,8 +125,15 @@ entry.registered_at      # datetime
 entry.document_key       # "research/marino-2026" — survives a revision
 entry.superseded_by      # rel_path of the version that replaced this, or None
 entry.origin_path        # where it was ingested from
+entry.local              # True if it lives in the untracked sources-local/ tree
+entry.citation_path      # "sources/<rel>" or "sources-local/<rel>" — cite THIS
 
-store.list_sources()                  # list[SourceEntry], rows whose file is gone excluded
+# Material you may read but not redistribute goes in the untracked tree.
+# Nothing is committed; the source bytes never leave this machine, while
+# pages compiled from it are tracked as usual. See docs/sources.md.
+store.add_source("/path/to/licensed-handbook.md", local=True)
+
+store.list_sources()                  # both trees; rows whose file is gone excluded
 store.get_source(entry.rel_path)      # SourceEntry | None
 store.read_source(entry.rel_path)     # text, capped at config.sources.max_chars
 

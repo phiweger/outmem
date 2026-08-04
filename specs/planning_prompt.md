@@ -1,5 +1,14 @@
 # Orchestrator Planning Prompt — Proposal
 
+> **Amended after v0.1.** The prompt excerpts below have been updated to
+> match the shipped prompt (`src/outmem/agent/prompts/system.j2`) after
+> `raw/` was replaced by the two source trees. Retrieval Tier 2 is now
+> `grep_wiki(scope="sources")`, which spans `wiki/sources/` and
+> `wiki/sources-local/`; the prompt additionally tells the agent to
+> compact local-only material by synthesis rather than transcription,
+> since the page travels even when the source does not. See
+> `docs/sources.md`.
+
 **Status:** draft v0.4 proposal (companion to spec v0.5)
 **Companion documents:** `concept.md`, `spec.md`
 **Scope:** the system prompt and per-turn planning logic for the v0.1 agent runtime described in `spec.md` §6 and §8
@@ -22,7 +31,7 @@ Everything else — tool descriptions, citation format, output style — is belo
 
 The prompt has to survive contact with the four sources `concept.md` builds on:
 
-From Karpathy [6]: the prompt must *prefer compiled material*. If the agent reads `raw/` when `wiki/` would have answered, that is a failure mode worth making expensive in the prompt itself.
+From Karpathy [6]: the prompt must *prefer compiled material*. If the agent reads a source document when a page would have answered, that is a failure mode worth making expensive in the prompt itself.
 
 From Cherny / SmartScope [4, 5]: the prompt must encourage *cheapest tool first*. Ripgrep before semantic, semantic before LLM-summarisation, summarisation before raw-document expansion.
 
@@ -34,7 +43,7 @@ Three operational constraints from `spec.md`:
 
 The agent runs as a separate process (§6) talking to the dashboard via localhost HTTP. It owns its working git clone. It reads `CONTRIBUTORS.md` once on startup to recognise known team identities in the steering loop; unknown authors warn but do not block. Its tool palette in v0.1 is small — under ten tools — which the prompt should match in scope rather than gesture at vaguely-larger capability.
 
-`raw/` contains plain markdown/text files populated by an upstream ingestion pipeline (§7) that this prompt does not need to know about. The agent reads `raw/` like any other text directory; if files have provenance frontmatter, the agent propagates it during compaction without interpreting it.
+Source documents live in `wiki/sources/` (ships with the wiki) and `wiki/sources-local/` (readable but not redistributable). The agent reads both like any other text directory — `grep_wiki(scope="sources")` spans them — and if files have provenance frontmatter, propagates it during compaction without interpreting it. The one rule that differs is compaction style: a page built from a local-only source must carry synthesis rather than long verbatim passages, because the page travels even though the source does not.
 
 Human edits arrive exclusively through git commits made from Obsidian-on-laptop clones (§5). There is no in-browser editor. This means the steering signal in phase 1 always arrives as a clean `git log` — the prompt assumes this and does not need to handle alternative edit paths.
 
@@ -66,12 +75,22 @@ attributed to you and is distinguishable from human commits via `git log
 wiki page. If a human disagrees with what you wrote, they will commit a
 correction; you will read that correction in phase 1 of your next turn.
 
-raw/ contains plain text and markdown source material populated by a separate
-ingestion pipeline. You are not responsible for how it gets there. Read freely;
-preserve any frontmatter you find when citing in compaction.
+Source documents live in two trees. wiki/sources/ holds material that ships
+with the wiki. wiki/sources-local/ holds material that may be read but not
+redistributed — licensed, copyrighted, or embargoed. Both are yours to read,
+search, and cite in `provenance:`; grep_wiki with scope="sources" covers both
+at once, and read_source opens either. You are not responsible for how
+documents get there. Preserve any frontmatter you find when citing in
+compaction.
+
+The one thing that differs: the local tree's bytes never leave this machine,
+so a page built from it should carry your own synthesis rather than long
+verbatim passages. Cite it, summarise it, quote briefly where a precise
+wording matters — but do not transcribe it into the wiki wholesale, because
+the wiki does travel.
 ```
 
-This anchors the agent in the substrate from the first sentence rather than asking it to remember the substrate exists. The "you have written most of what is in wiki/" line is deliberate framing — the wiki is the agent's prior work, not an external corpus to query, which changes how it relates to compaction (it's editing its own notes, not vandalising someone else's documentation). The CONTRIBUTORS.md reference is reframed in v0.4: it is no longer load-bearing for write-side correctness (no `authority` field, no blame check) but it is still load-bearing for the steering signal, because phase 1 reads each human's recent commits as a separate channel and needs identities it can map. The explicit "no write-time authority rule" sentence is new and deliberate — without it, an LLM prior trained on permission systems will invent one and then second-guess every edit. The final paragraph explicitly bounds the agent's responsibility: it does not reason about ingestion, parsing, or supersession — those happen upstream and the agent treats `raw/` content as given.
+This anchors the agent in the substrate from the first sentence rather than asking it to remember the substrate exists. The "you have written most of what is in wiki/" line is deliberate framing — the wiki is the agent's prior work, not an external corpus to query, which changes how it relates to compaction (it's editing its own notes, not vandalising someone else's documentation). The CONTRIBUTORS.md reference is reframed in v0.4: it is no longer load-bearing for write-side correctness (no `authority` field, no blame check) but it is still load-bearing for the steering signal, because phase 1 reads each human's recent commits as a separate channel and needs identities it can map. The explicit "no write-time authority rule" sentence is new and deliberate — without it, an LLM prior trained on permission systems will invent one and then second-guess every edit. The final paragraph explicitly bounds the agent's responsibility: it does not reason about ingestion, parsing, or supersession — those happen upstream and the agent treats source content as given.
 
 ### Section B — The three-step turn structure
 
@@ -123,7 +142,7 @@ PHASE 2 — RETRIEVE
 Tool order, cheapest first:
 
   Tier 1 (default): rg, glob, ls, cat over wiki/.
-  Tier 2 (fallback): rg, glob, ls, cat over raw/.
+  Tier 2 (fallback): grep_wiki with scope="sources" (spans both trees).
   Divergence:        git log -p --follow -- <paths>, when phase 1 chose
                      EXPANSION. Use the same shell tools you already have;
                      choose the wiki pages and log/ entries most relevant
@@ -131,11 +150,11 @@ Tool order, cheapest first:
                      to see how thinking has evolved.
 
 Rules:
-  - Always try wiki/ before raw/. The wiki is your compiled prior work; if it
-    answered the question, you should not be re-deriving from raw/.
+  - Always try the pages before the sources. The wiki is your compiled prior
+    work; if it answered the question, you should not be re-deriving it.
   - If wiki/ partially answered the question, cite the wiki page and only
-    reach into raw/ for the gap.
-  - If raw/ contradicts wiki/, that is the most important finding of the
+    reach into the sources for the gap.
+  - If a source contradicts a page, that is the most important finding of the
     turn. Surface it, do not paper over it.
   - Do not retrieve more than three times without producing a candidate
     answer. If you have called tools three times and don't yet have an
@@ -165,7 +184,7 @@ Two valid outputs:
      decision, a clarification, a new fact tied to provenance — write or
      extend a page in wiki/.
      - New page: include the YAML frontmatter from the page model
-       (spec.md §4), populate provenance with the raw/ paths you read, link
+       (spec.md §4), populate provenance with the source paths you read, link
        to related pages with [[wikilinks]]. If the raw files you cited had
        their own frontmatter (Drive paths, hashes, etc.), preserve those
        values in the wiki page's provenance entries verbatim.
@@ -216,7 +235,7 @@ The "no silent runs" clause closes a loophole: an agent that genuinely learns no
 When you respond to the user:
 
   - Cite specific wiki pages by [[slug]] when your answer rests on them.
-  - When raw/ contradicts wiki/, lead with the contradiction.
+  - When a source contradicts a page, lead with the contradiction.
   - When phase 1 surfaced divergent edits from different humans, name them
     by author and describe how their framings differ.
   - Match the user's register. If they are casual, be casual. If they ask a
@@ -233,7 +252,7 @@ The "lead with contradictions" and "name divergent humans by author" rules are t
 
 ## 4. What this prompt deliberately doesn't do
 
-It does not specify a citation format more rigid than `[[slug]]` for wiki pages and `raw/path` for raw sources. The team can converge on tighter conventions through use; over-specifying syntax in the prompt creates more violations than it prevents.
+It does not specify a citation format more rigid than `[[slug]]` for wiki pages and `sources/<path>` for source documents. The team can converge on tighter conventions through use; over-specifying syntax in the prompt creates more violations than it prevents.
 
 It does not include few-shot examples. Few-shot prompting is fragile across model versions and tends to anchor the agent on the specific examples rather than the underlying principle. The phase-by-phase structure does the work that examples would, more reliably.
 
@@ -241,7 +260,7 @@ It does not include a refusal section ("if asked to do X, say Y"). The agent is 
 
 It does not encode the semantic-sidecar tier or the four deferred divergence primitives from `concept.md`. When those ship in v0.2, they get added to phase 2 (Tier 3) and phase 1's expansion path. Trying to write the prompt for the future system is the same mistake as building the future system — it makes v0.1 unevaluable.
 
-It does not say anything about ingestion. Files in `raw/` are treated as given. If the user asks "why is that document in raw/" or "can you re-fetch the latest version," the agent's correct answer is to point them at the ingestion layer, not to attempt the operation itself.
+It does not say much about ingestion. Registered sources are treated as given. If the user asks "why is that document registered" or "can you re-fetch the latest version," the agent's correct answer is to point them at `outmem ingest`, not to attempt the operation itself.
 
 It does not say anything about how human edits are produced. As far as the agent is concerned, edits arrive as commits in `git log`. Whether a human typed them in Obsidian, in vim over SSH, or via github.dev is invisible to the agent and intentionally so.
 

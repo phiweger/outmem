@@ -68,7 +68,7 @@
 
 ## 1. System overview
 
-A Hetzner server hosts two processes: a FastAPI dashboard (auth, read-only wiki view) and the agent runtime (a separate long-running process). They share a single canonical store: a directory of markdown files versioned in git. Humans edit by cloning the repo locally and using Obsidian; the dashboard renders for reading only. Plain markdown/text source material appears in `raw/` via an external ingestion pipeline (out of scope here, see §7). The agent compiles raw material into the wiki, writes back its findings, and uses git history as both audit trail and steering signal.
+A Hetzner server hosts two processes: a FastAPI dashboard (auth, read-only wiki view) and the agent runtime (a separate long-running process). They share a single canonical store: a directory of markdown files versioned in git. Humans edit by cloning the repo locally and using Obsidian; the dashboard renders for reading only. Source documents are registered into `wiki/sources/` (or `wiki/sources-local/` for material that may be read but not redistributed) by `outmem ingest` (§7). The agent compiles them into pages, writes back its findings, and uses git history as both audit trail and steering signal.
 
 The architecture is a deliberate inversion of conventional RAG: no global vector index over raw sources, agentic shell-tool retrieval as the default, and mandatory writeback so identical future queries don't re-pay retrieval cost. The conceptual rationale lives in `concept.md`.
 
@@ -76,11 +76,17 @@ The architecture is a deliberate inversion of conventional RAG: no global vector
 
 ## 2. Storage layout
 
-The canonical store is a single directory on the server, conventionally `/srv/agent/`, containing three subdirectories.
+The canonical store is a single directory on the server, conventionally `/srv/agent/`, containing the `wiki/` tree and `log/`.
 
-`raw/` holds plain markdown or text source material populated by the upstream ingestion pipeline (§7). The agent reads from `raw/` but never writes to it. `raw/` is **not** tracked in git: it is treated as a working cache populated and curated externally, with its own version history living in whatever upstream system the ingestion pipeline draws from.
+> **Amended after v0.1.** The original design had a fourth directory, `raw/` — an untracked working cache populated by an external ingestion pipeline, which the agent read but never wrote. It has been removed. Ingestion moved *into* outmem (`outmem ingest`, §7), and once a source is copied into the wiki so its `provenance:` citation resolves on a fresh clone, an untracked-and-unregistered sibling holding the same kind of material is strictly worse: no sha256, no supersession, no ingestion log, no lint coverage. What `raw/` was reaching for — "material the wiki reads but does not publish" — is now `wiki/sources-local/`, which keeps the registry and the tooling and gives up only the git tracking. The paragraphs below describe the current layout.
 
-`wiki/` holds the compiled knowledge — plain markdown files, one concept or topic per file, interlinked with Obsidian-style `[[wikilinks]]`. Every file has YAML frontmatter (§4). `wiki/` **is** tracked in git. The directory is small — hundreds to low thousands of files — and diffs cleanly. Scale ceiling for this design: roughly 10k pages or 100MB of compiled markdown, beyond which ripgrep latency starts to bite (§12).
+`wiki/sources/` holds source documents that ship with the wiki, content-addressed at `[<into>/]<sha256[:12]>/<filename>` and registered in `wiki/sources/.sources.db`. **Tracked in git**, so a page's `provenance:` resolves for anyone who clones.
+
+`wiki/sources-local/` holds source material the wiki may *read* but not *redistribute* — licensed corpora, copyrighted text, embargoed drafts. Identical layout, identical registry schema, its own `.sources.db` inside the tree. **Never tracked**: gitignored at creation, and `outmem lint` errors if git is tracking anything under it. The separate registry is load-bearing rather than incidental — a shared one would commit each local source's filename, hash, and ingest-time absolute path, which is the leak the tree exists to prevent. The same reasoning excludes it from the semantic index unconditionally, because the vector DB stores chunk text verbatim and is itself committed.
+
+The asymmetry is the point: source bytes stay put, derived pages travel. A wiki compiled from a licensed handbook is shareable; the handbook is not.
+
+`wiki/pages/` holds the compiled knowledge — plain markdown files, one concept or topic per file, interlinked with Obsidian-style `[[wikilinks]]`. Every file has YAML frontmatter (§4). `wiki/` **is** tracked in git. The directory is small — hundreds to low thousands of files — and diffs cleanly. Scale ceiling for this design: roughly 10k pages or 100MB of compiled markdown, beyond which ripgrep latency starts to bite (§12).
 
 `log/` holds the decision and exploration trail — dated markdown files (`log/2026-05-04.md`) with append-only entries. Both agent and humans write here. `log/` **is** tracked in git. Its history *is* the long-term decision audit, and the temporal-evolution primitive (§8) reads `git log -p` against it to reconstruct how framings shifted over time.
 
@@ -124,9 +130,9 @@ Each `wiki/pages/**/*.md` file begins with YAML frontmatter:
 ---
 title: Pricing formula
 slug: pricing-formula
-provenance:                  # source pointers into raw/
-  - raw/pricing-deck-2026-Q1.md
-  - raw/acme-msa.md
+provenance:                  # pointers into the source trees
+  - sources/a1b2c3d4e5f6/pricing-deck-2026-Q1.md
+  - sources/f6e5d4c3b2a1/acme-msa.md
 created: 2026-04-12T09:14:00Z
 updated: 2026-05-04T11:32:00Z
 tags: [pricing, contracts, finance]
@@ -135,7 +141,7 @@ tags: [pricing, contracts, finance]
 
 There is no `authority` field. Any human or the agent may edit any wiki page. The system's defence against the agent making a mess is that humans see its commits in `git log` and correct them via normal edits — the next agent run reads those edits as part of phase 1's steering loop (§8) and adjusts. This trades a write-time guarantee (the agent provably cannot touch human lines) for a review-time one (humans can see and reverse anything the agent did), which is the right shape at v0.1 scale where history is visible and the team is small. If a future deployment needs write-time enforcement — adversarial settings, multi-tenant, or just a wiki large enough that humans miss bad edits — a page-level or section-level authority tag can be reintroduced as an additive feature (§12).
 
-The `provenance` field is a list of pointers into `raw/`. The agent populates it during compaction and propagates any deeper provenance — Drive paths, page ranges, content hashes — that the ingestion pipeline embedded in the raw file's own frontmatter. The agent does not generate or interpret upstream provenance; it just preserves it.
+The `provenance` field is a list of pointers into the source trees (`sources/…` or `sources-local/…`). The agent populates it during compaction and propagates any deeper provenance — Drive paths, page ranges, content hashes — that the producing pipeline embedded in the source file's own frontmatter. The agent does not generate or interpret upstream provenance; it just preserves it.
 
 Wikilinks use `[[slug]]` syntax — including namespaced slugs
 (`[[abx:penicillin]]`) — resolved natively by Obsidian and rendered to
@@ -192,17 +198,19 @@ The ingestion pipeline (§7) runs as its own process or processes, entirely outs
 
 ## 7. The ingestion contract
 
-This system does not ingest. Population of `raw/` is the responsibility of an upstream pipeline specified separately. This section defines the contract between that pipeline and this system, which is the only thing this system depends on.
+> **Amended after v0.1.** This section originally specified a contract with an *external* ingestion pipeline that populated `raw/`; outmem itself did not ingest. `outmem ingest` now does, so what follows describes the file contract that survived (types, frontmatter, lifecycle) restated against the source trees that replaced `raw/`.
 
-**Inputs to `raw/`.** Plain UTF-8 text files, preferably with `.md` extension. The agent reads them with shell tools (`rg`, `cat`, `head`); anything that's valid input to those tools is valid input to the system. PDFs, .docx, .xlsx, audio, images, and other non-text formats are *not* valid inputs; the upstream pipeline is responsible for converting them to text or markdown before they arrive in `raw/`.
+**Accepted inputs.** Plain UTF-8 text files, preferably with `.md` extension. The agent reads them with shell tools (`rg`, `cat`, `head`); anything that's valid input to those tools is valid input to the system. PDFs, .docx, .xlsx, audio, images, and other non-text formats are *not* valid inputs and `outmem ingest` refuses them; convert to text or markdown first.
 
-**Optional frontmatter.** A raw file *may* begin with a YAML frontmatter block recording its provenance — Drive path, content hash, source URL, page range, focus instructions, ingestion timestamp, ingestor identity, anything the upstream pipeline wants to record. The agent preserves this metadata in the `provenance:` field of any wiki page it compiles from the raw file (§4), but does not generate or interpret it. If frontmatter is absent, the agent uses the file's path as its only provenance pointer.
+**Optional frontmatter.** A source file *may* begin with a YAML frontmatter block recording its provenance — Drive path, content hash, source URL, page range, focus instructions, ingestion timestamp, ingestor identity, anything the producing pipeline wants to record. The agent preserves this metadata in the `provenance:` field of any wiki page it compiles from that source (§4), but does not generate or interpret it. If frontmatter is absent, the agent uses the file's registered path as its only provenance pointer.
 
-**File lifecycle.** Files appear in `raw/` when the upstream pipeline puts them there. They are read freely by the agent. They may be edited or removed by the upstream pipeline at any time; the agent does not depend on raw files being immutable. If a wiki page cites a raw file that subsequently disappears, the citation remains valid as a historical record — a `log/` entry should note the disappearance, but no automatic cleanup runs.
+**File lifecycle.** A registered source is content-addressed and therefore immutable in place: a revision lands at a new path and is linked to its predecessor by `document_key` / `superseded_by` rather than overwriting anything. If a source is removed out of band, the citing page's `provenance:` remains valid as a historical record; `outmem lint` reports it as stale provenance and `outmem sources gc` drops the orphaned registry row. No automatic cleanup runs.
 
-**Out of scope here.** How files get into `raw/`, what they're parsed from, how focus extraction works, how the user reviews and confirms candidates before they become inputs, how Drive paths are tracked, how *contradictions* between source documents are surfaced — all of these are ingestion concerns, specified in the (separate) ingestion document. Supersession of a source by a later version of the same document is **not** out of scope; see below.
+**Two destinations.** `outmem ingest` copies into `wiki/sources/` by default and into `wiki/sources-local/` with `--local` (§2). The choice is about redistribution rights, not secrecy: both trees are equally readable, greppable (`scope="sources"` spans them) and citable, and one of them is not in git. Note that a page citing a local source records that source's *filename* in tracked frontmatter — a citation is not a redistribution, but material whose name alone must stay private does not belong in either tree.
 
-**Promotion from `raw/` to `wiki/sources/`.** When the agent compiles a wiki page from a specific raw source via `outmem ingest`, that source gets copied into the wiki at a content-addressed path: `wiki/sources/[<into>/]<sha256[:12]>/<filename>`. The hash directory is what gives the layout three useful properties simultaneously: (a) no collisions when two different files share a basename (the user's `parsed/fachinfo/<drug>/output/<hash>/document.md` pipeline produces many such collisions), (b) re-ingesting the same content is a no-op rather than an error (same hash → same path), and (c) the registry rows (one per `rel_path`) are self-validating against the recorded sha256.
+**Out of scope here.** What sources are parsed from upstream, how focus extraction works, how the user reviews and confirms candidates before they become inputs, and how *contradictions* between source documents are adjudicated. Supersession of a source by a later version of the same document is **not** out of scope; see below.
+
+**Content-addressed placement.** A source gets copied into the wiki at `wiki/sources[-local]/[<into>/]<sha256[:12]>/<filename>`. The hash directory is what gives the layout three useful properties simultaneously: (a) no collisions when two different files share a basename (the user's `parsed/fachinfo/<drug>/output/<hash>/document.md` pipeline produces many such collisions), (b) re-ingesting the same content is a no-op rather than an error (same hash → same path), and (c) the registry rows (one per `rel_path`) are self-validating against the recorded sha256.
 
 **Registry storage (v0.10).** The source registry lives in `wiki/sources/.sources.db` — a SQLite file with two tables (`sources`, `ingestions`); the ingestion FK is `ON DELETE CASCADE`. SQLite (busy-timeout 5 s, default rollback-journal) is parallel-write-safe at the file-system level, which a JSON registry couldn't be without an application-level lock — concurrent `outmem ingest` runs against the same wiki are legal. Rollback-journal mode (not WAL) keeps the main DB file always in sync with committed state, so it's a normal git-trackable binary with no `-wal` / `-shm` companions. `PRAGMA user_version` carries the schema version; upgrades run `ALTER TABLE ADD COLUMN` in place on open, so an older wiki never needs rebuilding.
 
@@ -226,7 +234,7 @@ Identity is **declared, not inferred** (`outmem ingest --as`). outmem derives it
 
 **Tier 1: shell tools over `wiki/`.** `ripgrep` for content search, `glob` for filename patterns, `ls` for directory enumeration, `cat`/`head`/`tail` for read. Wrapped as agent tools, direct shell calls under the hood. Default first move on any retrieval need: ripgrep over `wiki/`. Compiled material answers most queries faster and with higher fidelity than raw chunks ever could.
 
-**Tier 2: same shell tools over `raw/`.** Falls back here when `wiki/` doesn't have the answer. Since `raw/` is plain text by contract (§7), no special tooling — same `rg`, same `cat`. If a future ingestion pipeline wants to enable structured queries (e.g., querying across CSV-derived markdown tables), that's an additional tool the agent can pick up, but the v0.1 default is text-only.
+**Tier 2: same shell tools over the source trees.** Falls back here when the pages don't have the answer — `grep_wiki(scope="sources")`, which spans `wiki/sources/` and `wiki/sources-local/` in one call. Covering both is deliberate: an agent told to fall through to the sources must not silently miss half the corpus because of a distribution policy it has no reason to know about. Sources are plain text by contract (§7), so no special tooling — same `rg`, same `cat`.
 
 **One divergence pattern in v0.1: temporal evolution.** Not a separate tool — when phase 1 selects EXPANSION (planning prompt §C), the agent invokes the existing shell tool palette with `git log -p --follow -- <paths>` against the wiki pages and `log/` entries it judges relevant, and reads the chronological diff stream. Nearly free given git-as-substrate; the agent already has shell access, and the orchestrator's planning prompt teaches when to reach for the pattern. Promoting this to a dedicated wrapper is straightforward in v0.2 if session logs show the agent consistently mis-scoping the query (forgetting `--follow`, missing `log/`, etc.) — but a wrapper that adds nothing beyond what the agent can already do should not exist in v0.1. The other four primitives from `concept.md` (contradiction surfacer, negative-space query, associative drift, cross-domain bridges) are deferred to v0.2 (§12).
 
@@ -258,7 +266,7 @@ Commit messages follow a structured convention so they're parseable: `compact: <
 
 ## 10. Evaluation
 
-Per Raudaschl [2] and the concept doc, the system tracks four metrics — but **only for features actually shipped in v0.1**: shell retrieval over `wiki/` (Tier 1), shell retrieval over `raw/` (Tier 2), and temporal evolution. Adding a feature without measuring it is the failure mode this evaluation is meant to prevent.
+Per Raudaschl [2] and the concept doc, the system tracks four metrics — but **only for features actually shipped in v0.1**: shell retrieval over `wiki/pages/` (Tier 1), shell retrieval over the source trees (Tier 2), and temporal evolution. Adding a feature without measuring it is the failure mode this evaluation is meant to prevent.
 
 - **Target.** Fraction of agent sessions that invoke this feature. From agent run logs.
 - **Adopted.** Of sessions where the feature *should* have been invoked (judged by replay against a held-out query set), fraction that *did*. Bootstrap a small held-out set during v0.1 — 30–50 hand-built queries with known good retrieval paths.
@@ -269,7 +277,7 @@ Three operational metrics from SmartScope [5]:
 
 - **Time-to-first-relevant-fact.** Wall-clock from query received to first useful retrieval result.
 - **Tokens-per-task.** Total tokens consumed per resolved query. Watch upward drift.
-- **Staleness incidents.** Cases where the agent surfaced a wiki claim contradicted by a more recent `raw/` source.
+- **Staleness incidents.** Cases where the agent surfaced a wiki claim contradicted by a more recent registered source.
 
 Recall@k and nDCG do not appear. Similarity and usefulness are not the same thing [1, 3].
 
@@ -279,11 +287,11 @@ Recall@k and nDCG do not appear. Similarity and usefulness are not the same thin
 
 Distinct from evaluation: tests catch regressions when code changes, evaluation measures whether the system is useful.
 
-A frozen **test corpus** lives in `tests/fixtures/` — a `raw/` of ~20 plain-text files and a hand-built target `wiki/`. CI runs the agent against this corpus from a clean state and verifies invariants, not exact outputs. Output equality tests against agent-generated content will be brittle and constantly false-positive.
+A frozen **test corpus** lives in `tests/fixtures/` — a `wiki/sources/` of ~20 plain-text files and a hand-built target `wiki/pages/`. CI runs the agent against this corpus from a clean state and verifies invariants, not exact outputs. Output equality tests against agent-generated content will be brittle and constantly false-positive.
 
 **Property tests** to ship with v0.1:
 
-Every wiki page has valid frontmatter (parseable YAML, required fields present). Every wiki page's `provenance:` entries point to files that exist in `raw/` at compile time (the test fixture freezes both, so this is checkable). No orphan wikilinks except those explicitly tracked in `log/`. Commit-message convention: every commit on the test branch matches one of `compact:`, `extend:`, or `log:` so the TARS *Retained* query (§10) does not silently drop results.
+Every wiki page has valid frontmatter (parseable YAML, required fields present). Every wiki page's `provenance:` entries point to files that exist in a source tree at compile time (the test fixture freezes both, so this is checkable). No orphan wikilinks except those explicitly tracked in `log/`. Commit-message convention: every commit on the test branch matches one of `compact:`, `extend:`, or `log:` so the TARS *Retained* query (§10) does not silently drop results.
 
 **Replay harness** for the steering loop. Capture real `git log` outputs from prior sessions, replay as steering input, snapshot the agent's planning context, assert that user-A's edits and user-B's edits arrive as separately tagged channels rather than a merged blob. This bug class is invisible until it bites and very hard to diagnose post-hoc.
 
@@ -309,7 +317,7 @@ Each item below is something v0.1 does *not* ship. They are listed so future con
 
 **Cron-driven log-to-wiki promotion.** Humans manually elevate log entries to wiki pages in v0.1. Automatic promotion needs heuristics that should be designed against real logs, not imagined ones.
 
-**Source supersession / contradiction handling across raw files.** When a new raw file replaces or contradicts an older one, who decides which to trust and how the wiki gets updated? Genuinely hard, partly an ingestion concern (the ingestion layer might mark supersession via frontmatter) and partly a memory concern (the contradiction-surfacer divergence primitive is the right tool, but it's deferred). For v0.1, the agent treats all `raw/` files as equally valid and surfaces contradictions in the answer when they're noticed during retrieval.
+**Source supersession / contradiction handling across sources.** When a new source replaces or contradicts an older one, who decides which to trust and how the wiki gets updated? Genuinely hard, partly an ingestion concern (the ingestion layer might mark supersession via frontmatter) and partly a memory concern (the contradiction-surfacer divergence primitive is the right tool, but it's deferred). For v0.1, the agent treats all registered sources as equally valid and surfaces contradictions in the answer when they're noticed during retrieval. (Supersession landed in v0.7; see §7.)
 
 **Write-time authority enforcement.** v0.1 has none: any author can edit any page, and "who wrote what" is reconstructed from git history rather than enforced at write time. If a future deployment needs write-time gating — adversarial settings, multi-tenant, or wikis large enough that humans miss bad edits — the natural reintroduction is a page-level `authority:` field with `agent | human | mixed` values, plus a pre-commit hook that promotes pages on first human edit. The v0.4 design specified exactly this; it is intentionally on the shelf until use justifies it.
 
@@ -333,7 +341,7 @@ Each item below is something v0.1 does *not* ship. They are listed so future con
 
 The relevance trap is addressed by mandatory writeback and the temporal-evolution primitive in v0.1, with the rest of the divergence layer queued for v0.2 once it has earned its place [1, 3].
 
-Index staleness for the wiki is moot in v0.1 because there is no index. v0.2's opt-in semantic index defends against staleness by atomicity rather than rebuild: every agent write goes through `_commit_paths`, which re-chunks the affected file, re-embeds only what changed (content-hash skip), and stages the `.vectors.db` in the same commit. External edits made through Obsidian or raw `git add` are caught by the optional pre-commit hook (`outmem hook install`), which runs `outmem reindex --staged` before the commit lands. The hook is local — it fires on the human's working clone the moment they commit, no remote webhook required. Drift between disk and DB can still be repaired explicitly with `outmem reindex`. Staleness in `raw/` is the upstream pipeline's responsibility per the §7 contract.
+Index staleness for the wiki is moot in v0.1 because there is no index. v0.2's opt-in semantic index defends against staleness by atomicity rather than rebuild: every agent write goes through `_commit_paths`, which re-chunks the affected file, re-embeds only what changed (content-hash skip), and stages the `.vectors.db` in the same commit. External edits made through Obsidian or raw `git add` are caught by the optional pre-commit hook (`outmem hook install`), which runs `outmem reindex --staged` before the commit lands. The hook is local — it fires on the human's working clone the moment they commit, no remote webhook required. Drift between disk and DB can still be repaired explicitly with `outmem reindex`. Source staleness is handled by supersession (§7): a revision links to its predecessor and `outmem stale` reports the pages compacted from the older version.
 
 Token blow-up on large corpora is mitigated by tiered tool cost (cheap shell tools first), writeback collapsing repeat queries toward zero marginal cost, and the explicit scale ceiling (§12) that says "stop and add a search index" before token usage degrades silently. Large source documents that would individually blow up the context window are an ingestion problem (§7).
 

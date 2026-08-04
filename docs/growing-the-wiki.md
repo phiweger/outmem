@@ -50,7 +50,7 @@ something it doesn't have":
 - **Orphan pages** (warning) — pages with no inbound links. Less of a
   gap, more of "this knowledge is isolated" — usually wants a few
   wikilinks from related pages, not a new source.
-- **Stale provenance** (warning) — a page cites a `raw/` file that no
+- **Stale provenance** (warning) — a page cites a source file that no
   longer exists. Re-ingest or fix the citation.
 
 ```bash

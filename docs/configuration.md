@@ -134,10 +134,15 @@ embedding spend, not repo size.
 without editing config.
 
 Sources stay fully available either way — they are registered, readable
-via `read_source`, and greppable via `grep_wiki` with `scope="all"`
-(note `scope="raw"` searches the top-level `raw/` directory, which is a
-different tree from `wiki/sources/`). Only the *vector* index is
-narrowed.
+via `read_source`, and greppable via `grep_wiki` with `scope="sources"`
+(which spans both `wiki/sources/` and `wiki/sources-local/`). Only the
+*vector* index is narrowed.
+
+`pages+sources` means the **tracked** sources tree only.
+`wiki/sources-local/` is never indexed under any setting: the vector DB
+stores chunk text verbatim and is committed, so indexing local material
+would ship the exact bytes that tree exists to withhold. See
+[sources.md](sources.md#the-guarantees-and-what-enforces-them).
 
 #### `semantic.embed_frontmatter` — make titles and tags searchable
 

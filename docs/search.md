@@ -10,7 +10,7 @@ strategy fits in.
 | tool | input | returns | use it for |
 | --- | --- | --- | --- |
 | **`search_wiki`** | a natural-language *question* | wiki pages ranked by relevance, as `[[slug]]` citations + excerpt | "which pages answer this?" — the primary recall move |
-| **`grep_wiki`** | a *pattern* (regex/literal) + `scope` | `key:line:text` rows, one per match | the *exact line* a string is on; searching `raw/` sources or the `log/` |
+| **`grep_wiki`** | a *pattern* (regex/literal) + `scope` | `key:line:text` rows, one per match | the *exact line* a string is on; searching the source documents or the `log/` |
 | **`search_index`** | a namespace *prefix* (optional) | child namespaces (with page counts) + leaf pages at that level | browsing the wiki's structure (the TOC) to orient before searching |
 | **`list_pages`** | — | every slug, one per line | a flat existence check |
 | **`read_page`** | a `slug` (+ `peek`) | the full page, or — with `peek=True` — the title + first ~1000 chars | reading a hit in full, or skimming it cheaply first |
@@ -76,18 +76,20 @@ When you need the *exact line* a string appears on, or to search material
 
 ```
 grep_wiki(pattern="cost-plus 35%", scope="wiki")   # exact line in a page
-grep_wiki(pattern="penicillin", scope="raw")        # the raw/ source documents
+grep_wiki(pattern="penicillin", scope="sources")    # source docs, both trees
 grep_wiki(pattern="...", scope="log")               # the gap log
 ```
 
 | scope  | searches                | row shape                     |
 | ------ | ----------------------- | ----------------------------- |
 | `wiki` | curated pages (default) | slug — `abx:penicillin:14:…`  |
-| `raw`  | unprocessed sources     | path — `raw/deck.md:3:…`      |
+| `sources` | source documents — **both** `wiki/sources/` and `wiki/sources-local/` | path — `sources/a1b2/deck.md:3:…` |
 | `log`  | the append-only log     | path                          |
 | `all`  | everything              | mixed                         |
 
-Only `wiki` scope is slug-shaped; `raw`/`log`/`all` return real paths.
+Only `wiki` scope is slug-shaped; `sources`/`log`/`all` return real paths.
+A `sources` hit's prefix tells you which tree it came from — see
+[sources.md](sources.md).
 Output is capped at **8 KiB** (a soft token ceiling); past that you get a
 trailing `(truncated — narrow the pattern)`.
 

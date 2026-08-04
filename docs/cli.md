@@ -47,7 +47,7 @@ Body / content come from stdin so commands compose with shell pipes.
 ```bash
 outmem write discounts \
     --title "Discount tiers" \
-    --provenance raw/pricing-deck-2026-Q1.md \
+    --provenance sources/a1b2c3d4e5f6/pricing-deck-2026-Q1.md \
     --tag pricing \
     --tag contracts \
     <<< "Standard tiers: 5% / 10% / 15%."
