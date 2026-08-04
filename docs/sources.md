@@ -147,6 +147,45 @@ should never have shipped: moving it is not enough. The bytes are in
 git history and must be treated as published — rewrite history, and
 assume anyone who cloned already has them.
 
+## Migrating from 0.9 (the `raw/` directory)
+
+Before 0.10 there was a third location: a top-level `raw/`, untracked
+and unregistered, populated by an external pipeline. It has been
+removed. It was untracked *and* unregistered *and* unmanaged, so once
+`outmem ingest` existed it had no advantage left over `sources/` — and
+the one thing it was reaching for, "material the wiki reads but does
+not publish", is what `sources-local/` now does properly, keeping the
+registry and giving up only the git tracking.
+
+Nothing happens to your data on upgrade. An existing `raw/` directory
+is left exactly where it is; outmem simply stops looking at it. To
+bring that material back into view, ingest it:
+
+```bash
+# Distributable material.
+for f in raw/*.md; do outmem ingest "$f" --register-only; done
+
+# …or, if it may be read but not redistributed:
+for f in raw/*.md; do outmem ingest "$f" --local --register-only; done
+```
+
+Then delete `raw/` when you're satisfied, and fix up any page
+`provenance:` entries still pointing at `raw/…` — `outmem lint`
+reports them as stale provenance.
+
+What breaks at the API level:
+
+| 0.9 | 0.10 |
+|---|---|
+| `store.search(..., scope="raw")` | `scope="sources"` (spans both trees) |
+| `outmem search --scope raw` | `--scope sources` |
+| `WikiStore.raw_path` | `store.sources_path` / `store.sources_local_path` |
+| `WikiStoreConfig.raw_dir` | *(removed)* |
+| `lint_wiki(raw_dir=…)` | `lint_wiki(sources_dir=…, sources_local_dir=…)` |
+
+`scope="raw"` raises with a pointer to this page rather than a bare
+"unknown scope", since it is the one error an upgrade is likely to hit.
+
 ## See also
 
 - [cli.md](cli.md#ingestion-requires-outmemagent) — `outmem ingest` in full

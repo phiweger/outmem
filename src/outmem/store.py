@@ -1554,8 +1554,16 @@ class WikiStore:
             return self.root, [rel for rel, path in trees if path.is_dir()]
         if scope == "log":
             return self.log_path, None
+        hint = (
+            "  ('raw' was removed in 0.10 — source documents now live in "
+            "wiki/sources/ and wiki/sources-local/, both covered by "
+            "scope='sources'. See docs/sources.md.)"
+            if scope == "raw"
+            else ""
+        )
         raise OutmemError(
-            f"Unknown search scope {scope!r}; expected 'wiki', 'sources', 'log', or 'all'."
+            f"Unknown search scope {scope!r}; expected 'wiki', 'sources', "
+            f"'log', or 'all'.{hint}"
         )
 
     def _page_path(self, slug: str) -> Path:

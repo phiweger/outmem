@@ -559,6 +559,8 @@ agent = Agent(
   (now) — and the self-modifying code loop (future).
 - [`docs/development.md`](docs/development.md) — dev install,
   repository layout.
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed per release, including
+  the breaking ones and how to migrate.
 - [`specs/concept.md`](specs/concept.md) — the original pattern this
   implements.
 - [`specs/spec.md`](specs/spec.md) — v0.1 implementation spec.
@@ -567,9 +569,14 @@ agent = Agent(
 
 ## Status
 
-v0.1 + a v0.10-tagged batch of refinements (SQLite source registry,
-parallel-safe ingest, shared `_sqlite` / `_time` / `_logfire` helpers,
-`wiki/AGENTS.md` schema doc, `store.py` split into facets, README
-restructure). Tests + ruff + mypy strict clean.
+Package **0.10.0**, implementing spec v0.10. The core loop (compile →
+retrieve → mandatory writeback) has been stable since v0.1; since then
+the additions have been the SQLite source registry with supersession,
+the opt-in semantic index, HITL write approval, retrieval tuning, and —
+in 0.10.0 — the tracked/local source split. See
+[`CHANGELOG.md`](CHANGELOG.md); 0.10.0 has breaking changes and a
+migration guide.
+
+Tests + ruff + mypy strict clean.
 
 To give feedback, report at <https://github.com/phiweger/outmem/issues>.
