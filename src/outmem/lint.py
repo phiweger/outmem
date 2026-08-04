@@ -10,7 +10,7 @@ class of problems that don't need an LLM:
 - Slugs written as *prose* that no longer resolve — a dangling-link check
   is blind to these, and they are where dead references accumulate after
   a namespace is reorganised
-- Stale provenance (cited ``raw/`` or ``sources/`` file is missing) and
+- Stale provenance (the cited source file is missing) and
   provenance citing a sha256 the registry no longer holds
 - ``.sources.db`` disagreeing with what is on disk, in either direction
 - Orphan pages (zero inbound wikilinks, not referenced from ``log/``)

@@ -290,7 +290,7 @@ class TestDataset:
             _first_source(SimpleNamespace(provenance=[{"path": "sources/x/doc.md"}]))
             == "sources/x/doc.md"
         )
-        assert _first_source(SimpleNamespace(provenance=["raw/deck.md"])) == "raw/deck.md"
+        assert _first_source(SimpleNamespace(provenance=["sources/deck.md"])) == "sources/deck.md"
         assert _first_source(SimpleNamespace(provenance=[])) is None
 
     def test_generate_bank_reports_progress(self, store: WikiStore) -> None:

@@ -34,7 +34,7 @@ def seeded_store(tmp_path: Path) -> WikiStore:
         "pricing-formula",
         title="Pricing formula",
         body="The pricing formula is cost-plus 35%.\n\nSee [[acme-msa]] for terms.\n",
-        provenance=["raw/pricing-deck-2026-Q1.md"],
+        provenance=["sources/pricing-deck-2026-Q1.md"],
         tags=["pricing", "contracts"],
     )
     store.write_page(
@@ -141,7 +141,7 @@ def test_page_renders_tags(client: TestClient) -> None:
 
 def test_page_renders_provenance(client: TestClient) -> None:
     rsp = client.get("/wiki/pricing-formula")
-    assert "raw/pricing-deck-2026-Q1.md" in rsp.text
+    assert "sources/pricing-deck-2026-Q1.md" in rsp.text
 
 
 def test_unknown_slug_404(client: TestClient) -> None:

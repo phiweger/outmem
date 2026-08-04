@@ -229,12 +229,12 @@ class TestWrite:
             "alpha",
             title="Alpha",
             body="hi",
-            provenance=["raw/source.md"],
+            provenance=["sources/source.md"],
             tags=["pricing"],
             created=when,
         )
         page = fresh_store.read("alpha")
-        assert page.frontmatter.provenance == ["raw/source.md"]
+        assert page.frontmatter.provenance == ["sources/source.md"]
         assert page.frontmatter.tags == ["pricing"]
         assert page.frontmatter.created == when
 
@@ -264,7 +264,7 @@ class TestWrite:
             "alpha",
             title="Alpha",
             body="v1",
-            provenance=["raw/source.md"],
+            provenance=["sources/source.md"],
             tags=["x"],
             created=when,
         )

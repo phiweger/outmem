@@ -520,3 +520,80 @@ class TestSourcesLocal:
         # Even under the most permissive index setting.
         store.config.outmem.semantic.index = "pages+sources"
         assert load_for_index(store, rel) is None
+
+    def test_scope_all_does_not_hide_the_local_tree(self, tmp_path: Path) -> None:
+        """rg honours .gitignore while walking a directory, so handing it
+        the repo root would make 'search everything' the one scope that
+        silently skips sources-local. Explicit paths are exempt."""
+        store = WikiStore.init(tmp_path / "w")
+        (store.sources_path / "open.md").write_text("MARKER\n", encoding="utf-8")
+        local = store.ensure_sources_local()
+        (local / "closed.md").write_text("MARKER\n", encoding="utf-8")
+        store.write_page("p", title="P", body="MARKER\n")
+
+        hits = {h.path for h in store.search("MARKER", scope="all").hits}
+        assert any("sources-local/closed.md" in h for h in hits), hits
+        assert any("sources/open.md" in h for h in hits), hits
+        assert any("pages/p.md" in h for h in hits), hits
+
+    def test_scope_all_excludes_derived_state(self, tmp_path: Path) -> None:
+        """…and enumerating the trees keeps .outmem/ out of results the
+        agent would otherwise have to read past."""
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("p", title="P", body="MARKER\n")
+        (store.root / ".outmem" / "junk.json").write_text('{"x": "MARKER"}')
+        hits = {h.path for h in store.search("MARKER", scope="all").hits}
+        assert not any(".outmem" in h for h in hits), hits
+
+    def test_read_source_accepts_every_path_spelling(self, tmp_path: Path) -> None:
+        """The agent passes back whatever string it last saw — the
+        registry key, the citation path, or the repo-relative path
+        grep_wiki prints. Refusing any of them turns a working two-step
+        into a dead end the agent cannot diagnose."""
+        store = WikiStore.init(tmp_path / "w")
+        entry = store.add_source(self._doc(tmp_path), local=True)
+        for spelling in (
+            entry.rel_path,
+            entry.citation_path,
+            f"wiki/{entry.citation_path}",
+        ):
+            assert "All rights reserved" in store.read_source(spelling), spelling
+            assert store.get_source(spelling) is not None, spelling
+
+    def test_supersession_covers_local_sources(self, tmp_path: Path) -> None:
+        """A licensed handbook getting a revised edition supersedes like
+        any other source, and the pages compacted from the old edition are
+        just as stale. Consulting only the tracked registry made the
+        report quietly half-blind on exactly this case."""
+        store = WikiStore.init(tmp_path / "w")
+        v1 = tmp_path / "ed1.md"
+        v1.write_text("Edition 1.\n", encoding="utf-8")
+        e1 = store.add_source(v1, local=True, as_key="ref/handbook")
+        store.write_page(
+            "notes", title="Notes", body="From ed.1\n", provenance=[e1.citation_path]
+        )
+        v2 = tmp_path / "ed2.md"
+        v2.write_text("Edition 2, revised.\n", encoding="utf-8")
+        store.add_source(v2, local=True, as_key="ref/handbook")
+
+        stale, _failures = store.stale_pages()
+        assert [c.slug for c in stale] == ["notes"]
+        assert stale[0].cited.startswith("sources-local/")
+        assert stale[0].document_key == "ref/handbook"
+
+    def test_citations_are_filterable_by_tree(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        openm = store.add_source(self._doc(tmp_path, "open.md"))
+        closed = store.add_source(self._doc(tmp_path, "closed.md"), local=True)
+        store.write_page(
+            "a", title="A", body="x", provenance=[openm.citation_path]
+        )
+        store.write_page(
+            "b", title="B", body="y", provenance=[closed.citation_path]
+        )
+        tracked, _ = store.source_citations(local=False)
+        local, _ = store.source_citations(local=True)
+        assert list(tracked.values()) == [["a"]]
+        assert list(local.values()) == [["b"]]
+        both, _ = store.source_citations()
+        assert sorted(s for v in both.values() for s in v) == ["a", "b"]

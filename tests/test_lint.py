@@ -67,7 +67,7 @@ def test_stale_provenance_is_warning(tmp_path: Path) -> None:
         "alpha",
         title="Alpha",
         body="body",
-        provenance=["raw/deleted.md"],
+        provenance=["sources/deleted.md"],
     )
     # Add a counter-link so alpha isn't also flagged as an orphan.
     store.write_page("ref", title="Ref", body="See [[alpha]].")
@@ -88,7 +88,7 @@ def test_stale_provenance_dict_entry(tmp_path: Path) -> None:
         "alpha",
         title="Alpha",
         body="body",
-        provenance=[{"path": "raw/deleted.md", "sha256": "x"}],
+        provenance=[{"path": "sources/deleted.md", "sha256": "x"}],
     )
     store.write_page("ref", title="Ref", body="See [[alpha]].")
     report = lint_wiki(

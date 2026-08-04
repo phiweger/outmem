@@ -1109,8 +1109,17 @@ class WikiStore:
             commit=commit,
         )
 
-    def source_citations(self) -> tuple[dict[str, list[str]], list[PageLoadFailure]]:
+    def source_citations(
+        self, *, local: bool | None = None
+    ) -> tuple[dict[str, list[str]], list[PageLoadFailure]]:
         """``source rel_path -> [slug, …]`` from every page's ``provenance:``.
+
+        Keys are tree-relative registry keys, so callers can look them up
+        directly. ``local`` filters by which tree a citation names:
+        ``False`` for the tracked tree, ``True`` for the local one,
+        ``None`` (default) for both. A citation with no tree prefix is
+        assumed tracked, which is what pages written before the split
+        carry.
 
         The reverse of the provenance edge, built in one walk. Nothing
         stored it because nothing consumed it — it is what turns
@@ -1132,7 +1141,15 @@ class WikiStore:
                 ref = provenance_ref(entry)
                 if ref is None:
                     continue
-                out.setdefault(ref.removeprefix(f"{SOURCES_DIR}/"), []).append(page.slug)
+                # `sources-local/x` must not be read as a tracked ref: a
+                # bare removeprefix("sources/") leaves it unchanged, so it
+                # would never match a registry row and the citation would
+                # silently drop out of supersession reporting.
+                tree, key = _sources.split_tree_prefix(self, ref)
+                is_local = tree is not None and not tree.tracked
+                if local is not None and is_local is not local:
+                    continue
+                out.setdefault(key, []).append(page.slug)
         return out, failures
 
     def stale_pages(self) -> tuple[list[StaleCitation], list[PageLoadFailure]]:
@@ -1147,36 +1164,50 @@ class WikiStore:
         Returns the loader failures too — a page that would not parse is
         a page this check could not run on, and reporting a clean wiki
         while silently skipping it is the failure this exists to prevent.
+
+        Covers both source trees. A licensed handbook that gets a revised
+        edition supersedes exactly like a tracked source does, and the
+        pages compacted from the old edition are just as stale — the
+        report would be quietly half-blind if it only consulted the
+        tracked registry.
         """
         from outmem.sources import StaleCitation
 
-        registry = _sources.get_registry(self)
-        citations, failures = self.source_citations()
         out: list[StaleCitation] = []
-        for rel_path, slugs in sorted(citations.items()):
-            entry = registry.entries.get(rel_path)
-            if entry is None or entry.superseded_by is None:
-                continue
-            current = entry.superseded_by
-            # Follow the chain to the newest version, not just the next one.
-            seen = {rel_path}
-            while current in registry.entries and current not in seen:
-                seen.add(current)
-                nxt = registry.entries[current].superseded_by
-                if nxt is None:
-                    break
-                current = nxt
-            for slug in sorted(slugs):
-                out.append(
-                    StaleCitation(
-                        slug=slug,
-                        cited=rel_path,
-                        current=current,
-                        document_key=entry.document_key or "",
-                        current_exists=current in registry.entries,
+        failures: list[PageLoadFailure] = []
+        for tree in _sources.existing_trees(self):
+            registry = _sources.get_registry(self, tree)
+            citations, tree_failures = self.source_citations(local=not tree.tracked)
+            if tree.tracked:
+                # Page-load failures are a property of the wiki, not of a
+                # tree; collect them once so they aren't double-reported.
+                failures = tree_failures
+            for rel_path, slugs in sorted(citations.items()):
+                entry = registry.entries.get(rel_path)
+                if entry is None or entry.superseded_by is None:
+                    continue
+                current = entry.superseded_by
+                # Follow the chain to the newest version, not just the next one.
+                seen = {rel_path}
+                while current in registry.entries and current not in seen:
+                    seen.add(current)
+                    nxt = registry.entries[current].superseded_by
+                    if nxt is None:
+                        break
+                    current = nxt
+                for slug in sorted(slugs):
+                    out.append(
+                        StaleCitation(
+                            slug=slug,
+                            cited=tree.entry_relpath(rel_path)
+                            if not tree.tracked
+                            else rel_path,
+                            current=current,
+                            document_key=entry.document_key or "",
+                            current_exists=current in registry.entries,
+                        )
                     )
-                )
-        return out, failures
+        return sorted(out, key=lambda c: (c.slug, c.cited)), failures
 
     def propose_document_keys(self) -> tuple[list[KeyCandidate], list[PageLoadFailure]]:
         """Candidate ``document_key`` groupings for rows that predate identity."""
@@ -1223,8 +1254,14 @@ class WikiStore:
         by default (the ``repair_pages`` convention) because the registry
         is a git-tracked binary — every apply writes a full blob into
         history. Files with no registry row are reported, never deleted.
+
+        Reconciles both source trees. The local registry drifts for the
+        same reasons the tracked one does, and leaving it out would mean
+        the one registry a user cannot inspect through git history is
+        also the one nothing cleans. Only the tracked registry produces
+        a commit; the local one lives inside the gitignored tree.
         """
-        from outmem.sources import gc_registry
+        from outmem.sources import RegistryAudit, gc_registry
 
         audit = gc_registry(self.sources_path, dry_run=dry_run)
         if not dry_run and (audit.missing_files or audit.orphan_ingestions):
@@ -1233,7 +1270,26 @@ class WikiStore:
                 [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
                 subject=f"sources: gc — dropped {len(audit.missing_files)} stale row(s)",
             )
-        return audit
+
+        if not self.sources_local_path.is_dir():
+            return audit
+
+        local_audit = gc_registry(self.sources_local_path, dry_run=dry_run)
+        if not dry_run and (local_audit.missing_files or local_audit.orphan_ingestions):
+            self._source_registry_local = None
+        # Merge so a caller sees one report. Local paths are tree-qualified
+        # so the two trees stay distinguishable in the output.
+        return RegistryAudit(
+            missing_files=[
+                *audit.missing_files,
+                *(f"{SOURCES_LOCAL_DIR}/{p}" for p in local_audit.missing_files),
+            ],
+            unregistered=[
+                *audit.unregistered,
+                *(f"{SOURCES_LOCAL_DIR}/{p}" for p in local_audit.unregistered),
+            ],
+            orphan_ingestions=audit.orphan_ingestions + local_audit.orphan_ingestions,
+        )
 
     def list_sources(self, *, include_missing: bool = False) -> list[SourceEntry]:
         """Every registered source, ordered by relative path."""
@@ -1435,27 +1491,37 @@ class WikiStore:
         edge this scope exists to remove: an agent told to "fall through
         to the sources" must not silently miss half the corpus because
         of a distribution policy it has no reason to know about.
+
+        ``all`` enumerates the same trees explicitly rather than handing
+        ripgrep the repo root. Two reasons, and the first is not
+        cosmetic: **rg honours .gitignore while walking a directory**, so
+        a bare-root search silently skips ``sources-local/`` — the
+        "search everything" scope would be the one place the local tree
+        went missing. Explicit paths are exempt from that filtering.
+        Second, it keeps ``.outmem/``, ``.vectors.db`` and any stray
+        repo-root files out of results the agent has to read past.
         """
         if scope == "wiki":
             return self.pages_path, None
-        if scope == "sources":
+        if scope in ("sources", "all"):
+            trees: list[tuple[str, Path]] = [
+                (f"{self.config.wiki_dir}/{SOURCES_DIR}", self.sources_path),
+                (f"{self.config.wiki_dir}/{SOURCES_LOCAL_DIR}", self.sources_local_path),
+            ]
+            if scope == "all":
+                trees = [
+                    (self.pages_prefix().rstrip("/"), self.pages_path),
+                    *trees,
+                    (self.config.log_dir, self.log_path),
+                ]
             # Only existing trees — sources-local/ is created lazily on
             # first local ingest, and a read-only store skips layout
             # creation entirely. An empty list means "nothing in scope",
             # which `search` renders as a clean no-hits result rather
             # than an rg failure on a missing path.
-            return self.wiki_path, [
-                d
-                for d, p in (
-                    (SOURCES_DIR, self.sources_path),
-                    (SOURCES_LOCAL_DIR, self.sources_local_path),
-                )
-                if p.is_dir()
-            ]
+            return self.root, [rel for rel, path in trees if path.is_dir()]
         if scope == "log":
             return self.log_path, None
-        if scope == "all":
-            return self.root, None
         raise OutmemError(
             f"Unknown search scope {scope!r}; expected 'wiki', 'sources', 'log', or 'all'."
         )

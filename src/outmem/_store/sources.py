@@ -53,26 +53,50 @@ class SourceTree:
     name: str
     path: Path
     tracked: bool
+    wiki_dir: str
 
     @property
     def registry_relpath(self) -> str:
-        """Registry path relative to ``wiki/`` (for ``git add``)."""
+        """Registry path relative to ``wiki/`` (for citation)."""
         return f"{self.name}/{REGISTRY_FILENAME}"
 
     def entry_relpath(self, rel_path: str) -> str:
-        """Source path relative to ``wiki/`` (for ``git add`` / citation)."""
+        """Source path relative to ``wiki/`` — the ``provenance:`` form."""
         return f"{self.name}/{rel_path}"
+
+    def repo_relpath(self, rel_path: str) -> str:
+        """Source path relative to the repo root — the ``git add`` form.
+
+        Distinct from :meth:`entry_relpath` by exactly one segment, which
+        is precisely why it is a method rather than an f-string at each
+        call site: the two forms are easy to confuse, and staging the
+        wiki-relative one silently stages nothing.
+        """
+        return f"{self.wiki_dir}/{self.entry_relpath(rel_path)}"
+
+    @property
+    def repo_registry_relpath(self) -> str:
+        """Registry path relative to the repo root (for ``git add``)."""
+        return f"{self.wiki_dir}/{self.registry_relpath}"
 
 
 def tracked_tree(store: WikiStore) -> SourceTree:
     """The git-tracked source tree — the default home for ingests."""
-    return SourceTree(name=SOURCES_DIR, path=store.sources_path, tracked=True)
+    return SourceTree(
+        name=SOURCES_DIR,
+        path=store.sources_path,
+        tracked=True,
+        wiki_dir=store.config.wiki_dir,
+    )
 
 
 def local_tree(store: WikiStore) -> SourceTree:
     """The untracked source tree, for material that must not ship."""
     return SourceTree(
-        name=SOURCES_LOCAL_DIR, path=store.sources_local_path, tracked=False
+        name=SOURCES_LOCAL_DIR,
+        path=store.sources_local_path,
+        tracked=False,
+        wiki_dir=store.config.wiki_dir,
     )
 
 
@@ -225,10 +249,7 @@ def add_source(
     # the leak the split exists to prevent.
     if commit and tree.tracked:
         store._commit_paths(
-            [
-                f"{store.config.wiki_dir}/{tree.entry_relpath(rel_path)}",
-                f"{store.config.wiki_dir}/{tree.registry_relpath}",
-            ],
+            [tree.repo_relpath(rel_path), tree.repo_registry_relpath],
             subject=f"source: {rel_path}",
         )
     return entry
@@ -284,21 +305,37 @@ def record_source_refs(
 
 
 def split_tree_prefix(store: WikiStore, rel_path: str) -> tuple[SourceTree | None, str]:
-    """Strip a leading ``sources/`` / ``sources-local/`` off ``rel_path``.
+    """Strip a leading tree prefix off ``rel_path``, if there is one.
 
-    Both spellings reach these functions in practice and both must work.
-    The registry keys on the tree-relative form (``<sha>/file.md``), but
-    what a caller has in hand is usually the prefixed one: it is what
-    ``grep_wiki`` prints, and what pages carry in ``provenance:``. An
-    agent that greps and then reads passes the string it just saw.
+    Three spellings circulate and all three must work, because each is
+    what some caller legitimately has in hand:
+
+    * ``<sha>/file.md`` — the registry key.
+    * ``sources-local/<sha>/file.md`` — what a page's ``provenance:``
+      carries and what :attr:`SourceEntry.citation_path` returns.
+    * ``wiki/sources-local/<sha>/file.md`` — repo-relative, which is
+      what ``grep_wiki`` prints.
+
+    An agent that greps and then reads passes back the string it just
+    saw, so refusing any of these turns a working two-step into a dead
+    end for reasons the agent cannot inspect. Cheap to accept, and the
+    ambiguity is nil: the prefixes are distinct and the remainder is
+    always checked against the filesystem by :func:`resolve_source`.
 
     Returns ``(tree, remainder)``; ``tree`` is ``None`` when no prefix
-    was present, leaving the choice to :func:`resolve_source`.
+    matched, leaving the choice to :func:`resolve_source`.
     """
+    wiki_prefix = f"{store.config.wiki_dir}/"
+    candidate = (
+        rel_path[len(wiki_prefix) :] if rel_path.startswith(wiki_prefix) else rel_path
+    )
     for tree in (tracked_tree(store), local_tree(store)):
         prefix = f"{tree.name}/"
-        if rel_path.startswith(prefix):
-            return tree, rel_path[len(prefix) :]
+        if candidate.startswith(prefix):
+            return tree, candidate[len(prefix) :]
+    # A bare `wiki/` prefix with no tree after it isn't a source path at
+    # all; hand back the original so the caller's not-found path reports
+    # what was actually asked for.
     return None, rel_path
 
 
@@ -421,7 +458,7 @@ def record_ingestion(
     # nothing for git to record.
     if commit and tree.tracked:
         store._commit_paths(
-            [f"{store.config.wiki_dir}/{tree.registry_relpath}"],
+            [tree.repo_registry_relpath],
             subject=f"ingest: {key}",
         )
     return record

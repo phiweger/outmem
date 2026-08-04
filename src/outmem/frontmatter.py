@@ -7,9 +7,9 @@ The page model is specified in ``docs/spec.md`` §4 (v0.5):
     ---
     title: Pricing formula
     slug: pricing-formula
-    provenance:                # source pointers into raw/
-      - raw/pricing-deck-2026-Q1.md
-      - raw/acme-msa.md
+    provenance:                # pointers into the source trees
+      - sources/a1b2c3d4e5f6/pricing-deck-2026-Q1.md
+      - sources-local/f6e5d4c3b2a1/licensed-handbook.md
     created: 2026-04-12T09:14:00Z
     updated: 2026-05-04T11:32:00Z
     tags: [pricing, contracts, finance]

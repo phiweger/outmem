@@ -45,8 +45,8 @@ def test_parse_required_fields(sample_page_text: str) -> None:
     assert fm.title == "Pricing formula"
     assert fm.slug == "pricing-formula"
     assert fm.provenance == [
-        "raw/pricing-deck-2026-Q1.md",
-        "raw/acme-msa.md",
+        "sources/pricing-deck-2026-Q1.md",
+        "sources/acme-msa.md",
     ]
     assert fm.created == datetime(2026, 4, 12, 9, 14, tzinfo=UTC)
     assert fm.updated == datetime(2026, 5, 4, 11, 32, tzinfo=UTC)
@@ -64,7 +64,7 @@ def test_round_trip_preserves_provenance(page_with_rich_provenance: str) -> None
     assert fm2.provenance == fm.provenance
     assert isinstance(fm2.provenance[0], dict)
     assert fm2.provenance[0]["drive_path"] == "/shared/contracts/acme/2026/MSA.pdf"
-    assert fm2.provenance[1] == "raw/acme-pricing.md"
+    assert fm2.provenance[1] == "sources/acme-pricing.md"
     assert body2.strip() == body.strip()
 
 
@@ -111,7 +111,7 @@ def test_malformed_yaml_raises() -> None:
 
 
 def test_provenance_must_be_list() -> None:
-    text = "---\ntitle: X\nslug: x\nprovenance: raw/file.md\n---\n\nbody\n"
+    text = "---\ntitle: X\nslug: x\nprovenance: sources/file.md\n---\n\nbody\n"
     with pytest.raises(FrontmatterError, match="provenance"):
         parse_wiki_page(text)
 

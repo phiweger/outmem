@@ -1081,7 +1081,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--provenance",
         action="append",
         default=[],
-        help="Path into raw/. Repeat for multiple sources.",
+        help="Source path for provenance (e.g. sources/<sha>/deck.md). "
+        "Repeat for multiple sources.",
     )
     p_write.add_argument(
         "--tag",

@@ -33,7 +33,7 @@ def seeded_store(tmp_path: Path) -> WikiStore:
         "pricing-formula",
         title="Pricing formula",
         body="The pricing formula is cost-plus 35%.\n",
-        provenance=["raw/deck.md"],
+        provenance=["sources/deck.md"],
         tags=["pricing"],
     )
     store.write_page(
@@ -213,13 +213,13 @@ def test_write_page_creates_new(seeded_store: WikiStore) -> None:
         slug="discounts",
         title="Discounts",
         body="Standard discount tiers.\n",
-        provenance=["raw/discount-table.md"],
+        provenance=["sources/discount-table.md"],
         tags=["pricing"],
     )
     assert len(sha) == 40
     page = seeded_store.read("discounts")
     assert page.frontmatter.title == "Discounts"
-    assert page.frontmatter.provenance == ["raw/discount-table.md"]
+    assert page.frontmatter.provenance == ["sources/discount-table.md"]
 
 
 def test_extend_page_replaces_body(seeded_store: WikiStore) -> None:
