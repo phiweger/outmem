@@ -412,3 +412,111 @@ class TestRegistryGc:
         store = WikiStore.init(tmp_path / "w")
         store.sources_path.mkdir(parents=True, exist_ok=True)
         assert audit_registry(store.sources_path).is_clean
+
+
+# ---------------------------------------------------------------------------
+# The tracked / local split
+# ---------------------------------------------------------------------------
+
+
+class TestSourcesLocal:
+    """``wiki/sources-local/`` — readable by the agent, never redistributed.
+
+    The invariant under test throughout: source *bytes* stay on the
+    machine while the pages compiled from them ship normally. Every
+    check here is one of the ways that could silently stop being true.
+    """
+
+    def _doc(self, tmp_path: Path, name: str = "licensed.md") -> Path:
+        src = tmp_path / name
+        src.write_text("Chapter 1. All rights reserved.\n", encoding="utf-8")
+        return src
+
+    def test_local_ingest_lands_outside_the_tracked_tree(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        entry = store.add_source(self._doc(tmp_path), local=True)
+        assert (store.sources_local_path / entry.rel_path).is_file()
+        assert not (store.sources_path / entry.rel_path).exists()
+
+    def test_local_tree_is_created_lazily(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        assert not store.sources_local_path.exists()
+        store.add_source(self._doc(tmp_path), local=True)
+        assert store.sources_local_path.is_dir()
+
+    def test_local_tree_is_gitignored(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        store.add_source(self._doc(tmp_path), local=True)
+        ignored = (store.root / ".gitignore").read_text(encoding="utf-8")
+        assert "wiki/sources-local/" in ignored
+
+    def test_git_never_sees_local_bytes(self, tmp_path: Path) -> None:
+        """The whole point. If this fails the feature is worthless."""
+        import subprocess
+
+        store = WikiStore.init(tmp_path / "w")
+        store.add_source(self._doc(tmp_path), local=True)
+        # Simulate the careless-but-common `git add -A` before a commit.
+        subprocess.run(["git", "add", "-A"], cwd=store.root, check=True, capture_output=True)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=store.root, check=True, capture_output=True, text=True,
+        ).stdout
+        assert "sources-local" not in staged
+
+    def test_local_ingest_produces_no_commit(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("seed", title="Seed", body="body")
+        head_before = store.head()
+        store.add_source(self._doc(tmp_path), local=True)
+        assert store.head() == head_before
+
+    def test_registries_are_separate(self, tmp_path: Path) -> None:
+        """A shared registry would put the local file's name, hash, and
+        the absolute path it was ingested from into a tracked DB —
+        exactly what the split exists to withhold."""
+        store = WikiStore.init(tmp_path / "w")
+        entry = store.add_source(self._doc(tmp_path), local=True)
+        assert (store.sources_local_path / ".sources.db").is_file()
+        tracked_db = store.sources_path / ".sources.db"
+        blob = tracked_db.read_bytes() if tracked_db.is_file() else b""
+        assert entry.rel_path.encode() not in blob
+        assert b"licensed.md" not in blob
+
+    def test_local_source_is_readable(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        entry = store.add_source(self._doc(tmp_path), local=True)
+        assert "All rights reserved" in store.read_source(entry.citation_path)
+        # …and by the bare registry key too, since both spellings circulate.
+        assert "All rights reserved" in store.read_source(entry.rel_path)
+
+    def test_listing_marks_which_tree_a_row_came_from(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        store.add_source(self._doc(tmp_path, "open.md"))
+        store.add_source(self._doc(tmp_path, "closed.md"), local=True)
+        by_local = {e.local: e for e in store.list_sources()}
+        assert set(by_local) == {True, False}
+        assert by_local[True].citation_path.startswith("sources-local/")
+        assert by_local[False].citation_path.startswith("sources/")
+
+    def test_rel_path_stays_the_registry_key(self, tmp_path: Path) -> None:
+        """Prefixing rel_path broke backfill once; pin the invariant so it
+        cannot regress. rel_path is a key, citation_path is presentation."""
+        store = WikiStore.init(tmp_path / "w")
+        entry = store.add_source(self._doc(tmp_path), local=True)
+        assert not entry.rel_path.startswith("sources")
+        assert store.get_source(entry.citation_path) is not None
+
+    def test_local_source_never_enters_the_semantic_index(
+        self, tmp_path: Path
+    ) -> None:
+        """The subtle leak: the vector DB stores chunk text verbatim and
+        is committed, so indexing local material ships it anyway."""
+        from outmem._store.semantic import load_for_index
+
+        store = WikiStore.init(tmp_path / "w")
+        entry = store.add_source(self._doc(tmp_path), local=True)
+        rel = f"wiki/sources-local/{entry.rel_path}"
+        # Even under the most permissive index setting.
+        store.config.outmem.semantic.index = "pages+sources"
+        assert load_for_index(store, rel) is None

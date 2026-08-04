@@ -484,6 +484,26 @@ def cmd_hook_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def _indexed_paths_or_none(store: WikiStore) -> list[str] | None:
+    """Paths currently in the semantic index, or ``None`` if there isn't one.
+
+    ``None`` means "could not check" and makes the corresponding lint
+    check skip, which is the honest answer for a wiki with no index (or
+    one whose index won't open) — distinct from "checked and clean".
+    """
+    from outmem._store import semantic as _semantic
+
+    if not _semantic.available(store):
+        return None
+    try:
+        indexed = _semantic.vector_store_or_open(store).list_indexed_files()
+    except OutmemError:
+        # Missing extra or unreachable embedder. Not a lint failure —
+        # lint must stay useful without the semantic stack installed.
+        return None
+    return [rel_path for rel_path, _hash, _kind in indexed]
+
+
 def cmd_lint(args: argparse.Namespace) -> int:
     from outmem.lint import format_report, lint_wiki
 
@@ -494,6 +514,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         sources_dir=store.sources_path,
         sources_local_dir=store.sources_local_path,
         repo_root=store.root,
+        indexed_paths=_indexed_paths_or_none(store),
     )
     sys.stdout.write(format_report(report))
     if report.has_errors:
@@ -706,12 +727,14 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             into_subdir=args.into,
             rename=args.rename,
             as_key=args.as_key,
+            local=args.local,
             commit=True,
         )
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 1
-    _status(f"registered {entry.rel_path} (sha256: {entry.sha256[:12]}…)")
+    where = "wiki/sources-local (not tracked)" if args.local else "wiki/sources"
+    _status(f"registered {entry.rel_path} in {where} (sha256: {entry.sha256[:12]}…)")
     _report_source_refs(store, entry.rel_path)
 
     if args.register_only:
@@ -1289,6 +1312,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--rename",
         default=None,
         help="Rename the file in wiki/sources/.",
+    )
+    p_ingest.add_argument(
+        "--local",
+        action="store_true",
+        help="Ingest into wiki/sources-local/ instead — an untracked tree "
+        "for material you may read but not redistribute (licensed, "
+        "copyrighted, embargoed). The source bytes never enter git; the "
+        "pages compiled from them are tracked as usual. Note that a "
+        "citing page records the source's filename in its provenance, so "
+        "this protects distribution rights, not secrecy.",
     )
     p_ingest.add_argument(
         "--as",

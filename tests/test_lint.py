@@ -461,3 +461,90 @@ def test_source_referencing_a_live_slug_is_not_flagged(tmp_path: Path) -> None:
         sources_dir=store.sources_path,
     )
     assert [f for f in report.findings if f.kind == "source-references-dead-slug"] == []
+
+
+# ---------------------------------------------------------------------------
+# sources-local containment — the checks that make the split enforceable
+# ---------------------------------------------------------------------------
+
+
+class TestLocalSourceContainment:
+    def _wiki_with_local_source(self, tmp_path: Path) -> WikiStore:
+        store = WikiStore.init(tmp_path / "w")
+        doc = tmp_path / "licensed.md"
+        doc.write_text("All rights reserved.\n", encoding="utf-8")
+        store.add_source(doc, local=True)
+        return store
+
+    def _lint(self, store: WikiStore, **kw: object) -> object:
+        return lint_wiki(
+            store.wiki_path,
+            log_dir=store.log_path,
+            sources_dir=store.sources_path,
+            sources_local_dir=store.sources_local_path,
+            repo_root=store.root,
+            **kw,  # type: ignore[arg-type]
+        )
+
+    def test_properly_ignored_local_tree_is_clean(self, tmp_path: Path) -> None:
+        store = self._wiki_with_local_source(tmp_path)
+        report = self._lint(store)
+        kinds = {f.kind for f in report.findings}  # type: ignore[attr-defined]
+        assert "local-source-tracked" not in kinds
+
+    def test_tracked_local_source_is_an_error(self, tmp_path: Path) -> None:
+        """Someone ran `git add -f`, or the ignore rule was added after
+        the fact. The bytes are in history; say so loudly."""
+        import subprocess
+
+        store = self._wiki_with_local_source(tmp_path)
+        subprocess.run(
+            ["git", "add", "-f", "wiki/sources-local"],
+            cwd=store.root, check=True, capture_output=True,
+        )
+        report = self._lint(store)
+        offenders = [
+            f for f in report.findings  # type: ignore[attr-defined]
+            if f.kind == "local-source-tracked"
+        ]
+        assert offenders and offenders[0].severity == Severity.ERROR
+        assert "git rm --cached" in offenders[0].message
+
+    def test_indexed_local_chunk_is_an_error(self, tmp_path: Path) -> None:
+        """Chunk text lives verbatim in the vector DB and the DB is
+        committed — an indexed local chunk ships the material anyway."""
+        store = self._wiki_with_local_source(tmp_path)
+        report = self._lint(
+            store, indexed_paths=["wiki/pages/a.md", "wiki/sources-local/x/doc.md"]
+        )
+        offenders = [
+            f for f in report.findings  # type: ignore[attr-defined]
+            if f.kind == "local-source-indexed"
+        ]
+        assert offenders and offenders[0].severity == Severity.ERROR
+        assert "reindex --force" in offenders[0].message
+
+    def test_no_index_means_the_check_is_skipped_not_passed(
+        self, tmp_path: Path
+    ) -> None:
+        """`None` is 'could not check'. Reporting clean would be a lie."""
+        store = self._wiki_with_local_source(tmp_path)
+        report = self._lint(store, indexed_paths=None)
+        kinds = {f.kind for f in report.findings}  # type: ignore[attr-defined]
+        assert "local-source-indexed" not in kinds
+
+    def test_provenance_citing_a_local_source_resolves(self, tmp_path: Path) -> None:
+        """A page may cite the local tree; the citation must not read as
+        stale just because the bytes aren't tracked."""
+        store = self._wiki_with_local_source(tmp_path)
+        entry = store.list_sources()[0]
+        store.write_page(
+            "alpha", title="Alpha", body="body", provenance=[entry.citation_path]
+        )
+        store.write_page("ref", title="Ref", body="See [[alpha]].")
+        report = self._lint(store)
+        stale = [
+            f for f in report.findings  # type: ignore[attr-defined]
+            if f.kind == "stale-provenance"
+        ]
+        assert stale == []

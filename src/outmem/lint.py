@@ -105,6 +105,7 @@ def lint_wiki(
     sources_dir: Path | None = None,
     sources_local_dir: Path | None = None,
     repo_root: Path | None = None,
+    indexed_paths: Iterable[str] | None = None,
 ) -> LintReport:
     """Run every static check against ``wiki_dir``.
 
@@ -114,11 +115,13 @@ def lint_wiki(
     stale-provenance checks (if the cited source file is missing, the
     page is flagged); a page may legitimately cite either tree.
 
-    ``repo_root`` enables the containment checks that make the
-    tracked/local split trustworthy rather than merely conventional —
-    see :func:`_check_local_source_containment`. Without it those
-    checks are skipped, so callers that care (the CLI does) must pass
-    it.
+    ``repo_root`` and ``indexed_paths`` enable the containment checks
+    that make the tracked/local split trustworthy rather than merely
+    conventional — see :func:`_check_local_source_containment` and
+    :func:`_check_local_source_not_indexed`. Both are optional so a
+    library caller can run the page-level checks without paying for a
+    git invocation or a vector-store open; the CLI passes them, so the
+    checks run wherever a user would actually look.
     """
     report = LintReport()
 
@@ -154,6 +157,11 @@ def lint_wiki(
     _check_index_drift(wiki_dir, pages_dir, report)
     _check_local_source_containment(
         sources_local_dir=sources_local_dir, repo_root=repo_root, report=report
+    )
+    _check_local_source_not_indexed(
+        indexed_paths=indexed_paths,
+        wiki_dir_name=wiki_dir.name,
+        report=report,
     )
 
     return report
@@ -907,6 +915,49 @@ def _check_local_source_containment(
                 f"them (`git rm --cached -r {rel_dir}`), confirm "
                 f"`{rel_dir}/` is in .gitignore, and rewrite history if "
                 "the commits were pushed."
+            ),
+        )
+    )
+
+
+def _check_local_source_not_indexed(
+    *,
+    indexed_paths: Iterable[str] | None,
+    wiki_dir_name: str,
+    report: LintReport,
+) -> None:
+    """Verify no ``sources-local/`` chunk reached the vector index.
+
+    The index stores each chunk's verbatim text next to its embedding
+    and its DB is committed alongside the pages that triggered the
+    write, so a local chunk in there is the same leak as a tracked
+    file — just through a path that looks like a cache.
+
+    :func:`outmem._store.semantic.load_for_index` refuses these
+    unconditionally, so a hit means the index predates that rule (or was
+    built by other means). Checking rather than trusting is the point:
+    the guarantee is only worth stating if something verifies it.
+    """
+    if indexed_paths is None:
+        return
+    prefix = f"{wiki_dir_name}/{SOURCES_LOCAL_DIR}/"
+    offenders = sorted(p for p in indexed_paths if p.startswith(prefix))
+    if not offenders:
+        return
+    shown = ", ".join(offenders[:3])
+    if len(offenders) > 3:
+        shown += f", … ({len(offenders)} total)"
+    report.findings.append(
+        LintFinding(
+            kind="local-source-indexed",
+            severity=Severity.ERROR,
+            path=prefix.rstrip("/"),
+            message=(
+                f"the semantic index contains {len(offenders)} chunk(s) from "
+                f"{prefix} ({shown}). Chunk text is stored verbatim in the "
+                "vector DB, and that DB is committed — so this material "
+                "ships even though the source files do not. Run `outmem "
+                "reindex --force` to rebuild without them."
             ),
         )
     )

@@ -121,11 +121,27 @@ class IngestionRecord:
 class SourceEntry:
     """One row in the registry — a single registered source file."""
 
-    rel_path: str  # relative to wiki/sources/, e.g. "veterinary/<sha>/drugs.md"
+    rel_path: str  # relative to the OWNING TREE, e.g. "veterinary/<sha>/drugs.md"
+    """Registry key — always relative to the tree that holds it.
+
+    Deliberately *not* prefixed with ``sources/`` / ``sources-local/``:
+    it is the primary key of the row, and every internal consumer
+    (``source_refs``, ``backfill``, ``gc``, supersession edges) keys on
+    it. The tree-qualified form belongs to presentation and is built on
+    demand via :attr:`citation_path`.
+    """
     sha256: str
     registered_at: datetime
     size_bytes: int
     ingestions: list[IngestionRecord] = field(default_factory=list)
+    local: bool = False
+    """Whether this row lives in the untracked ``sources-local/`` tree.
+
+    Derived from which registry the row was read out of, not stored in
+    the DB — each registry is wholly inside one tree, so the column
+    would be a constant per file and a lie waiting to happen if a tree
+    were ever moved.
+    """
     document_key: str | None = None
     """Which *document* this file is a version of.
 
@@ -152,6 +168,18 @@ class SourceEntry:
     ``.../<drug>/output/<hash>/document.md`` puts the distinguishing part
     here and nowhere else.
     """
+
+    @property
+    def citation_path(self) -> str:
+        """Tree-qualified path, as a page's ``provenance:`` should cite it.
+
+        ``sources/<rel>`` or ``sources-local/<rel>``. Use this whenever
+        the string leaves the registry — display, citations, tool output
+        — and :attr:`rel_path` whenever it is used as a key. Collapsing
+        the two is how a lookup starts failing on exactly the rows that
+        live in the other tree.
+        """
+        return f"{SOURCES_LOCAL_DIR if self.local else SOURCES_DIR}/{self.rel_path}"
 
 
 class DocumentKeyConflict(OutmemError):

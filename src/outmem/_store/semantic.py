@@ -19,7 +19,7 @@ from outmem.config import (
 from outmem.exceptions import FrontmatterError, OutmemError
 from outmem.index import RESERVED_WIKI_FILES, editorial_pages, load_page_text
 from outmem.slug import PAGES_DIR, slug_to_relpath
-from outmem.sources import REGISTRY_FILENAME, SOURCES_DIR
+from outmem.sources import REGISTRY_FILENAME, SOURCES_DIR, SOURCES_LOCAL_DIR
 
 if TYPE_CHECKING:
     from outmem.semantic import Match, ReindexResult, VectorStore
@@ -292,10 +292,27 @@ def load_for_index(
     wiki_prefix = f"{store.config.wiki_dir}/"
     pages_prefix = store.pages_prefix()
     sources_prefix = f"{wiki_prefix}{SOURCES_DIR}/"
+    sources_local_prefix = f"{wiki_prefix}{SOURCES_LOCAL_DIR}/"
 
     if any(rel_path == f"{wiki_prefix}{name}" for name in RESERVED_WIKI_FILES):
         return None
     if rel_path == f"{sources_prefix}{REGISTRY_FILENAME}":
+        return None
+    if rel_path.startswith(sources_local_prefix):
+        # NEVER indexed, under any `semantic.index` setting. The vector
+        # DB stores each chunk's *verbatim text* alongside its embedding
+        # and is staged into the same commit as the write that triggered
+        # it — so indexing the local tree would push the exact bytes the
+        # tree exists to withhold straight into git, via a path nobody
+        # would think to audit.
+        #
+        # Deliberately unconditional rather than "skip when the DB is
+        # tracked". A safety property has to be checkable in one
+        # sentence; making it depend on the current .gitignore means a
+        # user can silently turn it off by editing an unrelated file.
+        # The cost is that `find_similar` cannot see local material —
+        # documented in docs/configuration.md, and the derived pages
+        # (which is what recall actually wants) are indexed as normal.
         return None
 
     abs_path = store.root / rel_path
@@ -372,11 +389,15 @@ def indexable_files_on_disk(store: WikiStore) -> list[str]:
     """Every repo-relative path that would normally be indexed.
 
     Honours ``semantic.index`` (``"pages"`` default, or ``"pages+sources"``).
-    Scoping to ``pages`` keeps raw ingested material out of the vector
+    Scoping to ``pages`` keeps ingested material out of the vector
     store: sources are near-duplicates of the pages distilled from them,
     and because the vector search takes a fixed-``k`` KNN before anything
     can filter by kind, they crowd curated pages out of the candidate
     window.
+
+    ``wiki/sources-local/`` is excluded unconditionally — see
+    :func:`load_for_index` for why. ``"pages+sources"`` means the
+    *tracked* sources tree only.
 
     Restricting here makes ``reindex_all``'s orphan sweep prune
     already-indexed source chunks on the next run rather than stranding

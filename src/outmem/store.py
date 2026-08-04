@@ -268,6 +268,10 @@ class WikiStore:
         # Lazily-opened resources holding sqlite connections.
         self._vector_store: VectorStore | None = None
         self._source_registry: SourceRegistry | None = None
+        # Separate handle: each source tree carries its own registry, so
+        # the tracked one never records a local source's filename, hash,
+        # or origin path.
+        self._source_registry_local: SourceRegistry | None = None
         self._alias_map: dict[str, str] | None = None
         # Guards lazy VectorStore open — the optimize tool queries
         # concurrently across a thread pool, so the check-then-open must be
@@ -1060,13 +1064,31 @@ class WikiStore:
         into_subdir: str | None = None,
         rename: str | None = None,
         as_key: str | None = None,
+        local: bool = False,
         commit: bool = True,
     ) -> SourceEntry:
-        """Copy a source file into ``wiki/sources/`` and register it.
+        """Copy a source file into a source tree and register it.
 
         Content-addressed: the file lands at
         ``wiki/sources/[<into>/]<sha[:12]>/<filename>``. Re-adding the
         same content is a no-op.
+
+        ``local=True`` targets ``wiki/sources-local/`` instead — the
+        untracked tree for material you may read but not redistribute
+        (licensed corpora, copyrighted text, embargoed drafts). The
+        source bytes stay on this machine; the pages compiled from them
+        are ordinary tracked wiki pages, because the derived knowledge
+        is yours to ship even when the source is not. Nothing is
+        committed for a local ingest — both the file and its registry
+        live inside the gitignored tree.
+
+        Note the asymmetry this creates: a page citing a local source
+        records ``sources-local/<sha>/<filename>`` in its ``provenance:``,
+        and that page *is* tracked. The filename travels even though the
+        bytes do not. That is the intended trade (a citation is not a
+        redistribution) but it means the tree is about distribution
+        rights, not secrecy — do not use it for material whose *name*
+        must stay private.
 
         ``as_key`` declares *which document* this file is a version of. A
         revision therefore supersedes its predecessor instead of landing
@@ -1083,6 +1105,7 @@ class WikiStore:
             into_subdir=into_subdir,
             rename=rename,
             as_key=as_key,
+            local=local,
             commit=commit,
         )
 
@@ -1635,6 +1658,9 @@ class WikiStore:
         if self._source_registry is not None:
             self._source_registry.close()
             self._source_registry = None
+        if self._source_registry_local is not None:
+            self._source_registry_local.close()
+            self._source_registry_local = None
 
 
 def _format_log_filename(d: date) -> str:
