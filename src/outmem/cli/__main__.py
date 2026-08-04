@@ -372,11 +372,20 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
         print(f"outmem: {exc}", file=sys.stderr)
         return 0  # do not block the commit
 
-    wiki_prefix = f"{store.config.wiki_dir}/"
-    index_rel = f"{wiki_prefix}{INDEX_FILENAME}"
+    index_rel = f"{store.config.wiki_dir}/{INDEX_FILENAME}"
 
     def _is_staged_page(rel: str) -> bool:
-        return rel.startswith(wiki_prefix) and rel.endswith(".md") and rel != index_rel
+        """A staged *editorial page* — not a source, not the index.
+
+        Deliberately ``is_page_path`` rather than "under wiki/ and ends
+        in .md": ingested sources are markdown under ``wiki/`` too, and
+        the two operations below must not touch them. Repairing a
+        source's frontmatter rewrites bytes whose sha256 is its own
+        directory name and is recorded in the registry — it would break
+        content addressing, fail lint's provenance-sha check, and
+        silently invalidate the immutability that supersession assumes.
+        """
+        return store.is_page_path(rel) and rel.endswith(".md")
 
     # --- frontmatter repair ----------------------------------------------
     # An externally edited / pasted page can carry frontmatter YAML can't

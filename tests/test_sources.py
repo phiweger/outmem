@@ -625,3 +625,39 @@ class TestSourcesLocal:
         store.close()
         assert main(["sources", "list", "--root", str(store.root)]) == 1
         assert "no sources registered" in capsys.readouterr().out
+
+    def test_source_refs_reach_the_local_registry(self, tmp_path: Path) -> None:
+        """Asking the tracked registry about a local source returns [],
+        which reads as 'this source names no pages' when the truth is
+        'wrong registry'. Both spellings must resolve."""
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("abx:penicillin", title="P", body="body")
+        doc = tmp_path / "hb.md"
+        doc.write_text("See [[abx:penicillin]] for dosing.\n", encoding="utf-8")
+        entry = store.add_source(doc, local=True)
+
+        assert [r.page_slug for r in store.source_refs(entry.rel_path)] == [
+            "abx:penicillin"
+        ]
+        assert store.source_refs(entry.citation_path)
+        assert len(store.source_refs()) == 1  # the no-arg form spans trees
+
+    def test_rename_repoints_refs_in_the_local_registry(
+        self, tmp_path: Path
+    ) -> None:
+        """A local source's refs go stale on rename for the same reason a
+        tracked one's do — and the local tree is the one whose drift
+        nobody can spot in a diff."""
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page("abx:penicillin", title="P", body="body")
+        doc = tmp_path / "hb.md"
+        doc.write_text("See [[abx:penicillin]] for dosing.\n", encoding="utf-8")
+        entry = store.add_source(doc, local=True)
+
+        store.rename_page("abx:penicillin", "abx:penicillin-g")
+
+        refs = store.source_refs(entry.rel_path)
+        assert [r.page_slug for r in refs] == ["abx:penicillin-g"]
+        # The frozen bytes still say the old name; that's the whole point
+        # of recording the mapping rather than rewriting the source.
+        assert [r.token for r in refs] == ["abx:penicillin"]

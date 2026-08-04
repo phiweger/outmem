@@ -770,6 +770,43 @@ class TestCliReindexStaged:
       3. Asserting the vector DB was mutated and is in the staged tree.
     """
 
+    def test_staged_never_rewrites_an_ingested_source(
+        self, wiki_with_pages: WikiStore, tmp_path: Path
+    ) -> None:
+        """Frontmatter repair must not touch sources.
+
+        A source's path embeds its own sha256[:12] and the registry
+        records the full hash. Rewriting the bytes breaks content
+        addressing, fails lint's provenance-sha check, and silently
+        invalidates the immutability that supersession assumes — so the
+        staged-page predicate keys on `wiki/pages/`, not on "markdown
+        under wiki/". Sources routinely carry upstream frontmatter, and
+        that frontmatter is routinely the kind repair would rewrite.
+        """
+        import hashlib
+
+        doc = tmp_path / "fachinfo.md"
+        doc.write_text(
+            "---\ntitle: Influenza (Teil 1): saisonale\ndrive_path: /x/y.pdf\n"
+            "---\n\nSource body.\n",
+            encoding="utf-8",
+        )
+        # commit=False so the file is genuinely staged-but-uncommitted,
+        # which is the only state the hook sees.
+        entry = wiki_with_pages.add_source(doc, commit=False)
+        on_disk = wiki_with_pages.sources_path / entry.rel_path
+        before = on_disk.read_bytes()
+
+        subprocess.run(
+            ["git", "add", "-A"], cwd=wiki_with_pages.root, check=True
+        )
+        rc, _, _err = _run_cli(["reindex", "--staged"], store=wiki_with_pages)
+        assert rc == 0
+
+        assert on_disk.read_bytes() == before
+        # The file still hashes to the directory it lives in.
+        assert hashlib.sha256(before).hexdigest() == entry.sha256
+
     def test_staged_repairs_broken_frontmatter(
         self, wiki_with_pages: WikiStore
     ) -> None:

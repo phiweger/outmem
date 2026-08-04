@@ -865,8 +865,18 @@ class WikiStore:
         # ingest can be, and that is the point of recording it. Do this
         # even when rewrite_links is off: the caller declined to touch
         # *page* text, not to corrupt the registry.
-        if _sources.get_registry(self).repoint_refs(old_slug, new_slug):
-            touched.append(f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}")
+        #
+        # BOTH registries. A local source's refs go stale on rename for
+        # exactly the same reason a tracked one's do, and the local tree
+        # is the one whose drift nobody can spot in a diff. Only the
+        # tracked registry is staged — the local one lives inside the
+        # gitignored tree, so there is nothing for git to record.
+        for tree in _sources.existing_trees(self):
+            repointed = _sources.get_registry(self, tree).repoint_refs(
+                old_slug, new_slug
+            )
+            if repointed and tree.tracked:
+                touched.append(tree.repo_registry_relpath)
 
         self._alias_map = None  # the page moved; any cached map is stale
         self._regenerate_index()
@@ -900,8 +910,21 @@ class WikiStore:
         names, rather than which sources a page was compacted from.
         Recorded at ingest because that is the only moment the tokens are
         known correct, and re-pointed by :meth:`rename_page`.
+
+        Spans both source trees. With ``rel_path`` given, the tree that
+        actually holds it is consulted — asking the tracked registry
+        about a local source returns an empty list, which reads as "this
+        source names no pages" when the truth is "wrong registry".
         """
-        return _sources.get_registry(self).refs(rel_path)
+        if rel_path is None:
+            return [
+                ref
+                for tree in _sources.existing_trees(self)
+                for ref in _sources.get_registry(self, tree).refs(None)
+            ]
+        found = _sources.resolve_source(self, rel_path)
+        tree, key = found if found is not None else (_sources.tracked_tree(self), rel_path)
+        return _sources.get_registry(self, tree).refs(key)
 
     def _rewrite_links_to(self, old_slug: str, new_slug: str) -> list[str]:
         """Point every ``[[old_slug]]`` at ``new_slug``. Returns paths touched.
@@ -1210,10 +1233,19 @@ class WikiStore:
         return sorted(out, key=lambda c: (c.slug, c.cited)), failures
 
     def propose_document_keys(self) -> tuple[list[KeyCandidate], list[PageLoadFailure]]:
-        """Candidate ``document_key`` groupings for rows that predate identity."""
+        """Candidate ``document_key`` groupings for rows that predate identity.
+
+        Tracked tree only, and the citations are filtered to match:
+        feeding cross-tree citations to a single-tree registry would key
+        candidates on rows that registry has never heard of. The local
+        tree needs no backfill by construction — it postdates document
+        identity, so every row in it was registered with ``--as``
+        available. Should that ever stop being true, this becomes a loop
+        over ``existing_trees`` like :meth:`stale_pages`.
+        """
         from outmem.sources import propose_document_keys
 
-        citations, failures = self.source_citations()
+        citations, failures = self.source_citations(local=False)
         return propose_document_keys(_sources.get_registry(self), citations), failures
 
     def assign_document_keys(self, pairs: Sequence[tuple[str, str]]) -> int:
