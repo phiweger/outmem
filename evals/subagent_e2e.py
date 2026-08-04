@@ -75,7 +75,7 @@ def _seed_wiki(root: Path):
             "Acme has a custom pricing arrangement: cost-plus 28%, "
             "lower than the standard 35% we use for other clients.\n"
         ),
-        provenance=["raw/acme-msa.md"],
+        provenance=["sources/acme-msa.md"],
         tags=["pricing", "acme"],
     )
     return store

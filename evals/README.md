@@ -135,7 +135,7 @@ is cleaned up automatically. ~$0.10-0.20 per run on sonnet-4-6.
 | `pricing-lookup` | `pricing-cost-plus` | CONVERGENCE: Tier-1 search → read → cite. |
 | `pricing-history` | `temporal-evolution` | EXPANSION: agent reaches for `topic_evolution`. |
 | `no-match-falls-back-to-log` | `no-match-query` | No relevant material → `append_log`, no fabrication. |
-| `raw-contradicts-wiki` | `raw-contradicts-wiki` | wiki/raw disagreement surfaced, not averaged. |
+| `source-contradicts-page` | `source-contradicts-page` | page/source disagreement surfaced, not averaged. |
 | `duplicate-trap` | `duplicate-trap` *(semantic)* | `find_similar` catches a paraphrased duplicate. |
 | `approval-fallback` | `approval-fallback` *(approval)* | HITL denial → log fallback satisfies writeback. |
 | `stale-wikilink` | `stale-wikilink` | Dangling `[[discounts]]` link flagged, not invented. |
@@ -150,7 +150,7 @@ per-case feature flags (`semantic`, `approval`), and runs `ask_sync`.
 
 1. Build a fixture directory under `evals/fixtures/wikis/<name>/`
    with at minimum a `config.yaml` (or copy the baseline). Drop in
-   the `wiki/`, `raw/`, `log/`, `wiki/sources/` material your case
+   the `wiki/pages/`, `wiki/sources/`, `log/` material your case
    needs. Optionally add a `SEED.md` with `## author|email|subject`
    stanzas + path lists to script the commit history.
 

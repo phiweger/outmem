@@ -2,7 +2,7 @@
 title: Acme MSA
 slug: acme-msa
 provenance:
-  - raw/acme-msa.md
+  - sources/acme-msa.md
 created: 2026-01-20T09:00:00+00:00
 updated: 2026-01-20T09:00:00+00:00
 tags: [pricing, contracts]

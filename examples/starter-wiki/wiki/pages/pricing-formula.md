@@ -2,7 +2,7 @@
 title: Pricing formula
 slug: pricing-formula
 provenance:
-  - path: raw/pricing-deck-2026-Q1.md
+  - path: sources/pricing-deck-2026-Q1.md
     drive_path: /shared/Sales/2026-Q1-pricing-deck.pdf
     sha256: 9e2c1f00aa
 created: 2026-01-15T10:30:00Z

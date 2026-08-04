@@ -2,7 +2,7 @@
 title: Acme MSA
 slug: acme-msa
 provenance:
-  - path: raw/acme-msa-text.md
+  - path: sources/acme-msa-text.md
     drive_path: /shared/Legal/Acme/2025-11-MSA.pdf
     sha256: 4d1e8a7b
 created: 2025-11-22T14:30:00Z
