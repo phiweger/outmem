@@ -194,9 +194,15 @@ match. `outmem lint` reports surviving alias-resolved links as
 ## Source registry maintenance
 
 ```bash
+outmem sources list          # every registered source, tree-qualified
 outmem sources gc            # dry run — report only
 outmem sources gc --apply    # write + commit
 ```
+
+`sources list` prefixes each row with the tree that holds it —
+`sources/…` ships with the wiki, `sources-local/…` does not (see
+[sources.md](sources.md)) — and reports how many are local-only. Rows
+whose file has gone missing are excluded; `gc` is what finds those.
 
 Reconciles `wiki/sources/.sources.db` against what is on disk, in both
 directions. Nothing did this before, which is how a registry drifts to

@@ -650,6 +650,37 @@ def cmd_sources_backfill(args: argparse.Namespace) -> int:
     return dropped
 
 
+def cmd_sources_list(args: argparse.Namespace) -> int:
+    """Print every registered source, tree-qualified.
+
+    The tree prefix is the point of the listing, not decoration: it is
+    how a curator sees at a glance which material ships with the wiki
+    and which stays local. Rows whose file is gone are excluded (use
+    ``outmem sources gc`` to find those).
+    """
+    store = _open_store(args)
+    entries = store.list_sources()
+    if not entries:
+        print("(no sources registered)")
+        return 1
+    for entry in entries:
+        ingestions = (
+            f"  {len(entry.ingestions)} ingestion(s)" if entry.ingestions else ""
+        )
+        superseded = "  SUPERSEDED" if entry.superseded_by else ""
+        print(
+            f"{entry.citation_path}  sha:{entry.sha256[:12]}…  "
+            f"{entry.size_bytes}B{ingestions}{superseded}"
+        )
+    local = sum(1 for e in entries if e.local)
+    if local:
+        _status(
+            f"{len(entries)} source(s); {local} local-only "
+            "(readable here, never redistributed)"
+        )
+    return 0
+
+
 def cmd_sources_gc(args: argparse.Namespace) -> int:
     store = _open_store(args)
     audit = store.sources_gc(dry_run=not args.apply)
@@ -1159,6 +1190,14 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[root_parent],
     )
     sources_sub = p_sources.add_subparsers(dest="sources_command", required=True)
+    p_sources_list = sources_sub.add_parser(
+        "list",
+        help="List registered sources, tree-qualified (sources/ vs "
+        "sources-local/).",
+        parents=[root_parent],
+    )
+    p_sources_list.set_defaults(func=cmd_sources_list)
+
     p_sources_gc = sources_sub.add_parser(
         "gc",
         help="Reconcile .sources.db with disk; drop rows whose file is gone.",

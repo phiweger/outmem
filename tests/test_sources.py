@@ -597,3 +597,31 @@ class TestSourcesLocal:
         assert list(local.values()) == [["b"]]
         both, _ = store.source_citations()
         assert sorted(s for v in both.values() for s in v) == ["a", "b"]
+
+    def test_cli_sources_list_marks_the_local_tree(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The tree prefix is the point of the listing: it's how a curator
+        sees which material ships and which stays here."""
+        from outmem.cli.__main__ import main
+
+        store = WikiStore.init(tmp_path / "w")
+        store.add_source(self._doc(tmp_path, "open.md"))
+        store.add_source(self._doc(tmp_path, "closed.md"), local=True)
+        store.close()
+
+        assert main(["sources", "list", "--root", str(store.root)]) == 0
+        out = capsys.readouterr().out
+        assert "sources/" in out
+        assert "sources-local/" in out
+        assert "1 local-only" in out
+
+    def test_cli_sources_list_empty_is_exit_1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        store = WikiStore.init(tmp_path / "w")
+        store.close()
+        assert main(["sources", "list", "--root", str(store.root)]) == 1
+        assert "no sources registered" in capsys.readouterr().out

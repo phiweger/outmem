@@ -29,13 +29,14 @@ human-driven workflow.
    list_sources()
    ```
 
-   Returns one `relative/path  sha:<short>  <size>B  N ingestion(s)` row
-   per registered source, with the prompts each prior ingestion ran
-   under. A row with `0 ingestion(s)` is the obvious candidate; a row
+   Returns one `path  sha:<short>  <size>B  N ingestion(s)` row per
+   registered source, with the prompts each prior ingestion ran under.
+   Paths are tree-qualified: `sources/…` ships with the wiki,
+   `sources-local/…` does not. A row with `0 ingestion(s)` is the obvious candidate; a row
    with prior ingestions tells you what's already been extracted (and
    under what focus directive) so you don't duplicate work.
 
-   Equivalent CLI: `outmem sources`.
+   Equivalent CLI: `outmem sources list`.
 
 2. **Read the source you're ingesting.**
 
