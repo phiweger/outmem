@@ -130,22 +130,32 @@ def test_list_pages(seeded_store: WikiStore) -> None:
     assert out.split("\n") == ["acme-msa", "pricing-formula"]
 
 
-def test_read_page_peek_previews_long_body(seeded_store: WikiStore) -> None:
-    seeded_store.write_page("long-page", title="Long", body=("x" * 3000) + "\n")
+def test_read_page_peek_outlines_a_sectioned_page(seeded_store: WikiStore) -> None:
+    """A peek is a map, not a prefix: it must name every section however
+    long the page, including ones far past any character budget."""
+    seeded_store.write_page(
+        "long-page",
+        title="Long",
+        body=("## First\n" + "x" * 3000 + "\n\n## Buried\ndeep content\n"),
+    )
     out = _by_name(wiki_tools(seeded_store), "read_page")(slug="long-page", peek=True)
     assert out.startswith("# Long")
-    assert "peek: first 1000 of 3001 chars" in out
-    assert out.count("x") == 1000  # only the first ~1000 chars of the body
+    assert "First" in out
+    assert "Buried" in out          # 3000 chars past a prefix window
+    assert "x" * 100 not in out     # the body itself is not in the map
 
 
-def test_read_page_peek_short_body_has_no_marker(seeded_store: WikiStore) -> None:
+def test_read_page_peek_on_a_headingless_page_returns_it(
+    seeded_store: WikiStore,
+) -> None:
+    """An empty outline would be useless. A short unsectioned page is
+    handed over rather than making the caller ask a second time — which
+    is the round-trip this whole change is about."""
     out = _by_name(wiki_tools(seeded_store), "read_page")(
         slug="pricing-formula", peek=True
     )
-    assert out.startswith("# Pricing formula")
+    assert "no sections" in out
     assert "cost-plus 35%" in out
-    assert "peek:" not in out  # short page fits → no truncation note
-    assert "title:" not in out  # a peek is body-only, no frontmatter
 
 
 @pytest.fixture
@@ -455,3 +465,188 @@ def test_skill_text_unknown_raises(tmp_path: Path) -> None:
     (skills / "notes").mkdir(parents=True)
     with pytest.raises(UnknownSkillError, match="Unknown skill"):
         skill_text("missing", skills_dir=skills)
+
+
+# ---------------------------------------------------------------------------
+# grep_wiki context — issue: a one-line fact should not cost a read_page
+# ---------------------------------------------------------------------------
+
+
+class TestGrepWikiContext:
+    @pytest.fixture
+    def ctx_store(self, tmp_path: Path) -> WikiStore:
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page(
+            "ifsg",
+            title="IfSG",
+            body=(
+                "## Labormeldepflicht\n"
+                "namentlich zu melden ist der direkte NACHWEIS\n"
+                "unverzueglich, spaetestens 24 Stunden\n"
+                "\n"
+                "## Fristen\n"
+                "unrelated\n"
+            ),
+        )
+        return store
+
+    def _grep(self, store: WikiStore):
+        return _by_name(wiki_tools(store), "grep_wiki")
+
+    def test_context_returns_surrounding_lines(self, ctx_store: WikiStore) -> None:
+        out = self._grep(ctx_store)(pattern="NACHWEIS", context=2)
+        assert "Labormeldepflicht" in out          # the line before
+        assert "24 Stunden" in out                 # the line after
+
+    def test_match_and_context_rows_are_distinguishable(
+        self, ctx_store: WikiStore
+    ) -> None:
+        """ripgrep's convention: ':' for matches, '-' for context."""
+        out = self._grep(ctx_store)(pattern="NACHWEIS", context=1)
+        match_rows = [ln for ln in out.splitlines() if "NACHWEIS" in ln]
+        context_rows = [
+            ln for ln in out.splitlines() if ln and "NACHWEIS" not in ln
+        ]
+        assert all(":" in ln.split("ifsg", 1)[1][:1] for ln in match_rows)
+        assert all(ln.startswith("ifsg-") for ln in context_rows)
+
+    def test_context_rows_keep_the_slug_leading_token(
+        self, ctx_store: WikiStore
+    ) -> None:
+        """A slug read off a context row must still work with read_page —
+        otherwise the caller has to reconstruct it."""
+        out = self._grep(ctx_store)(pattern="NACHWEIS", context=2)
+        for line in out.splitlines():
+            if not line:
+                continue
+            assert line.split(":")[0].split("-")[0] == "ifsg"
+        read = _by_name(wiki_tools(ctx_store), "read_page")
+        assert "IfSG" in read(slug="ifsg")
+
+    def test_context_zero_is_unchanged(self, ctx_store: WikiStore) -> None:
+        """The acceptance criterion: existing callers see byte-identical
+        output. In particular, no blank-line grouping appears."""
+        grep = self._grep(ctx_store)
+        ctx_store.write_page("other", title="Other", body="another NACHWEIS here\n")
+        out = grep(pattern="NACHWEIS")
+        assert "" not in out.splitlines()  # no group separators
+        assert out == grep(pattern="NACHWEIS", context=0)
+
+    def test_groups_are_blank_line_separated(self, ctx_store: WikiStore) -> None:
+        ctx_store.write_page("other", title="Other", body="another NACHWEIS here\n")
+        out = self._grep(ctx_store)(pattern="NACHWEIS", context=1)
+        assert "" in out.splitlines()
+
+    def test_context_is_clamped_not_rejected(self, ctx_store: WikiStore) -> None:
+        """An out-of-range value is a slip, not a question worth a turn."""
+        grep = self._grep(ctx_store)
+        assert grep(pattern="NACHWEIS", context=999) == grep(
+            pattern="NACHWEIS", context=10
+        )
+        assert grep(pattern="NACHWEIS", context=-5) == grep(
+            pattern="NACHWEIS", context=0
+        )
+
+    def test_truncation_still_fires_with_context(self, tmp_path: Path) -> None:
+        """A wide pattern plus context is exactly when the caller needs
+        to be told to narrow it."""
+        store = WikiStore.init(tmp_path / "wide")
+        for i in range(60):
+            store.write_page(
+                f"p{i}", title=f"P{i}", body=("filler NACHWEIS line\n" * 40)
+            )
+        out = _by_name(wiki_tools(store), "grep_wiki")(
+            pattern="NACHWEIS", context=5
+        )
+        assert "(truncated — narrow the pattern)" in out
+
+
+# ---------------------------------------------------------------------------
+# read_page peek/section — issue: triage should not cost a full read
+# ---------------------------------------------------------------------------
+
+
+class TestReadPageOutline:
+    @pytest.fixture
+    def ifsg(self, tmp_path: Path) -> WikiStore:
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page(
+            "meldewesen:ifsg",
+            title="Meldepflicht nach IfSG",
+            tags=["ifsg"],
+            body=(
+                "Vorbemerkung.\n\n"
+                "## Arztmeldepflicht\n" + "arzt\n" * 8 + "\n"
+                "## Labormeldepflicht\n"
+                "lead-in\n\n"
+                "### Abs. 1 namentlich\n" + "UNIQUEMARKER hier\n" + "n\n" * 6 + "\n"
+                "### Abs. 3 nichtnamentlich\n" + "x\n" * 6 + "\n"
+                "## Fristen\n" + "f\n" * 5
+            ),
+        )
+        return store
+
+    def _read(self, store: WikiStore):
+        return _by_name(wiki_tools(store), "read_page")
+
+    def test_outline_names_every_section_with_span_and_size(
+        self, ifsg: WikiStore
+    ) -> None:
+        out = self._read(ifsg)(slug="meldewesen:ifsg", peek=True)
+        for heading in (
+            "Arztmeldepflicht",
+            "Labormeldepflicht",
+            "Abs. 1 namentlich",
+            "Abs. 3 nichtnamentlich",
+            "Fristen",
+        ):
+            assert heading in out
+        assert "L" in out and "-" in out          # line spans
+        assert "B" in out or "kB" in out          # sizes
+
+    def test_outline_line_numbers_agree_with_grep_wiki(self, ifsg: WikiStore) -> None:
+        """The map is only actionable if it describes the same coordinate
+        space the other retrieval tool reports in."""
+        tools = wiki_tools(ifsg)
+        grep_out = _by_name(tools, "grep_wiki")(pattern="UNIQUEMARKER")
+        grep_line = int(grep_out.split(":")[2])
+
+        peek = self._read(ifsg)(slug="meldewesen:ifsg", peek=True)
+        row = next(ln for ln in peek.splitlines() if "Abs. 1 namentlich" in ln)
+        span = row.split("L")[-1].split()[0]
+        start, end = (int(n) for n in span.split("-"))
+        assert start <= grep_line <= end
+
+    def test_section_returns_only_that_section(self, ifsg: WikiStore) -> None:
+        out = self._read(ifsg)(slug="meldewesen:ifsg", section="Abs. 1 namentlich")
+        assert "UNIQUEMARKER" in out
+        assert "arzt" not in out          # sibling section absent
+        assert "nichtnamentlich" not in out
+
+    def test_section_match_is_forgiving(self, ifsg: WikiStore) -> None:
+        """A rejection over casing or a stray space costs a round-trip."""
+        read = self._read(ifsg)
+        for query in ("abs. 1 namentlich", "  Abs. 1   namentlich ", "Abs. 1"):
+            assert "UNIQUEMARKER" in read(slug="meldewesen:ifsg", section=query), query
+
+    def test_ambiguous_section_reports_candidates(self, ifsg: WikiStore) -> None:
+        """Picking one would look like an answer; the caller could not
+        tell it was a coin flip."""
+        out = self._read(ifsg)(slug="meldewesen:ifsg", section="meldepflicht")
+        assert "matches 2 sections" in out
+        assert "Arztmeldepflicht" in out
+        assert "Labormeldepflicht" in out
+
+    def test_unknown_section_lists_what_exists(self, ifsg: WikiStore) -> None:
+        out = self._read(ifsg)(slug="meldewesen:ifsg", section="Nonexistent")
+        assert "no section matching" in out
+        assert "Fristen" in out
+
+    def test_full_read_is_unchanged(self, ifsg: WikiStore) -> None:
+        """Neither new mode may alter the default: still the whole file,
+        frontmatter included."""
+        out = self._read(ifsg)(slug="meldewesen:ifsg")
+        assert out.startswith("---")
+        assert "title: Meldepflicht nach IfSG" in out
+        assert "UNIQUEMARKER" in out
+        assert "Fristen" in out

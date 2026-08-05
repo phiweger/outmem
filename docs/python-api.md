@@ -431,7 +431,7 @@ A short tool plan a competent agent will follow with this palette:
 search_index()                            # orient on an unfamiliar wiki
 └─ search_index(prefix="abx")             # drill into a namespace
    └─ search_wiki(question="…")           # then ask the question
-      └─ read_page(slug, peek=True)       # cheap triage of a candidate
+      └─ read_page(slug, peek=True)       # outline: which part to read
          └─ read_page(slug)               # full read on the winner
             └─ write_page / extend_page / append_log  # close the loop
 ```
@@ -443,7 +443,7 @@ built (fifteen):
 |------|---------------|---------|
 | `search_wiki(question, k)` | 1 | Strategy-driven page search → ranked `[[slug]]` citations |
 | `grep_wiki(pattern, scope, case_insensitive)` | 1 | Ripgrep over wiki / raw / log / all |
-| `read_page(slug, peek)` | 1 | Full file (frontmatter + body); `peek=True` → title + first ~1000 chars |
+| `read_page(slug, peek, section)` | 1 | Full file (frontmatter + body); `peek=True` → section outline; `section=` → one section |
 | `list_pages()` | 0 | Every slug, one per line (flat) |
 | `search_index(prefix)` | 0 | Browse the slug namespaces (the TOC) one level at a time |
 | `find_backlinks(slug)` | 1 | Pages linking *to* slug |

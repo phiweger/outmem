@@ -651,6 +651,7 @@ class WikiStore:
         scope: str = "wiki",
         case_insensitive: bool = False,
         fixed_strings: bool = False,
+        context: int = 0,
         max_bytes: int = DEFAULT_RESULT_BYTES,
         max_hits: int | None = None,
     ) -> SearchResult:
@@ -661,6 +662,10 @@ class WikiStore:
         ``scope="wiki"``; Tier 2 falls through to ``"sources"``, which
         spans both the tracked ``wiki/sources/`` tree and the untracked
         ``wiki/sources-local/`` one.
+
+        ``context`` requests N lines either side of each match (``rg
+        -C``). Those rows arrive as :class:`SearchHit` with
+        ``is_match=False``.
         """
         path, paths = self._resolve_scope(scope)
         return search(
@@ -669,6 +674,7 @@ class WikiStore:
             paths=paths,
             case_insensitive=case_insensitive,
             fixed_strings=fixed_strings,
+            context=context,
             max_bytes=max_bytes,
             max_hits=max_hits,
         )

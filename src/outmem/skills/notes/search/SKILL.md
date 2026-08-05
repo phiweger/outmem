@@ -24,7 +24,7 @@ The full search/navigation/read surface — reach for the right one:
 | `grep_wiki(pattern, scope)` | The *exact line* a literal/regex string sits on, or to search the source documents / the gap `log` (`scope="sources"` / `"log"`). |
 | `search_index(prefix)` | **Browse the structure.** Walk the slug namespaces (the table of contents) one level at a time to orient on an unfamiliar wiki. |
 | `list_pages()` | A flat dump of *every* slug — a cheap existence check. |
-| `read_page(slug, peek)` | Open a page; `peek=True` returns just the title + first ~1000 chars for a cheap skim before a full read. |
+| `read_page(slug, peek, section)` | Open a page. `peek=True` returns its **outline** (every heading, line span, size); `section="<heading>"` returns one section. |
 | `find_backlinks(slug)` | What links *to* a page (the reverse `[[wikilink]]` graph). |
 | `find_similar(text, …)` | Paraphrase / semantic matches — only when a semantic index is built (see "Optional semantic tier" below). |
 
@@ -66,18 +66,26 @@ human-driven workflow.
 
    Equivalent CLI: `outmem search "<pattern>" --scope wiki|sources|log`.
 
-3. **Read the candidate page** (skim first if you're unsure):
+3. **Read the candidate page.**
 
    ```python
-   read_page(slug="pricing-formula", peek=True)   # title + first ~1000 chars
-   read_page(slug="pricing-formula")               # the full file
+   read_page(slug="pricing-formula")                          # the full file
+   read_page(slug="meldewesen:ifsg", peek=True)               # what's in it?
+   read_page(slug="meldewesen:ifsg", section="§7 Abs. 1")     # just that part
    ```
 
    The full read returns the whole file (frontmatter + body); its
    frontmatter `provenance` field tells you which source files the page
-   was compiled from. Use `peek=True` to triage a candidate cheaply —
-   confirm it's the right page before committing the whole body to
-   context.
+   was compiled from.
+
+   `peek=True` returns the page's **outline** — every heading with its
+   line span and size — not a preview of the text. Reach for it when a
+   page is large and you need to know *which part* to spend context on;
+   then `section=` reads only that part. If you already know the page is
+   right and it isn't huge, just read it: a peek followed by a full read
+   of the same page is two round-trips for one answer. `search_wiki` has
+   usually already told you the page is on topic, since it returns an
+   excerpt.
 
    Equivalent CLI: `outmem read "<slug>"`.
 

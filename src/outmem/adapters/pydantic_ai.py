@@ -43,9 +43,10 @@ from outmem.store import WikiStore
 # don't pretend a tight signature we can't enforce across nine arities.
 WikiTool = Callable[..., Any]
 
-# How many characters of the body ``read_page(peek=True)`` returns — enough
-# to judge a candidate's relevance without pulling a whole page into context.
-PEEK_CHARS = 1000
+# Ceiling on ``grep_wiki(context=…)``. The exact number matters less than
+# having one: unbounded context turns a single grep into a page dump and
+# re-creates the round-trip cost the parameter exists to remove.
+MAX_GREP_CONTEXT = 10
 
 # Logger every tool call writes a one-line trace to. Disabled by default
 # (Python's logging emits nothing without a handler); the CLI's
@@ -95,18 +96,124 @@ def _hit_leading(path: str, scope: str) -> str:
     return path[: -len(".md")].replace("/", ":")
 
 
-def _format_hits(result: Any, scope: str) -> str:
-    """Format a :class:`~outmem.search.SearchResult` as ``key:line:text``
-    rows — the ``grep_wiki`` output shape."""
+def _format_hits(result: Any, scope: str, context: int = 0) -> str:
+    """Format a :class:`~outmem.search.SearchResult` for ``grep_wiki``.
+
+    Matches are ``key:line:text``; context rows are ``key-line-text``.
+    That is ripgrep's own convention, and it matters here for a reason
+    beyond familiarity: the leading token stays identical either way, so
+    a slug read off a *context* row can still be handed to ``read_page``.
+
+    With ``context > 0``, non-adjacent runs are separated by a blank
+    line so a reader can see where one neighbourhood ends and the next
+    begins. Without it there are no neighbourhoods — every row is its
+    own match — and the separators would only pad the output, so
+    ``context=0`` renders exactly as it did before the parameter
+    existed.
+    """
     if not result.hits:
         return "(no matches)"
-    lines = [
-        f"{_hit_leading(hit.path, scope)}:{hit.line_number}:{hit.text}"
-        for hit in result.hits
-    ]
+    lines: list[str] = []
+    previous: Any = None
+    for hit in result.hits:
+        if context > 0 and previous is not None and (
+            hit.path != previous.path or hit.line_number != previous.line_number + 1
+        ):
+            lines.append("")
+        separator = ":" if hit.is_match else "-"
+        leading = _hit_leading(hit.path, scope)
+        lines.append(f"{leading}{separator}{hit.line_number}{separator}{hit.text}")
+        previous = hit
     if result.truncated:
         lines.append("(truncated — narrow the pattern)")
     return "\n".join(lines)
+
+
+def _human_size(chars: int) -> str:
+    """Approximate size, for a reader deciding what to spend context on."""
+    return f"{chars / 1000:.1f} kB" if chars >= 1000 else f"{chars} B"
+
+
+def _render_outline(page: Any, slug: str, line_offset: int) -> str:
+    """The ``peek=True`` view: what the page contains and where.
+
+    Deliberately not a prefix of the text. A prefix answers "is this
+    page on topic", which the caller has usually established already;
+    what it needs next is which part to read, and a first-1000-chars
+    window cannot say anything about a fact in the fourth section.
+    """
+    from outmem.outline import parse_outline, preamble_chars
+
+    body = page.body
+    sections = parse_outline(body, line_offset=line_offset)
+    updated = getattr(page.frontmatter, "updated", None)
+    header = f"# {page.title}          {slug} · {_human_size(len(body))}"
+    if updated is not None:
+        header += f" · updated {updated.date().isoformat()}"
+    tags = getattr(page.frontmatter, "tags", None)
+    if tags:
+        header += f"\n  tags: {', '.join(tags)}"
+
+    if not sections:
+        # No headings: the outline would be empty and useless, so hand
+        # back the page rather than making the caller ask twice for
+        # something this small.
+        return f"{header}\n\n(no sections — full body follows)\n\n{body}"
+
+    width = max(len(f"{'  ' * (s.level - 1)}{s.heading}") for s in sections)
+    width = max(width, len("(preamble)"))
+    rows = []
+    preamble = preamble_chars(body)
+    if preamble:
+        span = f"L{line_offset + 1}-{sections[0].start_line - 1}"
+        rows.append(
+            f"  {'(preamble)'.ljust(width)}  {span:>12}  {_human_size(preamble)}"
+        )
+    for section in sections:
+        label = f"{'  ' * (section.level - 1)}{section.heading}"
+        span = f"L{section.start_line}-{section.end_line}"
+        rows.append(
+            f"  {label.ljust(width)}  {span:>12}  {_human_size(section.char_count)}"
+        )
+    return (
+        f"{header}\n\n"
+        + "\n".join(rows)
+        + f"\n\nRead one with read_page(slug={slug!r}, section='<heading>'), "
+        "or the whole page without peek."
+    )
+
+
+def _render_section(page: Any, slug: str, query: str, line_offset: int) -> str:
+    """The ``section=`` view: one section's lines, addressed by heading."""
+    from outmem.outline import find_section, parse_outline
+
+    sections = parse_outline(page.body, line_offset=line_offset)
+    if not sections:
+        return (
+            f"(page {slug!r} has no headings to address — "
+            f"call read_page(slug={slug!r}) for the whole page)"
+        )
+    matches = find_section(sections, query)
+    if not matches:
+        available = ", ".join(repr(s.heading) for s in sections)
+        return f"(no section matching {query!r} in {slug!r}. Available: {available})"
+    if len(matches) > 1:
+        # Report rather than guess: picking one would look like an answer
+        # and the caller has no way to tell it was a coin flip.
+        names = ", ".join(repr(s.heading) for s in matches)
+        return (
+            f"({query!r} matches {len(matches)} sections in {slug!r}: {names}. "
+            "Pass a more specific heading.)"
+        )
+    found = matches[0]
+    lines = page.body.splitlines()
+    start = found.start_line - line_offset - 1
+    end = found.end_line - line_offset
+    return (
+        f"# {page.title} · {slug} · {found.heading} "
+        f"(L{found.start_line}-{found.end_line})\n\n"
+        + "\n".join(lines[start:end])
+    )
 
 
 def _read_tools(store: WikiStore) -> list[WikiTool]:
@@ -122,6 +229,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         pattern: str,
         scope: str = "wiki",
         case_insensitive: bool = False,
+        context: int = 0,
     ) -> str:
         """Literal/regex **ripgrep** over the wiki, the sources, or the log.
 
@@ -142,31 +250,73 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         For "which pages answer this question?" use ``search_wiki`` instead
         — it ranks whole pages by relevance; this only finds literal matches.
 
+        **Use ``context`` when you intend to quote.** A matched line is
+        often half a sentence — a threshold, a deadline, a cross-reference
+        continues into the next line. ``context=2`` returns that
+        neighbourhood in the same call. Reaching for ``read_page``
+        afterwards to see what a line you already found continues into
+        costs a whole extra round-trip for text this could have handed
+        you outright.
+
+        Context rows are shown ``slug-line-text`` (dash) against
+        ``slug:line:text`` (colon) for matches, and separate
+        neighbourhoods are split by a blank line. The leading slug is the
+        same on both, so you can still feed it to ``read_page``.
+
         Example:
             grep_wiki(pattern="cost-plus 35%", scope="wiki")
+            grep_wiki(pattern="§ 7 Abs. 1", context=2)      # quote-ready
             grep_wiki(pattern="penicillin", scope="sources")
 
         Args:
             pattern: Regex pattern, or a literal string.
             scope: One of ``"wiki"``, ``"sources"``, ``"log"``, ``"all"``. Default ``"wiki"``.
             case_insensitive: ``True`` to ignore case (``rg -i``).
+            context: Lines of surrounding context per match, 0-10
+                (default 0). Costs output budget, so prefer 2-3 over 10 —
+                a wide pattern with generous context truncates.
         """
-        _log_call("grep_wiki", pattern=pattern, scope=scope, case_insensitive=case_insensitive)
+        _log_call(
+            "grep_wiki",
+            pattern=pattern,
+            scope=scope,
+            case_insensitive=case_insensitive,
+            context=context,
+        )
+        # Clamp rather than reject: an out-of-range value is a slip, not a
+        # question worth spending a turn on, and an unbounded context turns
+        # one call into a page dump — re-creating the cost it removes.
+        context = max(0, min(int(context), MAX_GREP_CONTEXT))
         try:
-            result = store.search(pattern, scope=scope, case_insensitive=case_insensitive)
+            result = store.search(
+                pattern,
+                scope=scope,
+                case_insensitive=case_insensitive,
+                context=context,
+            )
         except OutmemError as exc:
             _log_error("grep_wiki", exc)
             return f"(search failed: {exc})"
-        return _format_hits(result, scope)
+        return _format_hits(result, scope, context)
 
-    def read_page(slug: str, peek: bool = False) -> str:
-        """Read a single wiki page by slug. Returns the full file
-        (frontmatter + body) as a string.
+    def read_page(slug: str, peek: bool = False, section: str = "") -> str:
+        """Read a wiki page — whole, outlined, or one section.
 
-        Set ``peek=True`` to get just the title and the first ~1000
-        characters of the body — a cheap way to triage whether a
-        candidate page is worth reading in full before spending the
-        context on it.
+        Three modes, cheapest first:
+
+        - ``peek=True`` returns the page's **outline**: title, size, and
+          every heading with its line range and size. Use it to find
+          *where* in a page your answer lives when the page is large.
+        - ``section="<heading>"`` returns just that section. Take the
+          heading from a peek, or pass one you already expect.
+        - Neither returns the full file (frontmatter + body).
+
+        If you already know the page is right and it is not huge, read
+        it directly — a peek followed by a full read of the same page
+        costs an extra round-trip and tells you nothing the read did
+        not. Peek pays off when you are choosing *which part* to spend
+        context on, not whether the page is on topic; ``search_wiki``
+        has usually settled that already by returning an excerpt.
 
         Use this after ``search_wiki`` has surfaced a candidate slug,
         ``search_index`` has led you to one, or when you already know
@@ -180,13 +330,17 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
 
         Example:
             read_page(slug="pricing-formula")
-            read_page(slug="abx:penicillin", peek=True)   # quick skim
+            read_page(slug="meldewesen:ifsg", peek=True)             # what's in it?
+            read_page(slug="meldewesen:ifsg", section="§7 Abs. 1")   # just that part
 
         Args:
             slug: A slug from ``list_pages``, ``search_index`` or ``search_wiki``.
-            peek: If true, return only the title + first ~1000 chars (a preview).
+            peek: If true, return the section outline instead of the page.
+            section: Heading to return. Matched case-insensitively, exact
+                first then substring; an ambiguous or unknown value comes
+                back with the candidates listed rather than a guess.
         """
-        _log_call("read_page", slug=slug, peek=peek)
+        _log_call("read_page", slug=slug, peek=peek, section=section)
         try:
             page = store.read(slug)
         except SlugError as exc:
@@ -204,16 +358,16 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 f"(no such wiki page: {slug!r} — try `list_pages` to see "
                 "what exists, or `grep_wiki` with scope='sources' for source material)"
             )
+        raw = page.path.read_text(encoding="utf-8")
+        # Frontmatter is stripped from `page.body`, so outline line
+        # numbers need its height added back to match what `grep_wiki`
+        # reports for the same page.
+        offset = len(raw.splitlines()) - len(page.body.splitlines())
+        if section:
+            return _render_section(page, slug, section, offset)
         if peek:
-            body = page.body
-            clipped = body[:PEEK_CHARS]
-            if len(body) > PEEK_CHARS:
-                clipped += (
-                    f"\n\n… (peek: first {PEEK_CHARS} of {len(body)} chars — "
-                    f"call read_page(slug={slug!r}) without peek for the full page)"
-                )
-            return f"# {page.title}\n\n{clipped}"
-        return page.path.read_text(encoding="utf-8")
+            return _render_outline(page, slug, offset)
+        return raw
 
     def list_pages() -> str:
         """Return every wiki page slug, one per line, alphabetically.

@@ -13,7 +13,7 @@ strategy fits in.
 | **`grep_wiki`** | a *pattern* (regex/literal) + `scope` | `key:line:text` rows, one per match | the *exact line* a string is on; searching the source documents or the `log/` |
 | **`search_index`** | a namespace *prefix* (optional) | child namespaces (with page counts) + leaf pages at that level | browsing the wiki's structure (the TOC) to orient before searching |
 | **`list_pages`** | — | every slug, one per line | a flat existence check |
-| **`read_page`** | a `slug` (+ `peek`) | the full page, or — with `peek=True` — the title + first ~1000 chars | reading a hit in full, or skimming it cheaply first |
+| **`read_page`** | a `slug` (+ `peek` / `section`) | the full page; with `peek=True` its section outline; with `section=` one section | reading a hit in full, or finding which part of a large page to read |
 | **`find_backlinks`** | a `slug` | slugs that link to it | "what references / depends on this page?" |
 | **`find_similar`** | free *text* | cosine-similar chunks (needs a built index) | paraphrase / near-duplicate matches grep would miss |
 
@@ -41,9 +41,12 @@ search_wiki(question) ──▶ [[slug]] ──▶ read_page(slug) ──▶ tra
 
 2. **`read_page(slug)`** — the full page text. This is the step that
    matters: reasoning should happen over the whole page, not an excerpt.
-   Unsure a hit is the right one? `read_page(slug, peek=True)` returns
-   just the title + first ~1000 chars to triage it before you spend the
-   context on a full read.
+   Large page and you only need part of it? `read_page(slug, peek=True)`
+   returns the page's **outline** — every heading with its line span and
+   size — and `read_page(slug, section="<heading>")` then reads just that
+   part. Skip both when the page is small or you already know it's right:
+   a peek followed by a full read of the same page is two model
+   round-trips for one answer.
 
 3. **Traverse** — `find_backlinks(slug)` (who links here), `[[slug]]`
    wikilinks in the body, `page_history(slug)`, `topic_evolution(slugs…)`.

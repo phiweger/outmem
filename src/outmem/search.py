@@ -29,11 +29,20 @@ DEFAULT_RESULT_BYTES = 8 * 1024  # 8 KiB token-cap soft ceiling.
 
 @dataclass(frozen=True)
 class SearchHit:
-    """A single ripgrep match — one file, one line."""
+    """A single ripgrep row — one file, one line.
+
+    With ``context=0`` (the default) every row is a match. Above that,
+    ``rg`` also returns the surrounding lines and they arrive here with
+    ``is_match=False`` — same shape, different role. Renderers keep the
+    two distinguishable (ripgrep spells them ``path:line:text`` and
+    ``path-line-text``); a caller that ignores the flag gets a plain
+    line list, which is why it defaults to the match case.
+    """
 
     path: str  # relative to the search root
     line_number: int
     text: str
+    is_match: bool = True
 
 
 @dataclass(frozen=True)
@@ -61,6 +70,7 @@ def search(
     paths: Sequence[str | Path] | None = None,
     case_insensitive: bool = False,
     fixed_strings: bool = False,
+    context: int = 0,
     max_bytes: int = DEFAULT_RESULT_BYTES,
     max_hits: int | None = None,
     extra_args: Sequence[str] = (),
@@ -82,9 +92,17 @@ def search(
             to the whole root.
         case_insensitive: ``rg -i``.
         fixed_strings: ``rg -F`` — treat the pattern as a literal string.
+        context: Lines of surrounding context per match (``rg -C``).
+            ``0`` returns matches only. Context rows come back as
+            :class:`SearchHit` with ``is_match=False``, interleaved in
+            file/line order. They count against ``max_bytes`` like any
+            other output, so a wide pattern with generous context
+            truncates sooner — which is the intended signal.
         max_bytes: Soft ceiling on the bytes of ``rg`` output we consume.
             Exceeding it sets ``SearchResult.truncated``.
         max_hits: Optional hard cap on the number of returned hits.
+            Counts matches only; context rows ride along with the match
+            they belong to rather than consuming the budget themselves.
         extra_args: Additional ``rg`` flags appended verbatim. Use with
             care — anything that changes the JSON shape will break parsing.
 
@@ -115,6 +133,8 @@ def search(
         args.append("-i")
     if fixed_strings:
         args.append("-F")
+    if context > 0:
+        args.extend(["-C", str(context)])
     args.extend(extra_args)
     args.append("--")
     args.append(pattern)
@@ -148,6 +168,7 @@ def search(
         root=root,
         max_bytes=max_bytes,
         max_hits=max_hits,
+        context=context,
     )
 
 
@@ -182,19 +203,50 @@ def _resolve_search_paths(
     return resolved
 
 
+def _trim_dangling_context(hits: list[SearchHit], context: int) -> None:
+    """Drop trailing context rows that belong to an excluded match.
+
+    When ``max_hits`` cuts the result short, rg has usually already
+    emitted the *leading* context for the next match. Those rows are
+    real file content, but they orbit a match the caller will never see
+    — so a renderer that groups by contiguity shows a group with nothing
+    matched in it.
+
+    The rule is exact rather than heuristic: keep trailing rows within
+    ``context`` lines of the last match, drop the rest. Contiguity alone
+    can't decide it, because with a large enough ``context`` the two
+    matches' windows touch and the run is unbroken. Mutates in place.
+    """
+    last_match = next((h for h in reversed(hits) if h.is_match), None)
+    if last_match is None:
+        return
+    while hits and not hits[-1].is_match:
+        if hits[-1].line_number <= last_match.line_number + context:
+            break
+        hits.pop()
+
+
 def _parse_rg_json(
     stdout: str,
     *,
     root: Path,
     max_bytes: int,
     max_hits: int | None,
+    context: int = 0,
 ) -> SearchResult:
     """Parse ``rg --json`` output into a :class:`SearchResult`.
 
-    rg emits one JSON object per line. We only care about ``type:"match"``
-    events; ``begin``, ``end``, ``summary``, and ``context`` are ignored.
+    rg emits one JSON object per line. We keep ``type:"match"`` and —
+    when the caller asked for context — ``type:"context"``, which has an
+    identical payload shape and differs only in role. ``begin``, ``end``
+    and ``summary`` are ignored.
+
+    ``max_hits`` counts matches only. Dropping a match's context rows
+    from the budget would make the cap mean something different at each
+    context width, and the caller asked for N *results*, not N lines.
     """
     hits: list[SearchHit] = []
+    matches = 0
     consumed = 0
     truncated = False
 
@@ -212,8 +264,17 @@ def _parse_rg_json(
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") != "match":
+        event_type = event.get("type")
+        if event_type not in ("match", "context"):
             continue
+        # Budget spent, but rg's trailing context for the last match is
+        # still arriving. Take it, then stop at the next match — a match
+        # shown without the context that was explicitly asked for is the
+        # half-answer this parameter exists to avoid.
+        if max_hits is not None and matches >= max_hits and event_type == "match":
+            truncated = truncated or consumed < len(stdout)
+            _trim_dangling_context(hits, context)
+            break
 
         data = event.get("data", {})
         path_obj = data.get("path", {})
@@ -232,10 +293,20 @@ def _parse_rg_json(
         line_number = data.get("line_number")
         if not isinstance(line_number, int):
             continue
-        hits.append(SearchHit(path=rel, line_number=line_number, text=text.rstrip("\n")))
-
-        if max_hits is not None and len(hits) >= max_hits:
-            truncated = truncated or consumed < len(stdout)
-            break
+        is_match = event_type == "match"
+        hits.append(
+            SearchHit(
+                path=rel,
+                line_number=line_number,
+                text=text.rstrip("\n"),
+                is_match=is_match,
+            )
+        )
+        if is_match:
+            matches += 1
+        # No break here: the cap is enforced at the top of the loop, on
+        # the *next* match, so trailing context lands first. With
+        # context=0 that is the same thing — the next event after a
+        # match is the next match.
 
     return SearchResult(hits=tuple(hits), truncated=truncated)
