@@ -3,6 +3,56 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.11.0
+
+**Two retrieval calls that couldn't finish the job they started.** Both
+issues came from the consuming side ([phiweger/fleming][fleming]) with
+session traces, and both had the same shape: the tool returned in
+13–31 ms, then cost a ~3 s model round-trip to ask the obvious
+follow-up. The unit that moves the wall clock is the call, not the file
+read.
+
+### Added
+
+- **`grep_wiki(context=N)`** — `rg -C`, clamped 0–10. For the questions
+  grep is best at (a threshold, a deadline, a paragraph reference) the
+  answer is the matched line plus one or two either side; without it the
+  caller opens the whole page to see what its own hit continues into.
+  Matches render `slug:line:text`, context `slug-line-text` — ripgrep's
+  own convention — and separate neighbourhoods are split by a blank
+  line. The leading slug is identical on both, so a slug read off a
+  *context* row still feeds `read_page`. **`context=0` output is
+  byte-identical to 0.10.0.**
+- **`read_page(section="<heading>")`** — read one section instead of the
+  page.
+- **`outmem.outline`** — `parse_outline`, `preamble_chars`,
+  `find_section`. ATX headings, fenced code excluded, nesting-aware
+  spans. Useful independently of the tool layer.
+- **`SearchHit.is_match`** — distinguishes match rows from context rows.
+
+### Changed
+
+- **`read_page(peek=True)` returns the page's outline, not its first
+  1000 characters.** In the reported session three peeks were each
+  followed immediately by a full read of the same slug: the peek never
+  avoided a read, it only preceded one. That is the most a prefix can
+  do — it answers "is this page on topic", which `search_wiki` already
+  answered by returning an excerpt. The outline answers the question the
+  caller actually has next: *where* in this page is the fact, and is it
+  worth the context. It names every section however long the page,
+  where a prefix is blind to anything in the fourth one.
+
+  Line numbers are file-relative, so they agree with what `grep_wiki`
+  prints for the same page. A page with no headings is returned whole
+  rather than as an empty map — asking twice for something that small is
+  the round-trip this is meant to remove.
+
+  Callers that relied on the prefix should drop `peek` and read the page.
+- `search(max_hits=…)` counts matches rather than rows, and a match's
+  trailing context is no longer truncated away by the cap.
+
+[fleming]: https://github.com/phiweger/fleming
+
 ## 0.10.0
 
 **The source tree splits in two.** A wiki can now be compiled from
