@@ -16,7 +16,7 @@ from outmem import (
     FrontmatterError,
     GitOperationError,
     ConflictError,
-    SearchHit,          # a single ripgrep hit (path, line_number, text)
+    SearchHit,          # one ripgrep row (path, line_number, text, is_match)
     # The LLM relevance gate the rerank retrieval strategy uses:
     RelevantPage,       # one kept page (slug)
     judge_relevance,    # gate over (slug, excerpt) candidates → kept slugs
@@ -65,8 +65,12 @@ store.list_slugs()                 # ["acme-msa", "pricing-formula"]
 result = store.search("cost-plus", scope="wiki")
 # scope: "wiki" | "sources" | "log" | "all"
 # "sources" spans wiki/sources/ AND wiki/sources-local/ — see docs/sources.md
-result.hits         # tuple[SearchHit, ...]; each SearchHit has .path, .line_number, .text
+result.hits         # tuple[SearchHit, ...]: .path, .line_number, .text, .is_match
 result.truncated    # True if the byte-cap clipped output
+
+# context=N returns N lines either side of each match (rg -C). Those rows
+# come back with .is_match False, interleaved in file/line order.
+result = store.search("cost-plus", scope="wiki", context=2)
 
 for hit in result.hits:
     print(f"{hit.path}:{hit.line_number}: {hit.text}")
@@ -442,7 +446,7 @@ built (fifteen):
 | Tool | Required args | Purpose |
 |------|---------------|---------|
 | `search_wiki(question, k)` | 1 | Strategy-driven page search → ranked `[[slug]]` citations |
-| `grep_wiki(pattern, scope, case_insensitive)` | 1 | Ripgrep over wiki / raw / log / all |
+| `grep_wiki(pattern, scope, case_insensitive, context)` | 1 | Ripgrep over wiki / sources / log / all; `context=N` adds N lines either side |
 | `read_page(slug, peek, section)` | 1 | Full file (frontmatter + body); `peek=True` → section outline; `section=` → one section |
 | `list_pages()` | 0 | Every slug, one per line (flat) |
 | `search_index(prefix)` | 0 | Browse the slug namespaces (the TOC) one level at a time |

@@ -48,6 +48,10 @@ WikiTool = Callable[..., Any]
 # re-creates the round-trip cost the parameter exists to remove.
 MAX_GREP_CONTEXT = 10
 
+# Column width for heading labels in ``read_page(peek=True)``. Caps what
+# a single long heading can cost every other row in the outline.
+OUTLINE_LABEL_WIDTH = 48
+
 # Logger every tool call writes a one-line trace to. Disabled by default
 # (Python's logging emits nothing without a handler); the CLI's
 # ``outmem ask`` attaches a stderr handler so users can see what the
@@ -160,7 +164,14 @@ def _render_outline(page: Any, slug: str, line_offset: int) -> str:
         # something this small.
         return f"{header}\n\n(no sections — full body follows)\n\n{body}"
 
-    width = max(len(f"{'  ' * (s.level - 1)}{s.heading}") for s in sections)
+    labels = [f"{'  ' * (s.level - 1)}{s.heading}" for s in sections]
+    # Cap the column instead of letting the longest heading set it. One
+    # 90-character heading would otherwise pad every other row to 90 —
+    # spending, across the whole outline, exactly the context this view
+    # exists to save. Over-long labels are elided, not dropped: the
+    # prefix is still enough to pass back to ``section=``, which matches
+    # on substrings.
+    width = min(max(len(label) for label in labels), OUTLINE_LABEL_WIDTH)
     width = max(width, len("(preamble)"))
     rows = []
     preamble = preamble_chars(body)
@@ -169,8 +180,9 @@ def _render_outline(page: Any, slug: str, line_offset: int) -> str:
         rows.append(
             f"  {'(preamble)'.ljust(width)}  {span:>12}  {_human_size(preamble)}"
         )
-    for section in sections:
-        label = f"{'  ' * (section.level - 1)}{section.heading}"
+    for section, label in zip(sections, labels, strict=True):
+        if len(label) > width:
+            label = label[: width - 1] + "…"
         span = f"L{section.start_line}-{section.end_line}"
         rows.append(
             f"  {label.ljust(width)}  {span:>12}  {_human_size(section.char_count)}"
@@ -308,7 +320,9 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
           every heading with its line range and size. Use it to find
           *where* in a page your answer lives when the page is large.
         - ``section="<heading>"`` returns just that section. Take the
-          heading from a peek, or pass one you already expect.
+          heading from a peek, or pass one you already expect. It wins
+          if you also pass ``peek`` — naming a section is the more
+          specific request.
         - Neither returns the full file (frontmatter + body).
 
         If you already know the page is right and it is not huge, read
@@ -363,7 +377,9 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         # numbers need its height added back to match what `grep_wiki`
         # reports for the same page.
         offset = len(raw.splitlines()) - len(page.body.splitlines())
-        if section:
+        # A whitespace-only value is "not specified", not "match every
+        # section" — which is what an empty normalised query would do.
+        if section.strip():
             return _render_section(page, slug, section, offset)
         if peek:
             return _render_outline(page, slug, offset)

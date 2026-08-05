@@ -10,7 +10,7 @@ strategy fits in.
 | tool | input | returns | use it for |
 | --- | --- | --- | --- |
 | **`search_wiki`** | a natural-language *question* | wiki pages ranked by relevance, as `[[slug]]` citations + excerpt | "which pages answer this?" — the primary recall move |
-| **`grep_wiki`** | a *pattern* (regex/literal) + `scope` | `key:line:text` rows, one per match | the *exact line* a string is on; searching the source documents or the `log/` |
+| **`grep_wiki`** | a *pattern* (regex/literal) + `scope` (+ `context`) | `key:line:text` rows, one per match; `context=N` adds N lines either side | the *exact line* a string is on, or that line **plus its neighbourhood** when you mean to quote it |
 | **`search_index`** | a namespace *prefix* (optional) | child namespaces (with page counts) + leaf pages at that level | browsing the wiki's structure (the TOC) to orient before searching |
 | **`list_pages`** | — | every slug, one per line | a flat existence check |
 | **`read_page`** | a `slug` (+ `peek` / `section`) | the full page; with `peek=True` its section outline; with `section=` one section | reading a hit in full, or finding which part of a large page to read |
@@ -79,9 +79,17 @@ When you need the *exact line* a string appears on, or to search material
 
 ```
 grep_wiki(pattern="cost-plus 35%", scope="wiki")   # exact line in a page
+grep_wiki(pattern="§ 7 Abs. 1", context=2)          # …and 2 lines either side
 grep_wiki(pattern="penicillin", scope="sources")    # source docs, both trees
 grep_wiki(pattern="...", scope="log")               # the gap log
 ```
+
+`context=N` (0–10) is what makes a grep quote-ready. Matches render
+`slug:line:text`, context rows `slug-line-text` (ripgrep's convention),
+and separate neighbourhoods are split by a blank line. The leading slug
+is the same on both, so a slug read off a context row still feeds
+`read_page`. Context counts against the 8 KiB cap, so a wide pattern
+with generous context truncates sooner.
 
 | scope  | searches                | row shape                     |
 | ------ | ----------------------- | ----------------------------- |
@@ -123,7 +131,7 @@ before `write_page`.) Needs `outmem[semantic]` + `outmem reindex`.
 ## CLI quick reference
 
 ```bash
-outmem search "penicillin" --scope wiki        # ripgrep (grep_wiki's CLI); -i, -F, --max-hits N
+outmem search "penicillin" --scope wiki        # ripgrep (grep_wiki's CLI); -i, -F, -C N, --max-hits N
 outmem read abx:penicillin                      # full page by slug
 outmem similar "beta-lactam alternative"        # semantic (needs [semantic] + reindex)
 outmem similar --slug abx:penicillin            # use a page's body as the query

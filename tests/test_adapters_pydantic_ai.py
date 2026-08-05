@@ -642,6 +642,41 @@ class TestReadPageOutline:
         assert "no section matching" in out
         assert "Fristen" in out
 
+    def test_one_long_heading_does_not_pad_every_row(
+        self, tmp_path: Path
+    ) -> None:
+        """The outline exists to save context; letting the longest
+        heading set the column spends it back across every other row."""
+        store = WikiStore.init(tmp_path / "wide")
+        store.write_page(
+            "p",
+            title="P",
+            body="## Short\na\n## " + "L" * 120 + "\nb\n## Another\nc\n",
+        )
+        out = _by_name(wiki_tools(store), "read_page")(slug="p", peek=True)
+        assert max(len(line) for line in out.splitlines()) < 100
+
+    def test_an_elided_heading_is_still_addressable(self, tmp_path: Path) -> None:
+        """Truncation must not strand a section: section= matches on
+        substrings, so the surviving prefix has to be enough."""
+        store = WikiStore.init(tmp_path / "wide")
+        store.write_page(
+            "p", title="P", body="## " + "L" * 120 + "\nBURIED\n"
+        )
+        read = _by_name(wiki_tools(store), "read_page")
+        peek = read(slug="p", peek=True)
+        prefix = next(
+            ln for ln in peek.splitlines() if "LLLL" in ln
+        ).strip().split("  ")[0].rstrip("…")
+        assert "BURIED" in read(slug="p", section=prefix)
+
+    def test_section_wins_over_peek(self, ifsg: WikiStore) -> None:
+        """Naming a section is the more specific request."""
+        out = self._read(ifsg)(
+            slug="meldewesen:ifsg", peek=True, section="Abs. 1 namentlich"
+        )
+        assert "UNIQUEMARKER" in out
+
     def test_full_read_is_unchanged(self, ifsg: WikiStore) -> None:
         """Neither new mode may alter the default: still the whole file,
         frontmatter included."""

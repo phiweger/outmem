@@ -23,6 +23,8 @@ read.
   line. The leading slug is identical on both, so a slug read off a
   *context* row still feeds `read_page`. **`context=0` output is
   byte-identical to 0.10.0.**
+- **`outmem search -C N`** — the same context on the CLI, which the docs
+  already described as `grep_wiki`'s equivalent.
 - **`read_page(section="<heading>")`** — read one section instead of the
   page.
 - **`outmem.outline`** — `parse_outline`, `preamble_chars`,
@@ -50,6 +52,12 @@ read.
   Callers that relied on the prefix should drop `peek` and read the page.
 - `search(max_hits=…)` counts matches rather than rows, and a match's
   trailing context is no longer truncated away by the cap.
+
+### Removed
+
+- `outmem.adapters.pydantic_ai.PEEK_CHARS`. It was the prefix length,
+  and there is no longer a prefix. Nothing in outmem imported it; a
+  consumer that did wanted the old peek, which is now a full read.
 
 [fleming]: https://github.com/phiweger/fleming
 

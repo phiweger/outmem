@@ -21,7 +21,7 @@ The full search/navigation/read surface — reach for the right one:
 | Tool | Reach for it when |
 |------|-------------------|
 | `search_wiki(question, k)` | **Primary recall.** Question-shaped lookup — ranks whole pages by relevance using the wiki's configured strategy (default `rerank(bm25)`). |
-| `grep_wiki(pattern, scope)` | The *exact line* a literal/regex string sits on, or to search the source documents / the gap `log` (`scope="sources"` / `"log"`). |
+| `grep_wiki(pattern, scope, context)` | The *exact line* a literal/regex string sits on, or to search the source documents / the gap `log` (`scope="sources"` / `"log"`). `context=N` returns N lines either side. |
 | `search_index(prefix)` | **Browse the structure.** Walk the slug namespaces (the table of contents) one level at a time to orient on an unfamiliar wiki. |
 | `list_pages()` | A flat dump of *every* slug — a cheap existence check. |
 | `read_page(slug, peek, section)` | Open a page. `peek=True` returns its **outline** (every heading, line span, size); `section="<heading>"` returns one section. |
@@ -55,9 +55,18 @@ human-driven workflow.
 
    ```python
    grep_wiki(pattern="cost-plus 35%", scope="wiki")   # exact line in a page
+   grep_wiki(pattern="§ 7 Abs. 1", context=2)          # …and its neighbourhood
    grep_wiki(pattern="cost-plus", scope="sources")     # source documents, both trees
    grep_wiki(pattern="...", scope="log")               # the gap log
    ```
+
+   **Pass `context` when you intend to quote.** A matched line is often
+   half a sentence — a threshold, a deadline, a cross-reference runs into
+   the next line. `context=2` returns that in the same call; opening the
+   page afterwards to see what your own hit continues into costs a whole
+   extra round-trip. Matches show as `slug:line:text`, context rows as
+   `slug-line-text`, and the slug is the same on both, so you can still
+   feed it to `read_page`.
 
    `scope="sources"` is Tier 2: uncompiled source material — slower to read
    and less authoritative than a wiki page. If you find an answer there,

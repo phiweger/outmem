@@ -110,10 +110,13 @@ def cmd_search(args: argparse.Namespace) -> int:
         scope=args.scope,
         case_insensitive=args.ignore_case,
         fixed_strings=args.fixed_strings,
+        context=args.context,
         max_hits=args.max_hits,
     )
     for hit in result.hits:
-        print(f"{hit.path}:{hit.line_number}:{hit.text}")
+        # ripgrep's convention: ':' separates a match, '-' a context row.
+        sep = ":" if hit.is_match else "-"
+        print(f"{hit.path}{sep}{hit.line_number}{sep}{hit.text}")
     if result.truncated:
         print("(truncated — narrow the pattern or raise --max-hits)", file=sys.stderr)
     return 0 if result.hits else 1
@@ -1094,6 +1097,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument("-i", "--ignore-case", action="store_true")
     p_search.add_argument("-F", "--fixed-strings", action="store_true")
+    p_search.add_argument(
+        "-C",
+        "--context",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Show N lines either side of each match (like `rg -C`). "
+        "Context rows are printed with '-' separators, matches with ':'.",
+    )
     p_search.add_argument("--max-hits", type=int, default=None)
     p_search.set_defaults(func=cmd_search)
 

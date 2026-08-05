@@ -92,6 +92,31 @@ def test_search_returns_matches(
     assert "unique-token-xyz" in out
 
 
+def test_search_context_flag(
+    cli_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`outmem search` is documented as grep_wiki's CLI, so it carries the
+    same -C. Context rows use '-' separators, matches ':' — ripgrep's
+    convention, so the two stay tellable apart in a pipe."""
+    monkeypatch.setattr("sys.stdin", io.StringIO("before\nCTXTOKEN here\nafter\n"))
+    main(["write", "--root", str(cli_root), "ctxpage", "--title", "Ctx"])
+    capsys.readouterr()
+
+    assert main(["search", "--root", str(cli_root), "CTXTOKEN"]) == 0
+    plain = capsys.readouterr().out
+    assert "before" not in plain  # default is unchanged: matches only
+
+    assert main(["search", "--root", str(cli_root), "-C", "1", "CTXTOKEN"]) == 0
+    out = capsys.readouterr().out
+    assert "before" in out and "after" in out
+    match_row = next(ln for ln in out.splitlines() if "CTXTOKEN" in ln)
+    context_row = next(ln for ln in out.splitlines() if "before" in ln)
+    assert ":" in match_row.replace("ctxpage.md", "")
+    assert context_row.startswith("ctxpage.md-")
+
+
 def test_search_no_match_returns_1(
     cli_root: Path,
     capsys: pytest.CaptureFixture[str],
