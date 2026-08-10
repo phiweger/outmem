@@ -1296,3 +1296,105 @@ class TestReindexReconciliation:
         assert not any(
             rel == f[0] for f in vector_store_or_open(store).list_indexed_files()
         )
+
+
+# ---------------------------------------------------------------------------
+# semantic.embed_headings — section context in the vector
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedHeadings:
+    """A chunk carries its page title but, without this, nothing about the
+    section it came from — the chunker splits on blank lines, so a
+    `## Heading` is just another paragraph and every chunk after the first
+    in that section loses it."""
+
+    BODY = (
+        "Definition der Weichteilinfektion.\n\n"
+        "## Diagnostik\n"
+        "lead-in\n\n"
+        "### Blutkulturen\n"
+        "in ueber 95 % negativ bei unkomplizierter Form\n"
+    )
+
+    def test_chunks_carry_their_heading_path(self) -> None:
+        from outmem.semantic.chunker import chunk_text
+
+        chunks = chunk_text(self.BODY, chunk_size=60, overlap_paragraphs=0)
+        paths = [c.heading_path for c in chunks]
+        assert () in paths                                  # the preamble
+        assert ("Diagnostik", "Blutkulturen") in paths      # nested, outermost first
+
+    def test_heading_path_is_not_stored_in_chunk_text(self) -> None:
+        """`Chunk.text` is contractually `body[start_char:end_char]`; the
+        path is applied at embed time only, like the page header."""
+        from outmem.semantic.chunker import chunk_text
+
+        for chunk in chunk_text(self.BODY, chunk_size=60, overlap_paragraphs=0):
+            assert chunk.text == self.BODY.strip()[chunk.start_char : chunk.end_char]
+            assert ">" not in chunk.text
+
+    def test_with_header_renders_the_trail(self) -> None:
+        from outmem.semantic.chunker import with_header
+
+        out = with_header("Erysipel — clinical", "body text", ("Diagnostik", "Blutkulturen"))
+        assert out.splitlines()[0] == "Erysipel — clinical"
+        assert out.splitlines()[1] == "Diagnostik > Blutkulturen"
+        assert out.endswith("body text")
+
+    def test_with_header_without_a_path_is_unchanged(self) -> None:
+        """Off by default must mean byte-identical to before the feature."""
+        from outmem.semantic.chunker import with_header
+
+        assert with_header("H", "text") == with_header("H", "text", ())
+        assert with_header("", "text", ()) == "text"
+
+    def _store(self, tmp_path: Path):
+        from outmem.semantic import VectorStore
+        from outmem.semantic.embeddings import EmbedderHandle
+
+        return VectorStore.open(
+            tmp_path / "v.db",
+            embedder=EmbedderHandle(
+                embedder=_BagOfWordsEmbeddingModel(dimensions=128),
+                model_name="stub",
+                dimensions=128,
+            ),
+        )
+
+    def test_flipping_the_flag_invalidates_the_index(self, tmp_path: Path) -> None:
+        """The trap: heading *text* lives in the body so edits invalidate,
+        but toggling the flag changes what is embedded without changing a
+        byte of the file. Without a discriminator every index would report
+        `skipped` while serving vectors built under the old policy."""
+        vs = self._store(tmp_path)
+        kw = dict(body=self.BODY, kind="wiki", header="H", chunk_size=60,
+                  overlap_paragraphs=0)
+        assert not vs.reindex_file("wiki/pages/p.md", embed_headings=False, **kw).skipped
+        assert vs.reindex_file("wiki/pages/p.md", embed_headings=False, **kw).skipped
+        assert not vs.reindex_file("wiki/pages/p.md", embed_headings=True, **kw).skipped
+        assert vs.reindex_file("wiki/pages/p.md", embed_headings=True, **kw).skipped
+
+    def test_a_heading_reaches_a_chunk_that_never_says_it(
+        self, tmp_path: Path
+    ) -> None:
+        """The reported defect: the chunk stating '95 % negativ' does not
+        contain the word its section is titled with, so a query naming the
+        heading cannot reach it."""
+        body = (
+            "Definition.\n\n"
+            "## Blutkulturen\n"
+            "Routinemaessig nicht erforderlich.\n\n"
+            "in ueber 95 % negativ bei unkomplizierter Form\n"
+        )
+        sims = {}
+        for flag in (False, True):
+            (tmp_path / f"idx{flag}").mkdir(parents=True, exist_ok=True)
+            vs = self._store(tmp_path / f"idx{flag}")
+            vs.reindex_file("wiki/pages/e.md", body=body, kind="wiki", header="Erysipel",
+                            embed_headings=flag, chunk_size=70, overlap_paragraphs=0)
+            hits = vs.find_similar("Blutkulturen sinnvoll?", top_k=5, threshold=0.0)
+            target = next(h for h in hits if "95" in h.content)
+            assert "Blutkultur" not in target.content  # the premise of the test
+            sims[flag] = target.similarity
+        assert sims[True] > sims[False]

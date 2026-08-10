@@ -23,6 +23,7 @@ at embed time only.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 
@@ -40,6 +41,18 @@ class Chunk:
     text: str
     start_char: int  # offset of chunk start in the source body
     end_char: int  # offset of chunk end (exclusive)
+    heading_path: tuple[str, ...] = ()
+    """ATX headings enclosing this chunk's start, outermost first.
+
+    Carried for the embedder, not for storage: like the page header it
+    is applied by :func:`with_header` at embed time, so
+    ``Chunk.text`` stays contractually ``body[start_char:end_char]``.
+
+    Paragraph boundaries and section boundaries do not coincide, so a
+    chunk can straddle a heading. The path is taken at the chunk's
+    *start* — the section it is continuing — which is the one a reader
+    of that text would assume.
+    """
 
     @property
     def content_hash(self) -> str:
@@ -83,6 +96,14 @@ def chunk_text(
     if not paragraphs:
         return []
 
+    # One parse for the whole body; each chunk then reads its enclosing
+    # headings off it by offset. Imported here rather than at module
+    # scope to keep the chunker importable without pulling the outline
+    # parser into callers that only want plain text splitting.
+    from outmem.outline import heading_path_at, parse_outline
+
+    sections = parse_outline(body)
+
     chunks: list[Chunk] = []
     last_used_idx = -1
     i = 0
@@ -114,6 +135,7 @@ def chunk_text(
                 text=chunk_body,
                 start_char=chunk_start,
                 end_char=chunk_end,
+                heading_path=heading_path_at(sections, chunk_start),
             )
         )
 
@@ -157,7 +179,14 @@ def hash_text(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
 
-def with_header(header: str, text: str) -> str:
+HEADING_SEPARATOR = " > "
+"""Joins a chunk's heading path. Distinctive enough not to collide with
+prose, so the embedded line reads as structure rather than a sentence."""
+
+
+def with_header(
+    header: str, text: str, heading_path: Sequence[str] = ()
+) -> str:
     """``text`` with ``header`` prepended, for what gets EMBEDDED.
 
     Kept out of :class:`Chunk` on purpose. ``Chunk.text`` is persisted as
@@ -168,8 +197,27 @@ def with_header(header: str, text: str) -> str:
     to the path it already appears in. Applying it at the embed call sites
     keeps the header in the vectors, where it is wanted, and nowhere else.
 
+    ``heading_path`` adds the chunk's section trail on its own line::
+
+        Erysipel und Phlegmone — clinical, haut
+        Diagnostik > Blutkulturen
+
+        …chunk text…
+
+    Same rationale as the page header, one scope down: a section whose
+    body never repeats its own heading is unretrievable by that heading,
+    and the heading is not otherwise in the vector — the chunker splits
+    on blank lines, so ``## Blutkulturen`` is just another paragraph and
+    every chunk after the first in that section loses it.
+
     The same function feeds the content hash, so toggling
-    ``semantic.embed_frontmatter`` (or editing a title/tags) invalidates
-    exactly the files whose embedded text changed.
+    ``semantic.embed_frontmatter`` / ``embed_headings`` (or editing a
+    title, tags, or heading) invalidates exactly the files whose
+    embedded text changed.
     """
-    return f"{header}\n\n{text}" if header else text
+    prefix = "\n".join(
+        part
+        for part in (header, HEADING_SEPARATOR.join(heading_path))
+        if part
+    )
+    return f"{prefix}\n\n{text}" if prefix else text

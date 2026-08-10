@@ -79,6 +79,7 @@ DEFAULT_SEMANTIC_INDEX = SEMANTIC_INDEX_PAGES
 # Prepend "<title> — <tags>" to every chunk before embedding. Off by default:
 # flipping it re-embeds every page on the next reindex.
 DEFAULT_SEMANTIC_EMBED_FRONTMATTER = False
+DEFAULT_SEMANTIC_EMBED_HEADINGS = False
 
 DEFAULT_APPROVAL_REQUIRED_FOR_WRITES = False
 
@@ -185,6 +186,15 @@ class SemanticSettings:
     but it is the only way for titles and tags to affect retrieval at all —
     ``parse_wiki_page`` otherwise strips them before the chunker sees them).
 
+    ``embed_headings`` does the same one scope down, adding the chunk's
+    section trail (``Diagnostik > Blutkulturen``). The chunker splits on
+    blank lines, so a ``## Heading`` is just another paragraph: every
+    chunk after the first in a section is otherwise embedded with no
+    record of which section it is in, and a section whose body never
+    repeats its own heading is unretrievable by that heading. Off by
+    default for the same reason as ``embed_frontmatter`` — flipping it
+    re-embeds the corpus — not because it is the less useful of the two.
+
     Mirrors the YAML block::
 
         semantic:
@@ -192,6 +202,7 @@ class SemanticSettings:
           db_filename: .vectors.db          # relative to wiki root
           index: pages                      # or: pages+sources
           embed_frontmatter: false          # prepend "<title> — <tags>"
+          embed_headings: false             # prepend "<h2> > <h3>"
           chunk_size: 2000
           chunk_max: 8000
           overlap_paragraphs: 1
@@ -203,6 +214,7 @@ class SemanticSettings:
     db_filename: str = DEFAULT_SEMANTIC_DB_FILENAME
     index: str = DEFAULT_SEMANTIC_INDEX
     embed_frontmatter: bool = DEFAULT_SEMANTIC_EMBED_FRONTMATTER
+    embed_headings: bool = DEFAULT_SEMANTIC_EMBED_HEADINGS
     chunk_size: int = DEFAULT_SEMANTIC_CHUNK_SIZE
     chunk_max: int = DEFAULT_SEMANTIC_CHUNK_MAX
     overlap_paragraphs: int = DEFAULT_SEMANTIC_OVERLAP_PARAGRAPHS
@@ -536,6 +548,17 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
                     "got %r — using %r",
                     flag,
                     config.semantic.embed_frontmatter,
+                )
+        if "embed_headings" in semantic_block:
+            flag = semantic_block["embed_headings"]
+            if isinstance(flag, bool):
+                config.semantic.embed_headings = flag
+            else:
+                log.warning(
+                    "config: semantic.embed_headings must be true/false, "
+                    "got %r — using %r",
+                    flag,
+                    config.semantic.embed_headings,
                 )
         if isinstance(semantic_block.get("chunk_size"), int):
             config.semantic.chunk_size = semantic_block["chunk_size"]

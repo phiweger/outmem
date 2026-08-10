@@ -61,6 +61,9 @@ from outmem.config import DEFAULT_SEMANTIC_REINDEX_CONCURRENCY
 from outmem.exceptions import OutmemError
 from outmem.semantic.chunker import Chunk, chunk_text, hash_text, with_header
 
+# Hash discriminator for `semantic.embed_headings`. See `_prepare`.
+_EMBED_HEADINGS_MARKER = "\x00embed_headings"
+
 log = logging.getLogger(__name__)
 
 DEFAULT_DB_FILENAME = ".vectors.db"
@@ -262,6 +265,19 @@ class VectorStore:
     # Public API
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _embed_text(header: str, chunk: Chunk, embed_headings: bool) -> str:
+        """What actually goes to the embedder for one chunk.
+
+        Single definition so the sync path, the async batch path and the
+        hash all agree. They diverged once already (the header was added
+        to embedding but not to hashing) and every existing index then
+        reported ``skipped`` while serving header-less vectors.
+        """
+        return with_header(
+            header, chunk.text, chunk.heading_path if embed_headings else ()
+        )
+
     def reindex_file(
         self,
         rel_path: str,
@@ -269,6 +285,7 @@ class VectorStore:
         body: str,
         kind: Literal["wiki", "source"],
         header: str = "",
+        embed_headings: bool = False,
         chunk_size: int = 2000,
         chunk_max: int = 8000,
         overlap_paragraphs: int = 1,
@@ -294,7 +311,8 @@ class VectorStore:
         state across files.
         """
         prepared = self._prepare(
-            rel_path, body, chunk_size, chunk_max, overlap_paragraphs, header
+            rel_path, body, chunk_size, chunk_max, overlap_paragraphs, header,
+            embed_headings,
         )
         if prepared is None:  # content_hash matched → nothing to do
             return ReindexResult(rel_path, skipped=True, chunks_removed=0,
@@ -303,14 +321,16 @@ class VectorStore:
         # Embed BEFORE any DB writes — if this raises, no transaction is
         # open and the index is unchanged.
         vectors = (
-            self.embedder.embed_documents([with_header(header, c.text) for c in chunks])
+            self.embedder.embed_documents(
+                [self._embed_text(header, c, embed_headings) for c in chunks]
+            )
             if chunks else []
         )
         return self._commit_file(rel_path, content_hash, kind, chunks, vectors)
 
     def _prepare(
         self, rel_path: str, body: str, chunk_size: int, chunk_max: int,
-        overlap_paragraphs: int, header: str = "",
+        overlap_paragraphs: int, header: str = "", embed_headings: bool = False,
     ) -> tuple[str, list[Chunk]] | None:
         """Hash-check + chunk. Returns ``(content_hash, chunks)`` to embed,
         or ``None`` when the stored hash matches (skip). Read-only on the DB.
@@ -321,7 +341,15 @@ class VectorStore:
         alone would leave every existing index reporting ``skipped`` and
         quietly serving stale, header-less chunks.
         """
-        content_hash = hash_text(with_header(header, body))
+        hashed = with_header(header, body)
+        if embed_headings:
+            # Heading *text* rides along in the body, so editing a heading
+            # already invalidates. The flag does not: flipping it changes
+            # what gets embedded without changing a byte of the file, and
+            # every index would report `skipped` while serving vectors
+            # built under the old policy. Discriminate explicitly.
+            hashed = f"{_EMBED_HEADINGS_MARKER}\n{hashed}"
+        content_hash = hash_text(hashed)
         with self._lock:
             existing = self.con.execute(
                 "SELECT content_hash FROM files WHERE rel_path = ?", (rel_path,)
@@ -372,6 +400,7 @@ class VectorStore:
         chunk_max: int = 8000,
         overlap_paragraphs: int = 1,
         max_concurrency: int = DEFAULT_SEMANTIC_REINDEX_CONCURRENCY,
+        embed_headings: bool = False,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> list[ReindexResult]:
         """Re-index a batch of ``(rel_path, body, kind, header)`` files.
@@ -395,7 +424,8 @@ class VectorStore:
         done = 0
         for rel_path, body, kind, header in files:
             p = self._prepare(
-                rel_path, body, chunk_size, chunk_max, overlap_paragraphs, header
+                rel_path, body, chunk_size, chunk_max, overlap_paragraphs, header,
+                embed_headings,
             )
             if p is None:
                 results.append(ReindexResult(rel_path, skipped=True, chunks_removed=0,
@@ -414,7 +444,9 @@ class VectorStore:
             # client on subsequent calls; see `_run_sync` for the full story).
             from outmem.semantic.embeddings import _run_sync
 
-            vectors_by_path = _run_sync(self._embed_batch(prepared, max_concurrency))
+            vectors_by_path = _run_sync(
+                self._embed_batch(prepared, max_concurrency, embed_headings)
+            )
             # Phase 3 — serial writes. Per-file embed failures (from phase 2)
             # arrive as exceptions in vectors_by_path; record an error result
             # and skip the commit so other files still land.
@@ -443,6 +475,7 @@ class VectorStore:
         self,
         prepared: list[tuple[str, str, Literal["wiki", "source"], list[Chunk], str]],
         max_concurrency: int,
+        embed_headings: bool = False,
     ) -> dict[str, list[list[float]] | BaseException]:
         """Embed every prepared file's chunks concurrently (≤ ``max_concurrency``
         in flight), keyed by rel_path. No DB access — pure network.
@@ -461,7 +494,7 @@ class VectorStore:
             async with sem:
                 try:
                     out[rel_path] = await self.embedder.embed_documents_async(
-                        [with_header(header, c.text) for c in chunks]
+                        [self._embed_text(header, c, embed_headings) for c in chunks]
                     )
                 except BaseException as exc:
                     out[rel_path] = exc

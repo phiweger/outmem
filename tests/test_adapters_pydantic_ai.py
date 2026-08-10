@@ -685,3 +685,36 @@ class TestReadPageOutline:
         assert "title: Meldepflicht nach IfSG" in out
         assert "UNIQUEMARKER" in out
         assert "Fristen" in out
+
+
+class TestOutlineCharOffsets:
+    """`outline.py` gained char spans so the chunker can ask which section
+    an offset falls in. Line spans stay file-relative (for grep parity),
+    char spans stay body-relative (for chunk parity) — the asymmetry is
+    load-bearing and easy to "fix" wrongly."""
+
+    BODY = "Preamble.\n\n## Therapie\nlead\n\n### Dosierung\nMARKER\n\n## Fristen\nlast\n"
+
+    def test_char_spans_are_body_relative_even_with_a_line_offset(self) -> None:
+        from outmem.outline import parse_outline
+
+        plain = parse_outline(self.BODY)
+        shifted = parse_outline(self.BODY, line_offset=7)
+        assert [s.start_char for s in shifted] == [s.start_char for s in plain]
+        assert [s.start_line for s in shifted] == [s.start_line + 7 for s in plain]
+
+    def test_char_span_indexes_back_into_the_body(self) -> None:
+        from outmem.outline import parse_outline
+
+        for section in parse_outline(self.BODY):
+            assert self.BODY[section.start_char :].startswith("#")
+
+    def test_heading_path_is_outermost_first(self) -> None:
+        from outmem.outline import heading_path_at, parse_outline
+
+        sections = parse_outline(self.BODY)
+        at = lambda probe: heading_path_at(sections, self.BODY.index(probe))  # noqa: E731
+        assert at("Preamble") == ()
+        assert at("lead") == ("Therapie",)
+        assert at("MARKER") == ("Therapie", "Dosierung")
+        assert at("last") == ("Fristen",)

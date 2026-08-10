@@ -42,6 +42,14 @@ class Section:
     1-based and inclusive. Line numbers are *file*-relative when
     :func:`parse_outline` is given a ``line_offset``, so they line up
     with what ``grep_wiki`` prints for the same page.
+
+    ``start_char`` / ``end_char`` are the same span in characters and
+    are always relative to the ``body`` that was parsed — never shifted
+    by ``line_offset``. The asymmetry is deliberate: line numbers exist
+    to be shown to a reader alongside grep output, so they need file
+    coordinates; character offsets exist to be compared against
+    :class:`~outmem.semantic.chunker.Chunk` offsets, which are body
+    coordinates. Shifting both would make one of the two callers wrong.
     """
 
     heading: str
@@ -49,6 +57,8 @@ class Section:
     start_line: int
     end_line: int
     char_count: int
+    start_char: int = 0
+    end_char: int = 0
 
     @property
     def line_count(self) -> int:
@@ -87,6 +97,14 @@ def parse_outline(body: str, *, line_offset: int = 0) -> list[Section]:
                 (index, len(heading_match.group("hashes")), heading_match.group("text"))
             )
 
+    # Character offset of each line's first character, so a section can
+    # report its span in the same coordinates a chunker works in.
+    line_starts: list[int] = []
+    cursor = 0
+    for line in lines:
+        line_starts.append(cursor)
+        cursor += len(line) + 1  # +1 for the newline splitlines() removed
+
     sections: list[Section] = []
     for position, (index, level, heading) in enumerate(starts):
         # The section ends before the next heading at the same or a
@@ -104,9 +122,28 @@ def parse_outline(body: str, *, line_offset: int = 0) -> list[Section]:
                 start_line=index + 1 + line_offset,
                 end_line=end_index + 1 + line_offset,
                 char_count=len(span),
+                start_char=line_starts[index],
+                end_char=line_starts[end_index] + len(lines[end_index]),
             )
         )
     return sections
+
+
+def heading_path_at(sections: list[Section], offset: int) -> tuple[str, ...]:
+    """Headings enclosing ``offset``, outermost first.
+
+    ``("Therapie", "Dosierung")`` for a position inside an ``### Dosierung``
+    nested under ``## Therapie``. Empty when the offset precedes the first
+    heading (a page's preamble belongs to no section).
+
+    Used to tell the embedder which section a chunk came from. Without it
+    a chunk carries its page's title and tags but nothing about the
+    heading above it, so a section whose body never repeats its own
+    heading is unretrievable by that heading — the same defect
+    ``embed_frontmatter`` fixes one scope up.
+    """
+    enclosing = [s for s in sections if s.start_char <= offset <= s.end_char]
+    return tuple(s.heading for s in sorted(enclosing, key=lambda s: s.level))
 
 
 def preamble_chars(body: str) -> int:

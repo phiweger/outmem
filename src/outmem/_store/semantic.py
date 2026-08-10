@@ -140,6 +140,7 @@ def reindex_path(store: WikiStore, rel_path: str) -> ReindexResult | None:
         body=body,
         kind=kind,
         header=header,
+        embed_headings=settings.embed_headings,
         chunk_size=settings.chunk_size,
         chunk_max=settings.chunk_max,
         overlap_paragraphs=settings.overlap_paragraphs,
@@ -205,6 +206,7 @@ def reindex_all(
             chunk_max=settings.chunk_max,
             overlap_paragraphs=settings.overlap_paragraphs,
             max_concurrency=max_concurrency,
+            embed_headings=settings.embed_headings,
             on_progress=on_progress,
         )
         embed_tokens = getattr(vs.embedder, "total_tokens", 0) - tokens_before
@@ -471,6 +473,7 @@ def maybe_reindex_commit_paths(
                 body=body,
                 kind=kind,
                 header=header,
+                embed_headings=settings.embed_headings,
                 chunk_size=settings.chunk_size,
                 chunk_max=settings.chunk_max,
                 overlap_paragraphs=settings.overlap_paragraphs,
