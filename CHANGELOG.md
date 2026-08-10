@@ -3,6 +3,52 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## Unreleased
+
+Two retrieval gaps reported from a ~600-page clinical wiki after a week
+of production use. Both are cases where **the content was already there
+and correct** and could not be found.
+
+### Added
+
+- **`semantic.embed_headings`** — each chunk is embedded with the
+  heading trail of the section it starts in (`Diagnostik > Blutkulturen`),
+  on the line below the page header. The chunker splits on blank lines,
+  so a `## Heading` is just another paragraph: once a chunk boundary
+  moves past it, every following chunk in that section is embedded with
+  no record of which section it is in. A section whose body never
+  repeats its own heading is unretrievable by that heading — the defect
+  `embed_frontmatter` fixes one scope up.
+
+  Off by default, like `embed_frontmatter`, because flipping it
+  re-embeds the corpus. The flag participates in the content hash, so
+  the flip invalidates correctly instead of leaving the index reporting
+  `skipped` while serving vectors built under the old policy.
+
+  On a fixture reproducing the reported case, the chunk stating
+  "95 % negativ" — whose body never contains "Blutkultur" — gains 42 %
+  similarity for the query naming its section.
+- **`finding:` on a provenance entry** — `silent` | `contradicts` |
+  `out-of-scope`, plus free-form `scope` / `note` / `date`. Records
+  "we checked source X and it is silent on Q", which is otherwise
+  indistinguishable from nobody having looked. `outmem lint` warns on
+  an unrecognised value (one that isn't recognised records nothing and
+  reads as an ordinary citation); `outmem stale` marks these
+  `[silent — re-check]`, because an absence expires with the version it
+  was checked against in a way a claim does not.
+- `outmem.outline.heading_path_at()`, and `Section.start_char` /
+  `end_char`. Line spans stay file-relative (grep parity), char spans
+  body-relative (chunk parity).
+- `Chunk.heading_path`, `StaleCitation.finding`,
+  `store.provenance_findings()`.
+
+### Not shipped
+
+Premise gates — [#10](https://github.com/phiweger/outmem/issues/10).
+Filed with the diagnosis intact rather than built: `embed_headings` plus
+a section heading may already cover the reported cases, and the evidence
+for that is a before/after the reporter offered to run.
+
 ## 0.11.0
 
 **Two retrieval calls that couldn't finish the job they started.** Both
