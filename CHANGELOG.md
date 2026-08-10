@@ -3,7 +3,7 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
-## Unreleased
+## 0.12.0
 
 Two retrieval gaps reported from a ~600-page clinical wiki after a week
 of production use. Both are cases where **the content was already there
@@ -41,6 +41,11 @@ and correct** and could not be found.
   body-relative (chunk parity).
 - `Chunk.heading_path`, `StaleCitation.finding`,
   `store.provenance_findings()`.
+- Two more lint warnings around `finding:`, both cases where an entry
+  the author believes records a checked absence records nothing:
+  `finding-without-source` (no `path:`, so `outmem stale` can never
+  re-check it) and a non-string value, which the extractor would
+  otherwise drop before the vocabulary check saw it.
 
 ### Not shipped
 
