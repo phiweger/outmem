@@ -92,6 +92,7 @@ semantic:
   db_filename: .vectors.db                # tracked in git, sibling of wiki/
   index: pages                            # or `pages+sources` — see below
   embed_frontmatter: false                # prepend "<title> — <tags>" to chunks
+  embed_headings: false                   # prepend "<h2> > <h3>" to chunks
   chunk_size: 2000                        # target characters per chunk
   chunk_max: 8000                         # hard ceiling for oversized paragraphs
   overlap_paragraphs: 1                   # paragraphs of overlap between chunks
@@ -169,6 +170,38 @@ Turning it on changes what is embedded, so the next `outmem reindex`
 re-embeds every page (the header participates in the content hash, so
 this happens automatically — no `--force` needed). That is a real
 embedding bill on a large wiki; budget for it.
+
+#### `semantic.embed_headings` — make section headings searchable
+
+Off by default. When on, each chunk is additionally embedded with the
+heading trail of the section it starts in:
+
+```
+Erysipel und Phlegmone — clinical, haut
+Diagnostik > Blutkulturen
+
+…chunk text…
+```
+
+The same argument as `embed_frontmatter`, one scope down. The chunker
+splits on blank lines, so a `## Heading` is just another paragraph:
+once a chunk boundary moves past it, **every following chunk in that
+section is embedded with no record of which section it is in**. A
+section whose body never repeats its own heading is unretrievable by
+that heading — and that is common in exactly the places it hurts, where
+the heading names the topic (`## Blutkulturen`) and the body states the
+finding ("in über 95 % negativ") without repeating the term.
+
+The path is taken at the chunk's *start* — the section it is continuing
+— because paragraph and section boundaries do not coincide and a chunk
+can straddle a heading.
+
+Same two limits as `embed_frontmatter` (document side only; no effect on
+the `rerank` gate), and the same cost: turning it on changes what is
+embedded, so the next `outmem reindex` re-embeds every page. The flag
+itself participates in the content hash, so flipping it invalidates
+correctly rather than leaving the index reporting `skipped` while
+serving vectors built under the old policy.
 
 ### `retrieval:` — what the agent's wiki search runs
 

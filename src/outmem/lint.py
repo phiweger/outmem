@@ -52,7 +52,7 @@ from outmem.slug import (
     extract_wikilinks,
     relpath_to_slug,
 )
-from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
+from outmem.sources import PROVENANCE_FINDINGS, SOURCES_DIR, SOURCES_LOCAL_DIR
 
 
 class Severity(StrEnum):
@@ -633,6 +633,22 @@ def _check_provenance(
     """Flag pages whose cited source files no longer exist."""
     for page in pages.values():
         for entry in page.provenance:
+            finding = provenance_finding(entry)
+            if finding is not None and finding not in PROVENANCE_FINDINGS:
+                report.findings.append(
+                    LintFinding(
+                        kind="unknown-provenance-finding",
+                        severity=Severity.WARNING,
+                        path=page.rel_path,
+                        message=(
+                            f"provenance finding {finding!r} is not one of "
+                            f"{sorted(PROVENANCE_FINDINGS)}. An unrecognised "
+                            "value records nothing — the entry reads as an "
+                            "ordinary citation, which is the opposite of what "
+                            "a checked absence means."
+                        ),
+                    )
+                )
             ref = provenance_ref(entry)
             if ref is None:
                 continue
@@ -764,6 +780,22 @@ def provenance_ref(entry: Any) -> str | None:
         candidate = entry.get("path") or entry.get("source") or entry.get("file")
         if isinstance(candidate, str):
             return candidate
+    return None
+
+
+def provenance_finding(entry: Any) -> str | None:
+    """The ``finding:`` on a provenance entry, if it carries one.
+
+    Present when the citation records a *checked absence* rather than a
+    claim drawn from the source — see
+    :data:`outmem.sources.PROVENANCE_FINDINGS`. Returns the raw string
+    even when it is not in the vocabulary, so the linter can name the
+    typo rather than treating an unrecognised value as no value.
+    """
+    if isinstance(entry, dict):
+        finding = entry.get("finding")
+        if isinstance(finding, str) and finding.strip():
+            return finding.strip()
     return None
 
 

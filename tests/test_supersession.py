@@ -1188,3 +1188,100 @@ class TestSourceRefsBackfill:
         store._source_registry = None
         (ref,) = store.source_refs(entry.rel_path)
         assert ref.page_slug == "clinical:sepsis"
+
+
+# ---------------------------------------------------------------------------
+# provenance `finding:` — recording a checked absence
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceFindings:
+    """"We checked source X and it is silent on Q" is a load-bearing fact
+    in a reference wiki, and is otherwise indistinguishable from "nobody
+    looked" — which is what makes a reader fill the gap from its own
+    knowledge."""
+
+    def _wiki_with_absence(self, tmp_path: Path) -> tuple[WikiStore, str]:
+        store = WikiStore.init(tmp_path / "w")
+        v1 = tmp_path / "s3-2024.md"
+        v1.write_text("12.2 Keine Empfehlungen/Statements.\n", encoding="utf-8")
+        entry = store.add_source(v1, as_key="guidelines/hwi")
+        store.write_page(
+            "hwi",
+            title="HWI",
+            body="## Therapiedauer — keine Empfehlung\nKeine Aussage.\n",
+            provenance=[
+                {
+                    "path": entry.citation_path,
+                    "finding": "silent",
+                    "scope": "Therapiedauer in der Schwangerschaft",
+                    "date": "2026-08-10",
+                }
+            ],
+        )
+        return store, entry.rel_path
+
+    def test_finding_round_trips_through_frontmatter(self, tmp_path: Path) -> None:
+        store, _rel = self._wiki_with_absence(tmp_path)
+        entry = store.read("hwi").frontmatter.provenance[0]
+        assert entry["finding"] == "silent"
+        assert entry["scope"] == "Therapiedauer in der Schwangerschaft"
+        assert entry["date"] == "2026-08-10"
+
+    def test_a_valid_finding_lints_clean(self, tmp_path: Path) -> None:
+        from outmem.lint import lint_wiki
+
+        store, _rel = self._wiki_with_absence(tmp_path)
+        report = lint_wiki(
+            store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path
+        )
+        kinds = {f.kind for f in report.findings}
+        assert "unknown-provenance-finding" not in kinds
+        assert "stale-provenance" not in kinds
+
+    def test_a_typo_is_flagged_rather_than_ignored(self, tmp_path: Path) -> None:
+        """An unrecognised value records nothing — the entry reads as an
+        ordinary citation, the opposite of what was meant."""
+        from outmem.lint import lint_wiki
+
+        store = WikiStore.init(tmp_path / "w")
+        doc = tmp_path / "s.md"
+        doc.write_text("body\n", encoding="utf-8")
+        entry = store.add_source(doc)
+        store.write_page(
+            "p",
+            title="P",
+            body="b\n",
+            provenance=[{"path": entry.citation_path, "finding": "slient"}],
+        )
+        report = lint_wiki(
+            store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path
+        )
+        offenders = [f for f in report.findings if f.kind == "unknown-provenance-finding"]
+        assert offenders and "slient" in offenders[0].message
+
+    def test_a_stale_absence_is_marked_for_re_check(self, tmp_path: Path) -> None:
+        """The point of dating an absence: 'silent as of the 2024 version'
+        expires when 2026 lands, and the new version is exactly where the
+        answer might now be."""
+        store, _rel = self._wiki_with_absence(tmp_path)
+        v2 = tmp_path / "s3-2026.md"
+        v2.write_text("12.2 Therapiedauer: 7-10 Tage.\n", encoding="utf-8")
+        store.add_source(v2, as_key="guidelines/hwi")
+
+        stale, _failures = store.stale_pages()
+        assert [c.slug for c in stale] == ["hwi"]
+        assert stale[0].finding == "silent"
+
+    def test_an_ordinary_citation_carries_no_finding(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "w")
+        v1 = tmp_path / "a.md"
+        v1.write_text("claim\n", encoding="utf-8")
+        e1 = store.add_source(v1, as_key="doc/a")
+        store.write_page("p", title="P", body="b\n", provenance=[e1.citation_path])
+        v2 = tmp_path / "b.md"
+        v2.write_text("revised claim\n", encoding="utf-8")
+        store.add_source(v2, as_key="doc/a")
+
+        stale, _failures = store.stale_pages()
+        assert stale and stale[0].finding is None

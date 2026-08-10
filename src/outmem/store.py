@@ -1181,6 +1181,35 @@ class WikiStore:
                 out.setdefault(key, []).append(page.slug)
         return out, failures
 
+    def provenance_findings(self) -> dict[tuple[str, str], str]:
+        """``(source key, slug) -> finding`` for citations recording a check.
+
+        A parallel lookup rather than a richer
+        :meth:`source_citations` return, because every existing caller of
+        that map wants "which pages cite this source" and would have to
+        learn a new shape to keep asking it.
+
+        See :data:`outmem.sources.PROVENANCE_FINDINGS`. Values are
+        returned as written, unrecognised ones included — ``outmem lint``
+        is where a typo gets named, and silently dropping it here would
+        make the lint warning describe something the rest of outmem
+        pretends it never saw.
+        """
+        from outmem.index import load_editorial_pages
+        from outmem.lint import provenance_finding, provenance_ref
+
+        out: dict[tuple[str, str], str] = {}
+        pages, _failures = load_editorial_pages(self.pages_path)
+        for page in pages:
+            for entry in page.frontmatter.provenance:
+                finding = provenance_finding(entry)
+                ref = provenance_ref(entry)
+                if finding is None or ref is None:
+                    continue
+                _tree, key = _sources.split_tree_prefix(self, ref)
+                out[(key, page.slug)] = finding
+        return out
+
     def stale_pages(self) -> tuple[list[StaleCitation], list[PageLoadFailure]]:
         """Pages whose provenance cites a source version since superseded.
 
@@ -1204,6 +1233,7 @@ class WikiStore:
 
         out: list[StaleCitation] = []
         failures: list[PageLoadFailure] = []
+        findings = self.provenance_findings()
         for tree in _sources.existing_trees(self):
             registry = _sources.get_registry(self, tree)
             citations, tree_failures = self.source_citations(local=not tree.tracked)
@@ -1233,6 +1263,7 @@ class WikiStore:
                             else rel_path,
                             current=current,
                             document_key=entry.document_key or "",
+                            finding=findings.get((rel_path, slug)),
                             current_exists=current in registry.entries,
                         )
                     )

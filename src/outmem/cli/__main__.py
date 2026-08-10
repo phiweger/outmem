@@ -563,7 +563,11 @@ def cmd_stale(args: argparse.Namespace) -> int:
     for slug in sorted(by_page):
         print(f"  [[{slug}]]")
         for c in by_page[slug]:
-            print(f"      cites   {c.cited}")
+            # A recorded absence expiring is a different job from a claim
+            # expiring: the fact was "v1 does not answer this", so the new
+            # version is exactly where the answer might now be.
+            marker = f"  [{c.finding} — re-check]" if c.finding else ""
+            print(f"      cites   {c.cited}{marker}")
             missing = "" if c.current_exists else "  (no longer registered)"
             print(f"      current {c.current}{missing}")
     print(

@@ -149,6 +149,54 @@ store.record_ingestion(
 )
 ```
 
+### Recording a checked absence (`finding:`)
+
+Sometimes the useful fact is that a source *doesn't* say something —
+a guideline that prints "Keine Empfehlungen/Statements" under the
+chapter you needed, a database whose field is simply unannotated.
+Written as prose that is indistinguishable from nobody having looked,
+and a reader (or an agent) then fills the gap from its own knowledge.
+
+A provenance entry can record the check instead:
+
+```yaml
+provenance:
+  - path: sources/7b6cb641da16/awmf-s3-hwi-2024.md
+    finding: silent          # silent | contradicts | out-of-scope
+    scope: "Therapiedauer der Pyelonephritis in der Schwangerschaft"
+    note: "S3 führt unter 12.2 ausdrücklich 'Keine Empfehlungen/Statements'."
+    date: 2026-08-10
+```
+
+Only `finding` is a controlled vocabulary
+(`outmem.sources.PROVENANCE_FINDINGS`) — `outmem lint` warns on an
+unrecognised value, because one that isn't recognised records nothing
+and the entry reads as an ordinary citation. `scope`, `note` and `date`
+are free-form and round-trip verbatim.
+
+What it buys you beyond documentation:
+
+- **`outmem stale` marks it for re-check.** A claim going stale means
+  it may have changed; a recorded *absence* going stale means the new
+  version may finally answer — the fact was about what one specific
+  version did not contain, so it expires with that version.
+- **`store.provenance_findings()`** returns `{(source, slug): finding}`
+  if you want to act on them programmatically.
+
+**Make it retrievable by giving it a heading.** The field is metadata;
+what a semantic search matches is body text. Put the absence in a
+section whose heading names the question, and turn on
+[`semantic.embed_headings`](configuration.md#semanticembed_headings--make-section-headings-searchable):
+
+```markdown
+## Therapiedauer Pyelonephritis in der Schwangerschaft — keine Empfehlung
+
+Die S3-Leitlinie trifft hierzu ausdrücklich keine Aussage (12.2).
+```
+
+The heading enters the vector, so a query asking the question reaches
+the statement that nothing is stated — which is the answer.
+
 ### Supersession and staleness
 
 `rel_path` embeds the content hash, so a revised document is always a *new*

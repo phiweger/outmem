@@ -58,6 +58,43 @@ generate this metadata, you just carry it through. The CLI's
 require writing the YAML directly (use the Python API `write_page(...,
 provenance=[{...}])` when needed).
 
+### `finding:` — when you checked and the source said nothing
+
+If you read a source expecting an answer and it **doesn't give one**,
+that is a fact worth recording, not a dead end. Write it:
+
+```yaml
+provenance:
+  - path: sources/7b6cb641da16/awmf-s3-hwi-2024.md
+    finding: silent          # silent | contradicts | out-of-scope
+    scope: "Therapiedauer der Pyelonephritis in der Schwangerschaft"
+    note: "S3 fuehrt unter 12.2 ausdruecklich 'Keine Empfehlungen/Statements'."
+    date: 2026-08-10
+```
+
+Why it matters: without it, "we checked and there is nothing" looks
+exactly like "nobody looked" — so the next reader answers from their own
+knowledge instead of reporting the gap. `outmem stale` also flags these
+for re-check when the source gets a new version, since a *new* edition
+is precisely where a previously-missing answer would appear.
+
+`finding` must be one of the three values above (`outmem lint` warns
+otherwise — an unrecognised value records nothing). `scope`, `note` and
+`date` are free-form.
+
+**Also give it a heading.** The frontmatter is metadata; search matches
+body text. State the absence in a section whose heading names the
+question:
+
+```markdown
+## Therapiedauer Pyelonephritis in der Schwangerschaft — keine Empfehlung
+
+Die S3-Leitlinie trifft hierzu ausdruecklich keine Aussage (12.2).
+```
+
+That way someone asking the question finds the statement that nothing is
+stated, which is the answer they need.
+
 ## Extra fields are preserved
 
 Any frontmatter key outside the canonical set above is preserved

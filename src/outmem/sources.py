@@ -103,6 +103,24 @@ SCHEMA_VERSION = 3
 
 ALLOWED_EXTENSIONS = frozenset({".md", ".txt", ".csv", ".json", ".mmd", ".yaml", ".yml"})
 
+# What a `finding:` on a provenance entry may say. A citation normally
+# means "this page draws on that source"; `finding:` records the outcome
+# of a check that produced no such claim, which a reference wiki needs to
+# state as a fact rather than leave as an absence of prose:
+#
+#     provenance:
+#       - path: sources/7b6cb641/awmf-s3-hwi-2024.md
+#         finding: silent
+#         scope: "Therapiedauer der Pyelonephritis in der Schwangerschaft"
+#         note: "S3 fuehrt unter 12.2 ausdruecklich 'Keine Empfehlungen'."
+#         date: 2026-08-10
+#
+# Without it "we checked and there is nothing" is indistinguishable from
+# "nobody looked", and a reader — or an agent — fills the gap from its own
+# knowledge. Only `finding` is a controlled vocabulary; `scope`, `note`
+# and `date` are free-form and round-trip verbatim like any other key.
+PROVENANCE_FINDINGS = frozenset({"silent", "contradicts", "out-of-scope"})
+
 # 12 hex chars = 48 bits, plenty of headroom against accidental
 # collision across realistic source corpora (millions of files).
 SHA_PREFIX_LEN = 12
@@ -1014,6 +1032,16 @@ class StaleCitation:
     cited: str  # rel_path the page's provenance names
     current: str  # rel_path of the version that replaced it
     document_key: str
+    finding: str | None = None
+    """The citation's ``finding:``, when it recorded a checked absence.
+
+    Raises the priority of the row rather than decorating it. "The page
+    says X, citing v1" going stale means the claim may have changed.
+    "We checked v1 and it was **silent** on X" going stale means the new
+    version may finally answer — the recorded fact is about what a
+    specific version did *not* contain, so it expires with that version
+    in a way a positive citation does not.
+    """
     current_exists: bool = True
     """Whether ``current`` is still a registered row.
 
