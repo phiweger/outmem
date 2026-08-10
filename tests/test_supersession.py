@@ -1260,6 +1260,42 @@ class TestProvenanceFindings:
         offenders = [f for f in report.findings if f.kind == "unknown-provenance-finding"]
         assert offenders and "slient" in offenders[0].message
 
+    def test_a_finding_without_a_source_is_flagged(self, tmp_path: Path) -> None:
+        """"We checked and it was silent" has to say *what* was checked.
+        Without a path the entry is invisible to `outmem stale`, so it is
+        never re-checked when the source gets a new version — the author
+        stops looking and no reader can tell."""
+        from outmem.lint import lint_wiki
+
+        store = WikiStore.init(tmp_path / "w")
+        store.write_page(
+            "p", title="P", body="b\n", provenance=[{"finding": "silent"}]
+        )
+        report = lint_wiki(
+            store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path
+        )
+        assert any(f.kind == "finding-without-source" for f in report.findings)
+
+    def test_a_non_string_finding_is_flagged(self, tmp_path: Path) -> None:
+        """`finding: 123` would otherwise be dropped by the extractor and
+        never reach the vocabulary check — silently recording nothing."""
+        from outmem.lint import lint_wiki
+
+        store = WikiStore.init(tmp_path / "w")
+        doc = tmp_path / "s.md"
+        doc.write_text("x\n", encoding="utf-8")
+        entry = store.add_source(doc)
+        store.write_page(
+            "p",
+            title="P",
+            body="b\n",
+            provenance=[{"path": entry.citation_path, "finding": 123}],
+        )
+        report = lint_wiki(
+            store.wiki_path, log_dir=store.log_path, sources_dir=store.sources_path
+        )
+        assert any(f.kind == "unknown-provenance-finding" for f in report.findings)
+
     def test_a_stale_absence_is_marked_for_re_check(self, tmp_path: Path) -> None:
         """The point of dating an absence: 'silent as of the 2024 version'
         expires when 2026 lands, and the new version is exactly where the

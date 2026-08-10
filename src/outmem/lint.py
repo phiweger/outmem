@@ -623,6 +623,71 @@ def _check_source_slug_coupling(
             )
 
 
+def _check_one_finding(
+    entry: Any, *, page: _LoadedPage, report: LintReport
+) -> None:
+    """Validate a ``finding:`` on one provenance entry.
+
+    Every branch here is the same failure: an entry the author believes
+    records a checked absence, which the rest of outmem reads as an
+    ordinary citation or as nothing at all. That is strictly worse than
+    not writing it — the author stops looking, and no reader can tell.
+    So each way of getting it subtly wrong gets named rather than
+    ignored.
+    """
+    if not isinstance(entry, dict) or "finding" not in entry:
+        return
+
+    raw = entry["finding"]
+    if not isinstance(raw, str) or not raw.strip():
+        report.findings.append(
+            LintFinding(
+                kind="unknown-provenance-finding",
+                severity=Severity.WARNING,
+                path=page.rel_path,
+                message=(
+                    f"provenance finding must be a string, got {raw!r}. "
+                    f"Expected one of {sorted(PROVENANCE_FINDINGS)}."
+                ),
+            )
+        )
+        return
+
+    finding = raw.strip()
+    if finding not in PROVENANCE_FINDINGS:
+        report.findings.append(
+            LintFinding(
+                kind="unknown-provenance-finding",
+                severity=Severity.WARNING,
+                path=page.rel_path,
+                message=(
+                    f"provenance finding {finding!r} is not one of "
+                    f"{sorted(PROVENANCE_FINDINGS)}. An unrecognised value "
+                    "records nothing — the entry reads as an ordinary "
+                    "citation, which is the opposite of what a checked "
+                    "absence means."
+                ),
+            )
+        )
+        return
+
+    if provenance_ref(entry) is None:
+        report.findings.append(
+            LintFinding(
+                kind="finding-without-source",
+                severity=Severity.WARNING,
+                path=page.rel_path,
+                message=(
+                    f"provenance entry has finding {finding!r} but no "
+                    "`path:` — 'we checked and it was silent' needs to say "
+                    "*what* was checked. Without a source the entry is "
+                    "invisible to `outmem stale`, so it will never be "
+                    "re-checked when that source gets a new version."
+                ),
+            )
+        )
+
+
 def _check_provenance(
     pages: dict[str, _LoadedPage],
     *,
@@ -633,22 +698,7 @@ def _check_provenance(
     """Flag pages whose cited source files no longer exist."""
     for page in pages.values():
         for entry in page.provenance:
-            finding = provenance_finding(entry)
-            if finding is not None and finding not in PROVENANCE_FINDINGS:
-                report.findings.append(
-                    LintFinding(
-                        kind="unknown-provenance-finding",
-                        severity=Severity.WARNING,
-                        path=page.rel_path,
-                        message=(
-                            f"provenance finding {finding!r} is not one of "
-                            f"{sorted(PROVENANCE_FINDINGS)}. An unrecognised "
-                            "value records nothing — the entry reads as an "
-                            "ordinary citation, which is the opposite of what "
-                            "a checked absence means."
-                        ),
-                    )
-                )
+            _check_one_finding(entry, page=page, report=report)
             ref = provenance_ref(entry)
             if ref is None:
                 continue

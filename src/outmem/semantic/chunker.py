@@ -42,16 +42,24 @@ class Chunk:
     start_char: int  # offset of chunk start in the source body
     end_char: int  # offset of chunk end (exclusive)
     heading_path: tuple[str, ...] = ()
-    """ATX headings enclosing this chunk's start, outermost first.
+    """ATX headings enclosing this chunk's own content, outermost first.
 
     Carried for the embedder, not for storage: like the page header it
     is applied by :func:`with_header` at embed time, so
     ``Chunk.text`` stays contractually ``body[start_char:end_char]``.
 
-    Paragraph boundaries and section boundaries do not coincide, so a
-    chunk can straddle a heading. The path is taken at the chunk's
-    *start* — the section it is continuing — which is the one a reader
-    of that text would assume.
+    Taken at the first paragraph this chunk does *not* share with its
+    predecessor, not at ``start_char``. With the default
+    ``overlap_paragraphs=1`` those differ exactly when a chunk boundary
+    lands on a section boundary — the chunk then opens with the tail of
+    the previous section and is otherwise entirely about the next one.
+    Labelling it with the previous section is worse than labelling it
+    with nothing, because it pulls the chunk toward a topic it does not
+    discuss.
+
+    A chunk can still span several sections when they are short; the
+    path names the one it starts in. Naming all of them would render as
+    ``A > B``, which reads as nesting when they are siblings.
     """
 
     @property
@@ -129,13 +137,19 @@ def chunk_text(
         chunk_start = paragraphs[group_indices[0]][0]
         chunk_end = paragraphs[last_idx][1]
         chunk_body = "\n\n".join(paragraphs[j][2] for j in group_indices)
+        # Which section this chunk is *about*, which is not always the one
+        # it starts in: `last_used_idx` is the previous chunk's last
+        # paragraph, so anything past it is content this chunk introduces.
+        # Reading the heading at `chunk_start` instead would label a chunk
+        # by the section its overlap paragraph trails out of.
+        own_start_idx = min(max(group_indices[0], last_used_idx + 1), last_idx)
         chunks.append(
             Chunk(
                 index=len(chunks),
                 text=chunk_body,
                 start_char=chunk_start,
                 end_char=chunk_end,
-                heading_path=heading_path_at(sections, chunk_start),
+                heading_path=heading_path_at(sections, paragraphs[own_start_idx][0]),
             )
         )
 

@@ -1325,6 +1325,26 @@ class TestEmbedHeadings:
         assert () in paths                                  # the preamble
         assert ("Diagnostik", "Blutkulturen") in paths      # nested, outermost first
 
+    def test_overlap_does_not_mislabel_the_next_section(self) -> None:
+        """The default is `overlap_paragraphs=1`, so a chunk opens with the
+        tail of the previous section whenever a boundary lands on a section
+        boundary. Reading the heading at `start_char` would label that
+        chunk with the section it is trailing out of — worse than no
+        heading, because it pulls the chunk toward a topic it never
+        discusses."""
+        from outmem.semantic.chunker import chunk_text
+
+        body = (
+            "## Sektion A\n" + "aaaa aaaa aaaa\n" * 3 + "\nletzter absatz A\n\n"
+            "## Sektion B\n" + "bbbb bbbb bbbb\n" * 3 + "\nmehr B inhalt\n"
+        )
+        for overlap in (0, 1, 2):
+            for chunk in chunk_text(body, chunk_size=90, overlap_paragraphs=overlap):
+                dominant = "B" if chunk.text.count("bbbb") > chunk.text.count("aaaa") else "A"
+                assert chunk.heading_path == (f"Sektion {dominant}",), (
+                    overlap, chunk.heading_path, dominant
+                )
+
     def test_heading_path_is_not_stored_in_chunk_text(self) -> None:
         """`Chunk.text` is contractually `body[start_char:end_char]`; the
         path is applied at embed time only, like the page header."""
