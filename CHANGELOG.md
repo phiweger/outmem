@@ -3,7 +3,7 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
-## Unreleased
+## 0.13.0
 
 **Supersession stops depending on how you named the file.** Reported
 from a ~1170-source clinical wiki. `document_key` links a revision to
