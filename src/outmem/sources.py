@@ -363,6 +363,34 @@ def sibling_form(document_key: str) -> str:
     return _DIGIT_RUN.sub("#", key)
 
 
+def candidate_key_or_none(rel_path: str, sha256: str) -> str | None:
+    """:func:`candidate_document_key`, for callers sweeping every row.
+
+    A file named only for its type (``.md.md``, ``" .md"``) has an
+    allowed suffix, so it ingests fine with an explicit ``--as`` — and
+    its path then implies no usable identity, which
+    :func:`candidate_document_key` reports by raising. That is right for
+    a single ingest, where the operator is standing there. It is wrong
+    for a pass over the whole registry: one such row took down the
+    entire ``outmem lint`` run, not just the check that met it, on a
+    wiki that had done nothing wrong.
+    """
+    try:
+        return candidate_document_key(rel_path, sha256)
+    except OutmemError:
+        return None
+
+
+def derives_its_own_key(entry: SourceEntry) -> bool:
+    """Whether ``entry`` holds exactly the identity its path implies.
+
+    The filter for anything that second-guesses an identity: a declared
+    key (``--as``) is a statement about what a document is, where a
+    derived one is a guess outmem made from a filename.
+    """
+    return entry.document_key == candidate_key_or_none(entry.rel_path, entry.sha256)
+
+
 def candidate_document_key(rel_path: str, sha256: str) -> str:
     """The identity a row's path implies — the rule, in one place.
 
@@ -669,24 +697,6 @@ class SourceRegistry:
         new_rows = [] if new_key == old_key else self._snapshot_rows_with_key(new_key)
         return _plan_rekey(old_rows, new_rows, new_key)
 
-    def rekey_needed(self, plan: RekeyResult) -> bool:
-        """Whether applying ``plan`` would change anything.
-
-        A rekey that changes nothing must not be written: the registry is
-        a git-tracked binary, so committing an idempotent repair would
-        add a full blob to history on every run. Checked against the
-        snapshot, which is why the caller doing it is advisory — the
-        write path is still safe to run when this returns False.
-        """
-        expected = dict(plan.edges)
-        for rel_path in plan.chain:
-            entry = self.entries.get(rel_path)
-            if entry is None or entry.document_key != plan.document_key:
-                return True
-            if entry.superseded_by != expected.get(rel_path):
-                return True
-        return False
-
     def rekey(self, old_key: str, new_key: str | None = None) -> RekeyResult:
         """Move a *document* to another identity, and rebuild its chain.
 
@@ -712,7 +722,18 @@ class SourceRegistry:
 
         Nothing is deleted, so ingestion history and recorded page
         references survive. Returns the same :class:`RekeyResult` shape
-        :meth:`plan_rekey` previews.
+        :meth:`plan_rekey` previews, with ``applied`` saying whether
+        anything was actually written — a rekey that would change
+        nothing writes nothing, because the registry is a git-tracked
+        binary and an idempotent repair would otherwise add a full blob
+        to history on every run.
+
+        That decision is made in here, against the rows this transaction
+        read, rather than by the caller against its snapshot: the
+        snapshot was taken when the process opened the registry, and a
+        concurrent ``outmem ingest`` since then would make "already
+        correct" a stale answer and silently skip a write that was
+        needed.
         """
         old_key = normalize_document_key(old_key)
         new_key = old_key if new_key is None else normalize_document_key(new_key)
@@ -725,6 +746,9 @@ class SourceRegistry:
             new_rows = [] if new_key == old_key else self._rows_with_key(con, new_key)
             plan = _plan_rekey(old_rows, new_rows, new_key)
             self._refuse_foreign_edges(con, plan.chain)
+            if _already_chained(plan, [*old_rows, *new_rows]):
+                con.rollback()
+                return plan
             if new_key != old_key:
                 con.execute(
                     "UPDATE sources SET document_key = ? WHERE document_key = ?",
@@ -1337,7 +1361,7 @@ def find_unchained_versions(registry: SourceRegistry) -> list[UnchainedVersions]
         # a re-lint then surfaces any sibling it was hiding.
         if len(by_key[entry.document_key or ""]) > 1:
             continue
-        if entry.document_key != candidate_document_key(entry.rel_path, entry.sha256):
+        if not derives_its_own_key(entry):
             continue
         by_form.setdefault(sibling_form(entry.document_key or ""), []).append(entry)
     groups += [
@@ -1398,6 +1422,16 @@ class RekeyResult:
     def edges(self) -> tuple[tuple[str, str], ...]:
         """``(superseded, successor)`` pairs the chain implies."""
         return tuple(pairwise(self.chain))
+
+
+def _already_chained(plan: RekeyResult, rows: list[SourceEntry]) -> bool:
+    """Whether ``rows`` already read exactly as ``plan`` would leave them."""
+    expected = dict(plan.edges)
+    return all(
+        entry.document_key == plan.document_key
+        and entry.superseded_by == expected.get(entry.rel_path)
+        for entry in rows
+    )
 
 
 def _version_sort(entry: SourceEntry) -> tuple[object, ...]:
@@ -1539,9 +1573,13 @@ def propose_document_keys(
         if entry.document_key is not None:
             claimed.setdefault(entry.document_key, []).append(entry.rel_path)
             continue
-        groups.setdefault(
-            candidate_document_key(entry.rel_path, entry.sha256), []
-        ).append(entry.rel_path)
+        # A row whose path implies no usable identity has nothing to
+        # propose; skipping leaves it keyless, which is what it already
+        # is. Raising here took `outmem sources backfill` down with it.
+        candidate = candidate_key_or_none(entry.rel_path, entry.sha256)
+        if candidate is None:
+            continue
+        groups.setdefault(candidate, []).append(entry.rel_path)
     return [
         KeyCandidate(
             document_key=key,

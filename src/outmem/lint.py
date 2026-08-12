@@ -539,8 +539,10 @@ def _unchained_versions_message(group: UnchainedVersions) -> str:
             "ingest time"
         )
     newest = group.entries[-1].document_key
-    others = " ".join(
-        f"`outmem sources rekey {e.document_key} --to {newest}`"
+    # One per line: a corpus routinely has three or more editions, and
+    # run together they read as a single command with stray arguments.
+    merge = "\n".join(
+        f"       outmem sources rekey {e.document_key} --to {newest}"
         for e in group.entries[:-1]
     )
     return (
@@ -548,7 +550,7 @@ def _unchained_versions_message(group: UnchainedVersions) -> str:
         "editions of one document — but nothing links them, and a page "
         "citing the older one will never be reported stale:\n"
         f"{listing}\n"
-        f"  -> if they are one document: {others}\n"
+        f"  -> if they are one document, merge them onto the newest:\n{merge}\n"
         "  -> if they are different documents: rekey one to a name that "
         "distinguishes it, which also stops this warning (a declared "
         "identity is never second-guessed)"

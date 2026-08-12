@@ -1321,7 +1321,9 @@ class WikiStore:
                             else rel_path,
                             current=current,
                             document_key=entry.document_key or "",
-                            finding=annotation.finding if annotation else None,
+                            finding=(
+                                annotation.finding if annotation is not None else None
+                            ),
                             current_exists=current in registry.entries,
                             acknowledged=acknowledged,
                         )
@@ -1402,11 +1404,10 @@ class WikiStore:
         """
         tree = self._tree_for_document(old_key, local=local)
         registry = _sources.get_registry(self, tree)
-        plan = registry.plan_rekey(old_key, new_key)
-        if dry_run or not registry.rekey_needed(plan):
-            return plan
+        if dry_run:
+            return registry.plan_rekey(old_key, new_key)
         written = registry.rekey(old_key, new_key)
-        if tree.tracked:
+        if written.applied and tree.tracked:
             # A local rekey has nothing to commit — that registry lives
             # inside the gitignored tree, like the sources it indexes.
             self.commit_registry(

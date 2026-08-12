@@ -19,6 +19,7 @@ import pytest
 from outmem.lint import Severity, lint_wiki
 from outmem.sources import (
     SourceRegistry,
+    derives_its_own_key,
     find_unchained_versions,
     sibling_form,
     version_order,
@@ -182,6 +183,67 @@ class TestFindUnchainedVersions:
         assert group.keys == ["guidelines/eucast"]
 
 
+class TestARowWhosePathImpliesNoIdentity:
+    """A file named only for its type — ``.md.md``, ``" .md"``.
+
+    ``Path(".md.md").suffix`` is ``.md``, so it passes the extension
+    check and ingests fine with an explicit ``--as``. Its path then
+    implies no usable identity, and asking for one raises. That is right
+    for a single ingest, where the operator is standing there; a sweep
+    over the whole registry has to survive it, because taking down the
+    entire lint run over one such row punishes a wiki that did nothing
+    wrong.
+    """
+
+    @pytest.mark.parametrize("name", [".md.md", " .md"])
+    def test_lint_survives_it(self, tmp_path: Path, name: str) -> None:
+        store = _wiki(tmp_path)
+        src = tmp_path / name
+        src.write_text("x\n", encoding="utf-8")
+        store.add_source(src, as_key="doc/explicitly-named")
+        report = lint_wiki(store.wiki_path, sources_dir=store.sources_path)
+        assert not any(f.kind == "unlinked-source-versions" for f in report.findings)
+
+    def test_backfill_survives_it(self, tmp_path: Path) -> None:
+        """Same row reached by the other sweep — `outmem sources
+        backfill` proposes identities for keyless rows, and a v0.6 wiki
+        holding one of these went down the same way."""
+        import sqlite3
+
+        from outmem.sources import REGISTRY_FILENAME
+
+        store = _wiki(tmp_path)
+        src = tmp_path / ".md.md"
+        src.write_text("x\n", encoding="utf-8")
+        entry = store.add_source(src, as_key="doc/explicitly-named")
+        con = sqlite3.connect(store.sources_path / REGISTRY_FILENAME)
+        with con:
+            con.execute(
+                "UPDATE sources SET document_key = NULL WHERE rel_path = ?",
+                (entry.rel_path,),
+            )
+        con.close()
+        store._source_registry = None
+        candidates, _failures = store.propose_document_keys()
+        # It has nothing to propose, so it is simply absent — it stays
+        # keyless, which is what it already was.
+        assert all(entry.rel_path not in c.rows for c in candidates)
+
+    def test_it_is_not_treated_as_deriving_its_own_key(
+        self, tmp_path: Path
+    ) -> None:
+        store = _wiki(tmp_path)
+        src = tmp_path / ".md.md"
+        src.write_text("x\n", encoding="utf-8")
+        store.add_source(src, as_key="doc/explicitly-named")
+        (entry,) = [
+            e
+            for e in SourceRegistry.load(store.sources_path).entries.values()
+            if e.rel_path.endswith(".md.md")
+        ]
+        assert not derives_its_own_key(entry)
+
+
 class TestLint:
     def _report(self, store: WikiStore):
         return lint_wiki(
@@ -207,6 +269,27 @@ class TestLint:
         )
         # Different documents -> rename one, which also silences this.
         assert "distinguishes it" in finding.message
+
+    def test_each_merge_command_gets_its_own_line(self, tmp_path: Path) -> None:
+        """Three editions is the normal shape, and run together the
+        commands read as one command with stray arguments."""
+        store = _wiki(tmp_path)
+        for year in (2024, 2025, 2026):
+            _ingest(store, tmp_path, f"eucast-{year}.md")
+        (finding,) = [
+            f
+            for f in self._report(store).findings
+            if f.kind == "unlinked-source-versions"
+        ]
+        commands = [
+            line.strip()
+            for line in finding.message.splitlines()
+            if line.strip().startswith("outmem sources rekey")
+        ]
+        assert commands == [
+            "outmem sources rekey guidelines/eucast-2024 --to guidelines/eucast-2026",
+            "outmem sources rekey guidelines/eucast-2025 --to guidelines/eucast-2026",
+        ]
 
     def test_the_message_carries_the_ingest_origins(self, tmp_path: Path) -> None:
         """The evidence that settles it: two rows from

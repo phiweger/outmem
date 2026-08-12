@@ -71,6 +71,14 @@ the failure was entirely an absence.
 
 ### Fixed
 
+- **`outmem sources backfill` no longer dies on a source named only for
+  its type.** `Path(".md.md").suffix` is `.md`, so such a file passes the
+  extension check and ingests fine with an explicit `--as` — and its
+  path then implies no usable identity, which the derivation reports by
+  raising. Correct for a single ingest, where the operator is standing
+  there; fatal for a pass over the whole registry, where one such row
+  took the entire command down. Sweeps now skip it (it has nothing to
+  propose and stays keyless, which is what it already was).
 - **A read-only store no longer reaches the bare `SourceRegistry`
   constructor.** `SourceRegistry.empty()` names the deliberate
   no-database case, so the one legitimate caller says what it means.
