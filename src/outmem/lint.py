@@ -52,7 +52,13 @@ from outmem.slug import (
     extract_wikilinks,
     relpath_to_slug,
 )
-from outmem.sources import PROVENANCE_FINDINGS, SOURCES_DIR, SOURCES_LOCAL_DIR
+from outmem.sources import (
+    PROVENANCE_FINDINGS,
+    SOURCES_DIR,
+    SOURCES_LOCAL_DIR,
+    UnchainedVersions,
+    find_unchained_versions,
+)
 
 
 class Severity(StrEnum):
@@ -152,6 +158,7 @@ def lint_wiki(
         report=report,
     )
     _check_sources_registry(sources_dir, report)
+    _check_unlinked_source_versions(sources_dir, sources_local_dir, report)
     _check_source_slug_coupling(pages, sources_dir, report)
     _check_orphans(pages, log_dir=log_dir, report=report)
     _check_index_drift(wiki_dir, pages_dir, report)
@@ -461,6 +468,87 @@ def _check_wikilinks(
                         message=f"[[{target}]] refers to a page that does not exist",
                     )
                 )
+
+
+def _check_unlinked_source_versions(
+    sources_dir: Path | None,
+    sources_local_dir: Path | None,
+    report: LintReport,
+) -> None:
+    """Live rows that look like versions of one document but aren't chained.
+
+    The defect supersession was built to remove, reappearing one level
+    up. ``document_key`` links a revision to what it replaces — but a
+    source ingested without ``--as`` has its identity *derived* from its
+    filename, and the year is usually in the filename. So the 2024 and
+    2026 editions of one guideline become two documents, no edge is
+    written, and ``outmem stale`` never reports the page compacted from
+    the older one. Nothing is wrong in the registry; the failure is
+    entirely an absence.
+
+    Both trees, each on its own: a tracked and a local source can hold
+    the same key without being related, and supersession cannot span two
+    registries anyway.
+    """
+    from outmem.sources import SourceRegistry
+
+    for tree in (sources_dir, sources_local_dir):
+        if tree is None or not tree.is_dir():
+            continue
+        for group in find_unchained_versions(SourceRegistry.load(tree)):
+            report.findings.append(
+                LintFinding(
+                    kind="multiple-live-versions"
+                    if group.shares_one_key
+                    else "unlinked-source-versions",
+                    severity=Severity.WARNING,
+                    path=f"{tree.name}/{group.entries[0].rel_path}",
+                    message=_unlinked_versions_message(group),
+                )
+            )
+
+
+def _unlinked_versions_message(group: UnchainedVersions) -> str:
+    """Name the rows, then both ways out.
+
+    Two derived keys resembling each other is a judgement outmem cannot
+    make — "next edition of that" and "different document, similar name"
+    look identical from the path. So the message carries the evidence
+    (the ingest origins, which is where the distinguishing part of a
+    pipeline path survives) and names the remedy for *either* answer,
+    the same shape ``add_source``'s ambiguity refusal already uses.
+    Naming only the merge would turn every legitimately-numbered pair
+    into a warning with no way to reach zero.
+    """
+    rows = []
+    for entry in group.entries:
+        origin = f"\n      from {entry.origin_path}" if entry.origin_path else ""
+        rows.append(f"    {entry.document_key}\n      {entry.rel_path}{origin}")
+    listing = "\n".join(rows)
+    if group.shares_one_key:
+        return (
+            f"{len(group.entries)} sources share the identity "
+            f"{group.keys[0]!r} with nothing linking them, so all of them "
+            "read as current and `outmem stale` reports none:\n"
+            f"{listing}\n"
+            f"  -> `outmem sources rekey {group.keys[0]}` chains them by "
+            "ingest time"
+        )
+    newest = group.entries[-1].document_key
+    others = " ".join(
+        f"`outmem sources rekey {e.document_key} --to {newest}`"
+        for e in group.entries[:-1]
+    )
+    return (
+        "these identities differ only in a number, so they look like "
+        "editions of one document — but nothing links them, and a page "
+        "citing the older one will never be reported stale:\n"
+        f"{listing}\n"
+        f"  -> if they are one document: {others}\n"
+        "  -> if they are different documents: rekey one to a name that "
+        "distinguishes it, which also stops this warning (a declared "
+        "identity is never second-guessed)"
+    )
 
 
 def _check_sources_registry(

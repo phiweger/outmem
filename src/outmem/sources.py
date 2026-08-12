@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import sqlite3
 from collections.abc import Iterable
@@ -284,6 +285,82 @@ def derive_document_key(rel_path: str, sha256: str) -> str | None:
     if len(parts) >= 2 and parts[-2] == sha256[:SHA_PREFIX_LEN]:
         return normalize_document_key("/".join([*parts[:-2], parts[-1]]))
     return None
+
+
+NORMALIZED_EXTENSIONS = ALLOWED_EXTENSIONS | frozenset(
+    {
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".htm", ".html", ".rtf", ".odt", ".epub",
+    }
+)
+"""Extensions :func:`sibling_form` ignores when comparing two keys.
+
+Deliberately wider than :data:`ALLOWED_EXTENSIONS`, which says what
+outmem will *ingest*. A guideline corpus is mostly PDFs converted to
+text, so ``handbook.pdf`` and ``handbook.docx`` are one document that
+changed format — but only ingestable extensions are stripped from a real
+key, so the two hold different identities.
+
+Widening the *derivation* instead was the obvious fix and is the wrong
+one: dropping an extension makes collisions more likely, and a collision
+at ingest is a refusal. A corpus that renders one edition as both
+spreadsheet and PDF would start having its ingests rejected. Comparing
+in this form and letting `outmem sources rekey` merge keeps the failure
+where it belongs — a report, not a blocked pipeline.
+"""
+
+_DIGIT_RUN = re.compile(r"(\d+)")
+
+
+def version_order(document_key: str | None) -> tuple[object, ...]:
+    """Sort key for an identity, with digit runs compared as numbers.
+
+    The tie-break when ``registered_at`` cannot order two versions —
+    which a bulk ingest guarantees, since the column is stored to the
+    second. The edition marker is in the key (``…-2024`` / ``…-2026``),
+    so reading it is a far better guess than falling through to
+    ``rel_path``, whose leading segment is a content hash and therefore
+    orders editions at random.
+
+    Numeric rather than lexicographic because ``v10`` follows ``v9``.
+    ``re.split`` on a captured group alternates literal/number starting
+    with a literal, so the same tuple position always holds the same
+    type and the comparison never mixes ``int`` with ``str``.
+    """
+    if not document_key:
+        return ()
+    return tuple(
+        int(part) if index % 2 else part
+        for index, part in enumerate(_DIGIT_RUN.split(document_key))
+    )
+
+
+def sibling_form(document_key: str) -> str:
+    """A comparison form for spotting two keys that name one document.
+
+    Digit runs collapse to ``#`` and a document extension is dropped, so
+    ``guidelines/eucast-2024`` and ``guidelines/eucast-2026`` land on one
+    form, as do ``handbook.pdf`` and ``handbook.docx``. Two editions
+    ingested without ``--as`` derive exactly that pair of keys and hold
+    no supersession edge between them.
+
+    Never stored, never an identity, and only ever compared against
+    another key's form — a form is lossy on purpose, and writing one to
+    the registry would merge documents rather than report them.
+
+    Only meaningful for keys outmem *derived* from a path, which is the
+    filter every caller applies. A declared key is a statement, and two
+    statements that happen to differ in a digit are two documents: the
+    reason ``doi/10.1001-jama-2026`` and ``doi/10.1001-jama-2027`` are
+    not reported as versions of each other.
+    """
+    key = document_key
+    while True:
+        head, dot, ext = key.rpartition(".")
+        if not (head and dot and f".{ext.lower()}" in NORMALIZED_EXTENSIONS):
+            break
+        key = head
+    return _DIGIT_RUN.sub("#", key)
 
 
 def candidate_document_key(rel_path: str, sha256: str) -> str:
@@ -1190,6 +1267,88 @@ def gc_registry(sources_dir: Path, *, dry_run: bool = True) -> RegistryAudit:
 
 
 @dataclass(frozen=True)
+class UnchainedVersions:
+    """Live rows that belong to one document without being chained to it.
+
+    "Live" is the whole test. Two editions properly chained leave one
+    un-superseded row and are not reported; two that hold no edge between
+    them leave two, and ``outmem stale`` is silent about both.
+    """
+
+    entries: list[SourceEntry]
+
+    @property
+    def keys(self) -> list[str]:
+        """The distinct identities in this group, oldest row first."""
+        seen: list[str] = []
+        for entry in self.entries:
+            if entry.document_key and entry.document_key not in seen:
+                seen.append(entry.document_key)
+        return seen
+
+    @property
+    def shares_one_key(self) -> bool:
+        """All rows already hold the same identity — only the edges are missing.
+
+        A different defect from two keys that merely *resemble* each
+        other: the registry is asserting these are one document while
+        leaving several of them current, which its own write paths refuse
+        to do. It needs no judgement to fix — just the chain.
+        """
+        return len(self.keys) == 1
+
+
+def find_unchained_versions(registry: SourceRegistry) -> list[UnchainedVersions]:
+    """Live rows that should be one chain and are not.
+
+    Two defects, found in one pass because both are cured by
+    :meth:`SourceRegistry.rekey` and neither is visible any other way.
+
+    **One identity, several live rows.** A broken invariant — ``register``
+    and ``adopt_document_key`` both refuse to create it — so this half is
+    exact, needs no heuristic, and applies to *declared* identities as
+    much as derived ones. Reachable by editing ``.sources.db`` out of
+    band, which is exactly what an operator does when outmem's own API
+    refuses the relabel they want.
+
+    **Identities that differ only in a number.** A guess, and restricted
+    to keys outmem *derived* from a path. A declared key (``--as``) is a
+    statement about what a document is; second-guessing it would report
+    every deliberately-numbered pair — every DOI, every register number —
+    forever, and a check that cannot reach zero gets silenced wholesale.
+    """
+    live = [
+        entry
+        for entry in registry.entries.values()
+        if entry.superseded_by is None and entry.document_key
+    ]
+    by_key: dict[str, list[SourceEntry]] = {}
+    for entry in live:
+        by_key.setdefault(entry.document_key or "", []).append(entry)
+    groups = [
+        UnchainedVersions(sorted(rows, key=_version_sort))
+        for _key, rows in sorted(by_key.items())
+        if len(rows) > 1
+    ]
+
+    by_form: dict[str, list[SourceEntry]] = {}
+    for entry in live:
+        # Already reported above as a broken invariant. That comes first;
+        # a re-lint then surfaces any sibling it was hiding.
+        if len(by_key[entry.document_key or ""]) > 1:
+            continue
+        if entry.document_key != candidate_document_key(entry.rel_path, entry.sha256):
+            continue
+        by_form.setdefault(sibling_form(entry.document_key or ""), []).append(entry)
+    groups += [
+        UnchainedVersions(sorted(rows, key=_version_sort))
+        for _form, rows in sorted(by_form.items())
+        if len({r.document_key for r in rows}) > 1
+    ]
+    return groups
+
+
+@dataclass(frozen=True)
 class RekeyResult:
     """What a :meth:`SourceRegistry.rekey` did, or would do."""
 
@@ -1222,17 +1381,27 @@ class RekeyResult:
 
     ``registered_at`` is stored to the second, so a bulk ingest can
     register two editions with identical timestamps — and then nothing
-    in the registry says which is newer. The chain still orders them
-    (by ``rel_path``, so the preview and the write agree), but that
-    order is arbitrary, and it decides which version ``outmem stale``
-    calls current. Named here so the caller can say so out loud rather
-    than present a coin flip as a fact.
+    in the registry *records* which is newer. The chain falls back to
+    :func:`version_order`, which reads the edition marker out of the key
+    and is usually right; ``rel_path`` breaks any remaining tie so the
+    preview and the write agree. Right or not, it decides which version
+    ``outmem stale`` calls current, so it is named here rather than
+    presented as a fact.
     """
 
     @property
     def edges(self) -> tuple[tuple[str, str], ...]:
         """``(superseded, successor)`` pairs the chain implies."""
         return tuple(pairwise(self.chain))
+
+
+def _version_sort(entry: SourceEntry) -> tuple[object, ...]:
+    """Oldest version first: ingest time, then the key, then the path.
+
+    ``rel_path`` last and only as a determinism backstop — it starts with
+    a content hash, so letting it decide would order editions at random.
+    """
+    return (entry.registered_at, version_order(entry.document_key), entry.rel_path)
 
 
 def _no_such_document(document_key: str) -> OutmemError:
@@ -1259,7 +1428,7 @@ def _plan_rekey(
     loss — and it is what lets a merge interleave two chains instead of
     concatenating them.
     """
-    union = sorted([*old_rows, *new_rows], key=lambda e: (e.registered_at, e.rel_path))
+    union = sorted([*old_rows, *new_rows], key=_version_sort)
     return RekeyResult(
         document_key=new_key,
         moved=tuple(e.rel_path for e in old_rows),
