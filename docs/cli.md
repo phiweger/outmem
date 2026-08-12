@@ -264,6 +264,55 @@ doing it silently in a migration would be worse. An identity set explicitly with
 To resolve an ambiguous group, re-ingest each file with `--as`. The bytes are
 already registered, so this only sets the identity — nothing is copied twice.
 
+### Rekeying: two derived names that turn out to be one document
+
+```bash
+outmem sources rekey guidelines/eucast-2024 --to guidelines/eucast-2026
+outmem sources rekey guidelines/eucast-2024 --to guidelines/eucast-2026 --apply
+```
+
+`backfill` handles rows with *no* identity. This handles rows that have one and
+need a different one — which is the common case after a bulk ingest, because a
+source registered without `--as` takes its identity from its filename and the
+edition marker is usually in the filename. `eucast-2024.md` and `eucast-2026.md`
+become two unrelated documents, no supersession edge is written, and the page
+compacted from the 2024 edition is never reported stale.
+
+`outmem lint` finds these for you as `unlinked-source-versions`. The remedy is
+in the finding, and pointed the right way round — the older key merges onto the
+newer one, so the newest edition ends up current.
+
+Rekey moves **every** row holding the key, so a chain is never split in half.
+When the target identity is already held the two are **merged**, and the
+supersession edges are rewritten across the result in ingest order — that half
+is the point. Relabelling alone leaves two rows live under one identity, where
+outmem silently treats the newer as current and `outmem stale` still reports
+nothing: the same silence, one step further in.
+
+```
+guidelines/eucast-2026  (1 row(s) move onto 1 already holding this identity)
+
+  guidelines/6d90e4abf146/eucast-2024.md
+  guidelines/ec46d06012cc/eucast-2026.md  (current)
+
+(dry run — re-run with --apply to write)
+```
+
+Omit `--to` to rebuild the chain under the key it already has. That is the
+repair for a registry edited out of band — `outmem lint` reports that state as
+`multiple-live-versions`.
+
+Nothing is deleted, so ingestion history and recorded page references survive.
+(`outmem sources gc` plus a re-ingest would have taken both with it: they
+cascade.) Ingest timestamps are stored to the second, so a bulk ingest can
+register two editions with the same one — the dry run marks any pair it could
+not order by time and says so, because that order decides which version counts
+as current.
+
+Once a document has been rekeyed, ingest its next edition with
+`--as guidelines/eucast-2026` and supersession links on its own. The repair is
+one-time per document.
+
 <a id="staleness"></a>
 ## Staleness — pages citing a superseded source
 
@@ -301,6 +350,39 @@ It **reports only** — deciding whether a page still stands is a judgement call
 and on clinical content that belongs to a human (or to an explicit agent run
 over this list), not to a side effect of ingest. Wire it into CI as a warning
 gate, or run it after a batch re-ingest.
+
+`--json` prints the same thing machine-readably, with the unreadable pages in
+the payload rather than on stderr — a consumer needs to know the check could
+not run on a page.
+
+### `superseded_ok:` — citing an old version on purpose
+
+Some pages cite an old version deliberately. A page that *compares* two editions
+has to name both, and reporting it forever teaches the reader to skip the
+report. Say so in the citation:
+
+```yaml
+provenance:
+  - path: sources/guidelines/64209e221be1/eucast-2024.md
+    superseded_ok: "page contrasts the 2024 and 2026 tables"
+    date: 2026-08-12
+```
+
+The row drops out of the default report; `outmem stale --all` shows it with its
+reason, and the default output still counts what it hid.
+
+**The acknowledgement expires by itself.** It holds only while the version it
+was made against is still current: the `date:` must be on or after the day the
+current version was registered. When a 2027 edition lands, that date falls
+behind and the row is reported again. "We deliberately cite 2024 while 2026
+exists" is a statement about those two editions and says nothing about the third
+— and a permanent suppression would restore exactly the silent staleness this
+command exists to break, only now with a human signature on it.
+
+That is what makes `date:` required rather than decorative. Without one there is
+nothing to compare, so nothing is suppressed and `outmem lint` says why
+(`invalid-supersession-ack`) — an acknowledgement that quietly did nothing is
+indistinguishable from one that worked, and the author has stopped looking.
 
 ## Import (existing markdown vault)
 

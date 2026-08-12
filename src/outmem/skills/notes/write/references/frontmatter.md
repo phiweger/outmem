@@ -82,6 +82,30 @@ is precisely where a previously-missing answer would appear.
 otherwise — an unrecognised value records nothing). `scope`, `note` and
 `date` are free-form.
 
+### `superseded_ok:` — when you cite an old version on purpose
+
+A page that *compares* two editions has to name both, so `outmem stale`
+reporting it forever just teaches the reader to skip the report. Say why
+instead:
+
+```yaml
+provenance:
+  - path: sources/guidelines/64209e221be1/eucast-2024.md
+    superseded_ok: "page contrasts the 2024 and 2026 tables"
+    date: 2026-08-12
+```
+
+`date:` is **required here and load-bearing**, unlike on `finding:`. The
+acknowledgement holds only while the version it was made against is
+still current — it must be dated on or after the day that version was
+registered. When a newer edition lands, the date falls behind and the
+row is reported again, which is the point: "we deliberately cite 2024
+while 2026 exists" says nothing about 2027.
+
+Without a usable date nothing is suppressed and `outmem lint` says so.
+Do not use this to quiet a page you simply have not re-checked — that is
+what the report is for.
+
 **Also give it a heading.** The frontmatter is metadata; search matches
 body text. State the absence in a section whose heading names the
 question:

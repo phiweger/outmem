@@ -29,6 +29,7 @@ feed straight into CI.
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -776,6 +777,53 @@ def _check_one_finding(
         )
 
 
+def _check_one_ack(entry: Any, *, page: _LoadedPage, report: LintReport) -> None:
+    """Validate a ``superseded_ok:`` on one provenance entry.
+
+    Same failure in every branch as :func:`_check_one_finding`: the
+    author believes they have recorded a decision, and outmem reads
+    nothing. Here that cuts the dangerous way — the author expects
+    ``outmem stale`` to stop reporting the row, so they stop looking at
+    it, and an acknowledgement that never took effect is indistinguishable
+    from one that did.
+    """
+    if not isinstance(entry, dict) or "superseded_ok" not in entry:
+        return
+
+    def warn(message: str) -> None:
+        report.findings.append(
+            LintFinding(
+                kind="invalid-supersession-ack",
+                severity=Severity.WARNING,
+                path=page.rel_path,
+                message=message,
+            )
+        )
+
+    raw = entry["superseded_ok"]
+    if not isinstance(raw, str) or not raw.strip():
+        warn(
+            f"`superseded_ok:` must say why, got {raw!r}. The reason is the "
+            "whole record — a bare flag says a human looked, which is what "
+            "the report already assumed."
+        )
+        return
+    annotation = provenance_annotation(entry)
+    if annotation.date is None:
+        warn(
+            "`superseded_ok:` needs a `date:` (YYYY-MM-DD) and this entry has "
+            f"{entry.get('date')!r}. An acknowledgement is scoped to the "
+            "version that was current when it was made, so without a date "
+            "there is nothing to compare and the row keeps being reported."
+        )
+        return
+    if provenance_ref(entry) is None:
+        warn(
+            "`superseded_ok:` on an entry with no `path:` — there is no "
+            "citation to acknowledge, so it suppresses nothing."
+        )
+
+
 def _check_provenance(
     pages: dict[str, _LoadedPage],
     *,
@@ -787,6 +835,7 @@ def _check_provenance(
     for page in pages.values():
         for entry in page.provenance:
             _check_one_finding(entry, page=page, report=report)
+            _check_one_ack(entry, page=page, report=report)
             ref = provenance_ref(entry)
             if ref is None:
                 continue
@@ -930,10 +979,80 @@ def provenance_finding(entry: Any) -> str | None:
     even when it is not in the vocabulary, so the linter can name the
     typo rather than treating an unrecognised value as no value.
     """
-    if isinstance(entry, dict):
-        finding = entry.get("finding")
-        if isinstance(finding, str) and finding.strip():
-            return finding.strip()
+    return provenance_annotation(entry).finding
+
+
+@dataclass(frozen=True)
+class ProvenanceAnnotation:
+    """The non-path fields on a provenance entry that outmem acts on.
+
+    ``scope`` and ``note`` are deliberately absent: they round-trip
+    verbatim and nothing reads them, so listing them here would suggest
+    otherwise.
+    """
+
+    finding: str | None = None
+    """See :data:`outmem.sources.PROVENANCE_FINDINGS`. Raw, so the
+    linter can name a typo instead of dropping it."""
+    superseded_ok: str | None = None
+    """Why citing a superseded version of this source is deliberate."""
+    date: dt.date | None = None
+    """When the entry was written, if it parses as a date.
+
+    Decoration on a ``finding:``, load-bearing on a ``superseded_ok:`` —
+    an acknowledgement is scoped to the version that was current when it
+    was made, and this is what says which one that was.
+    """
+
+    def __bool__(self) -> bool:
+        """Whether the entry records anything outmem acts on.
+
+        A bare ``date:`` is not an annotation — it decorates one. Asking
+        this rather than comparing against an empty instance keeps a
+        caller correct when a field is added.
+        """
+        return bool(self.finding or self.superseded_ok)
+
+
+def provenance_annotation(entry: Any) -> ProvenanceAnnotation:
+    """Read the fields outmem acts on off one provenance entry.
+
+    One walker for both ``finding:`` and ``superseded_ok:``. They are
+    read together (``outmem stale`` needs both for the same row) and
+    validated together, and two extractors over the same shape is how
+    the second one silently stops seeing an entry shape the first one
+    learned about.
+    """
+    if not isinstance(entry, dict):
+        return ProvenanceAnnotation()
+    return ProvenanceAnnotation(
+        finding=_nonempty_str(entry.get("finding")),
+        superseded_ok=_nonempty_str(entry.get("superseded_ok")),
+        date=_as_date(entry.get("date")),
+    )
+
+
+def _nonempty_str(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _as_date(value: Any) -> dt.date | None:
+    """``date:`` as a date, however YAML happened to type it.
+
+    PyYAML parses an unquoted ``2026-08-12`` into a ``datetime.date``
+    but leaves a quoted one a string, and the difference is invisible in
+    the file. Accepting both keeps a suppression from depending on
+    whether someone reached for quotes.
+    """
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if isinstance(value, str):
+        try:
+            return dt.date.fromisoformat(value.strip()[:10])
+        except ValueError:
+            return None
     return None
 
 

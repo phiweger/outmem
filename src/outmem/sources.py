@@ -1460,6 +1460,15 @@ class StaleCitation:
     specific version did *not* contain, so it expires with that version
     in a way a positive citation does not.
     """
+    acknowledged: str | None = None
+    """Why citing the superseded version is deliberate, if it is.
+
+    From the citation's ``superseded_ok:``, and only when that
+    acknowledgement still applies to the *current* head — see
+    :func:`outmem.store._acknowledgement`. Rows carrying it are left out
+    of the default report; a caller that asked for them can tell the two
+    apart by this field.
+    """
     current_exists: bool = True
     """Whether ``current`` is still a registered row.
 

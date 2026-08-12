@@ -182,6 +182,8 @@ What it buys you beyond documentation:
   version did not contain, so it expires with that version.
 - **`store.provenance_findings()`** returns `{(source, slug): finding}`
   if you want to act on them programmatically.
+  (`store.provenance_annotations()` is the same walk returning the whole
+  `ProvenanceAnnotation` — `finding`, `superseded_ok`, `date`.)
 
 **Make it retrievable by giving it a heading.** The field is metadata;
 what a semantic search matches is body text. Put the absence in a
@@ -214,7 +216,7 @@ citations, failures = store.source_citations()   # {source rel_path: [slug, …]
 
 stale, failures = store.stale_pages()
 for c in stale:
-    c.slug, c.cited, c.current, c.document_key, c.current_exists
+    c.slug, c.cited, c.current, c.document_key, c.current_exists, c.acknowledged
 
 # Re-compact against the new version — this is what clears the report.
 store.extend_page(c.slug, body=new_body, provenance=[f"sources/{c.current}"])
@@ -223,6 +225,11 @@ store.extend_page(c.slug, body=new_body, provenance=[f"sources/{c.current}"])
 `stale_pages()` follows the chain to the newest version and **reports only** —
 whether a page still holds is a judgement call for a human or an explicit agent
 run, not a side effect of ingest.
+
+Citations carrying `superseded_ok:` are omitted; pass
+`include_acknowledged=True` to see them, with the reason in `c.acknowledged`.
+The suppression is scoped to the version it was made against — see
+[`superseded_ok:`](cli.md#superseded_ok--citing-an-old-version-on-purpose).
 
 Both return the loader's `failures` alongside the result, per the shared loader
 contract: a page whose frontmatter will not parse is a page the check could not
@@ -267,6 +274,18 @@ for cand in candidates:
     cand.is_ambiguous   # several rows derive it, OR the name is already held
 
 store.assign_document_keys([(rel_path, key), …])   # returns the count written
+
+# Rows that already have an identity and need a different one. Moves every
+# row holding `old`, merges into `new` when that is held, and rewrites the
+# supersession chain across the result — relabelling alone would leave two
+# rows live under one identity and `stale` silent about both.
+plan = store.rekey_document("guidelines/eucast-2024", "guidelines/eucast-2026")
+plan.chain, plan.moved, plan.merged_with, plan.tied_order, plan.applied
+store.rekey_document("guidelines/eucast-2024", "guidelines/eucast-2026",
+                     dry_run=False)
+store.rekey_document("guidelines/eucast")          # rebuild the chain in place
+
+from outmem.sources import find_unchained_versions   # what `outmem lint` reports
 ```
 
 ## Renaming

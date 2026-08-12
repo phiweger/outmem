@@ -20,8 +20,10 @@ working directory. ``--root`` overrides per invocation.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -551,11 +553,37 @@ def cmd_rename(args: argparse.Namespace) -> int:
 
 def cmd_stale(args: argparse.Namespace) -> int:
     store = _open_store(args)
-    stale, failures = store.stale_pages()
+    # Always ask for everything and filter here: the count of suppressed
+    # rows is itself worth printing, and a report that silently omits
+    # them is the shape of problem this command exists to surface.
+    everything, failures = store.stale_pages(include_acknowledged=True)
+    acknowledged = [c for c in everything if c.acknowledged]
+    stale = everything if args.all else [c for c in everything if not c.acknowledged]
+    if args.json:
+        # Failures go in the payload rather than to stderr: a consumer
+        # parsing this needs to know the check could not run on a page,
+        # and a clean-looking list that silently skipped one is the
+        # failure `stale_pages` returns them to prevent.
+        print(
+            json.dumps(
+                {
+                    "stale": [asdict(c) for c in stale],
+                    "unreadable": [str(f.path) for f in failures],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1 if stale or failures else 0
     dropped = _report_dropped_pages([str(f.path) for f in failures])
+    suppressed = (
+        f" ({len(acknowledged)} acknowledged — `--all` to show)"
+        if acknowledged and not args.all
+        else ""
+    )
     if not stale:
         if not dropped:
-            _status("stale: no page cites a superseded source")
+            _status(f"stale: no page cites a superseded source{suppressed}")
         return dropped
     by_page: dict[str, list[Any]] = {}
     for c in stale:
@@ -571,12 +599,16 @@ def cmd_stale(args: argparse.Namespace) -> int:
             print(f"      cites   {c.cited}{marker}")
             missing = "" if c.current_exists else "  (no longer registered)"
             print(f"      current {c.current}{missing}")
+            if c.acknowledged:
+                print(f"      ok      {c.acknowledged}")
     print(
         "\nRead the diff between the cited and current version, then re-compact "
         "the page with `outmem extend <slug> --provenance sources/<current>` "
         "(which updates the citation, so the page stops being reported), or "
         "`outmem log` why it still holds."
     )
+    if suppressed:
+        print(f"\n{suppressed.strip()}")
     return dropped or 1
 
 
@@ -1340,6 +1372,19 @@ def build_parser() -> argparse.ArgumentParser:
         "stale",
         help="List pages citing a source version that has been superseded.",
         parents=[root_parent],
+    )
+    p_stale.add_argument(
+        "--all",
+        action="store_true",
+        help="Include citations marked `superseded_ok:` in the page's "
+        "provenance. They are hidden by default; the acknowledgement "
+        "expires on its own when a newer version is registered.",
+    )
+    p_stale.add_argument(
+        "--json",
+        action="store_true",
+        help="Machine-readable output, including the pages that could not "
+        "be read.",
     )
     p_stale.set_defaults(func=cmd_stale)
 

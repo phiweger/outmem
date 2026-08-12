@@ -65,6 +65,14 @@ contradicts something better-sourced, etc.) — pair it with a
   A page written with a vague or missing `provenance` is invisible to
   that check forever, which is the real cost of skipping the field.
   Cite the **exact** `rel_path` you read, never a prettified variant.
+- **Pass `as_key` for anything that gets reissued.** Without it the
+  identity is derived from the filename, and the edition marker is
+  usually *in* the filename — so `eucast-2024.md` and `eucast-2026.md`
+  become two unrelated documents with no edge between them, and the
+  check above stays silent. Use a name with no version in it
+  (`guidelines/eucast`, `awmf/043-044`). `outmem lint` reports pairs
+  that already went wrong as `unlinked-source-versions`, and
+  `outmem sources rekey` merges them.
 
 ## Two-source ingestion (worth showing once)
 

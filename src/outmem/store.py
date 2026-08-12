@@ -31,6 +31,7 @@ from outmem._time import ensure_utc, utc_now
 
 if TYPE_CHECKING:
     from outmem.index import PageLoadFailure
+    from outmem.lint import ProvenanceAnnotation
     from outmem.semantic import Match, ReindexResult, VectorStore
     from outmem.sources import KeyCandidate, RegistryAudit, RekeyResult, StaleCitation
 
@@ -103,6 +104,40 @@ from outmem.sources import (
 from outmem.state import LastRun, OutmemState
 
 log = logging.getLogger(__name__)
+
+
+def _acknowledgement(
+    annotation: ProvenanceAnnotation | None, head: SourceEntry | None
+) -> str | None:
+    """Why this stale citation is deliberate — if the ack still applies.
+
+    An acknowledgement is **scoped to the version it was made against**,
+    exactly as ``finding:`` is. "We deliberately cite the 2024 edition
+    while the 2026 one exists" is a statement about those two editions;
+    it says nothing about the 2027 one, and reading it as permanent
+    would restore the silent staleness the whole feature exists to
+    break — one level up, and harder to see, because now a human has
+    signed it.
+
+    So it holds only while the acknowledged head is still the head: the
+    ack must be dated on or after the day the current version was
+    registered. A newer edition moves that date past the ack and the row
+    is reported again. Compared as dates rather than instants so an ack
+    written the same day a version landed still counts, whatever hour
+    each happened.
+
+    Returns None when there is nothing to compare against — a missing
+    date (``outmem lint`` names it) or a head that is no longer
+    registered. Both are cases where suppressing would be a guess, and a
+    guess that hides a stale clinical page is the wrong way to be wrong.
+    """
+    if annotation is None or annotation.superseded_ok is None:
+        return None
+    if annotation.date is None or head is None:
+        return None
+    if annotation.date >= head.registered_at.date():
+        return annotation.superseded_ok
+    return None
 
 
 @dataclass(frozen=True)
@@ -1182,36 +1217,48 @@ class WikiStore:
                 out.setdefault(key, []).append(page.slug)
         return out, failures
 
-    def provenance_findings(self) -> dict[tuple[str, str], str]:
-        """``(source key, slug) -> finding`` for citations recording a check.
+    def provenance_annotations(self) -> dict[tuple[str, str], ProvenanceAnnotation]:
+        """``(source key, slug) -> annotation`` for citations carrying one.
 
-        A parallel lookup rather than a richer
-        :meth:`source_citations` return, because every existing caller of
-        that map wants "which pages cite this source" and would have to
-        learn a new shape to keep asking it.
+        A parallel lookup rather than a richer :meth:`source_citations`
+        return, because every existing caller of that map wants "which
+        pages cite this source" and would have to learn a new shape to
+        keep asking it.
 
-        See :data:`outmem.sources.PROVENANCE_FINDINGS`. Values are
-        returned as written, unrecognised ones included — ``outmem lint``
-        is where a typo gets named, and silently dropping it here would
-        make the lint warning describe something the rest of outmem
-        pretends it never saw.
+        Values are returned as written, unrecognised ones included —
+        ``outmem lint`` is where a typo gets named, and silently dropping
+        it here would make the lint warning describe something the rest
+        of outmem pretends it never saw.
         """
         from outmem.index import load_editorial_pages
-        from outmem.lint import provenance_finding, provenance_ref
+        from outmem.lint import provenance_annotation, provenance_ref
 
-        out: dict[tuple[str, str], str] = {}
+        out: dict[tuple[str, str], ProvenanceAnnotation] = {}
         pages, _failures = load_editorial_pages(self.pages_path)
         for page in pages:
             for entry in page.frontmatter.provenance:
-                finding = provenance_finding(entry)
+                annotation = provenance_annotation(entry)
                 ref = provenance_ref(entry)
-                if finding is None or ref is None:
+                if ref is None or not annotation:
                     continue
                 _tree, key = _sources.split_tree_prefix(self, ref)
-                out[(key, page.slug)] = finding
+                out[(key, page.slug)] = annotation
         return out
 
-    def stale_pages(self) -> tuple[list[StaleCitation], list[PageLoadFailure]]:
+    def provenance_findings(self) -> dict[tuple[str, str], str]:
+        """``(source key, slug) -> finding`` for citations recording a check.
+
+        See :data:`outmem.sources.PROVENANCE_FINDINGS`.
+        """
+        return {
+            key: annotation.finding
+            for key, annotation in self.provenance_annotations().items()
+            if annotation.finding is not None
+        }
+
+    def stale_pages(
+        self, *, include_acknowledged: bool = False
+    ) -> tuple[list[StaleCitation], list[PageLoadFailure]]:
         """Pages whose provenance cites a source version since superseded.
 
         The payoff of supersession: a source moving to v2 tells you exactly
@@ -1229,12 +1276,16 @@ class WikiStore:
         pages compacted from the old edition are just as stale — the
         report would be quietly half-blind if it only consulted the
         tracked registry.
+
+        A citation carrying ``superseded_ok:`` is omitted unless
+        ``include_acknowledged`` — see :func:`_acknowledgement` for why
+        that suppression expires rather than being permanent.
         """
         from outmem.sources import StaleCitation
 
         out: list[StaleCitation] = []
         failures: list[PageLoadFailure] = []
-        findings = self.provenance_findings()
+        annotations = self.provenance_annotations()
         for tree in _sources.existing_trees(self):
             registry = _sources.get_registry(self, tree)
             citations, tree_failures = self.source_citations(local=not tree.tracked)
@@ -1256,6 +1307,12 @@ class WikiStore:
                         break
                     current = nxt
                 for slug in sorted(slugs):
+                    annotation = annotations.get((rel_path, slug))
+                    acknowledged = _acknowledgement(
+                        annotation, registry.entries.get(current)
+                    )
+                    if acknowledged is not None and not include_acknowledged:
+                        continue
                     out.append(
                         StaleCitation(
                             slug=slug,
@@ -1264,8 +1321,9 @@ class WikiStore:
                             else rel_path,
                             current=current,
                             document_key=entry.document_key or "",
-                            finding=findings.get((rel_path, slug)),
+                            finding=annotation.finding if annotation else None,
                             current_exists=current in registry.entries,
+                            acknowledged=acknowledged,
                         )
                     )
         return sorted(out, key=lambda c: (c.slug, c.cited)), failures
