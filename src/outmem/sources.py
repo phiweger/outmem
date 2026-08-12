@@ -1355,7 +1355,12 @@ class RekeyResult:
     document_key: str
     """The identity every row in :attr:`chain` ends up holding."""
     moved: tuple[str, ...]
-    """rel_paths whose ``document_key`` changes (empty for a repair)."""
+    """rel_paths read out of the source identity — every row holding it.
+
+    Not "rows whose key changes": a chain repair (no target given) moves
+    a document onto itself, and the rows still count as the ones being
+    operated on. What changes is :attr:`chain`.
+    """
     merged_with: tuple[str, ...]
     """rel_paths that already held the target identity.
 

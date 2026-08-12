@@ -417,8 +417,21 @@ Static checks. **Errors:** broken wikilinks, malformed frontmatter, slug /
 filename mismatch, two pages claiming one slug. **Warnings:** orphans,
 stale provenance, provenance citing a sha256 the registry no longer holds,
 `.sources.db` disagreeing with disk in either direction, frontmatter that
-only parses after self-heal, and *dead slug mentions* — a slug written as
-prose (`Volltext-Digest: clinical:old-name`) that resolves to no page.
+only parses after self-heal, source versions that should be one chain and
+aren't (below), and *dead slug mentions* — a slug written as prose
+(`Volltext-Digest: clinical:old-name`) that resolves to no page.
+
+**Source versions that should be one chain.** `unlinked-source-versions`
+names derived identities differing only in a number — `eucast-2024` and
+`eucast-2026` are one document that nothing links, so a page citing the
+older is never reported stale. It carries the ingest origins as evidence,
+because "next edition of that" and "different document, similar name" look
+identical from the path; the remedy is named for either answer, and both
+clear the warning. Identities you set yourself with `--as` are never
+second-guessed. `multiple-live-versions` is the exact version of the same
+defect — one identity, several rows all reading as current, which outmem's
+own write paths refuse to create. Both are fixed by
+[`outmem sources rekey`](#rekeying-two-derived-names-that-turn-out-to-be-one-document).
 
 That last one matters because a broken-`[[link]]` check cannot see it:
 prose isn't a link, so nothing validates it, and dead references pile up

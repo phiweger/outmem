@@ -348,6 +348,46 @@ class TestRefusals:
             registry.adopt_document_key(old, "guidelines/something-else")
 
 
+class TestTheLocalTree:
+    """The recurring bug class here: code that opens "the" registry when
+    there are two. A licensed handbook gets revised editions exactly like
+    a tracked guideline does."""
+
+    def _local_wiki(self, tmp_path: Path) -> WikiStore:
+        store = WikiStore.init(tmp_path / "w")
+        for name in ("hb-2024.md", "hb-2026.md"):
+            src = tmp_path / name
+            src.write_text(f"licensed {name}\n", encoding="utf-8")
+            store.add_source(src, into_subdir="ref", local=True)
+        return store
+
+    def test_a_local_document_can_be_rekeyed(self, tmp_path: Path) -> None:
+        store = self._local_wiki(tmp_path)
+        result = store.rekey_document("ref/hb-2024", "ref/hb-2026", dry_run=False)
+        assert result.applied
+        registry = SourceRegistry.load(store.sources_local_path)
+        assert registry.entries[result.chain[0]].superseded_by == result.chain[1]
+
+    def test_a_local_rekey_commits_nothing(self, tmp_path: Path) -> None:
+        """That registry lives inside the gitignored tree, like the
+        sources it indexes."""
+        store = self._local_wiki(tmp_path)
+        head = store.head()
+        store.rekey_document("ref/hb-2024", "ref/hb-2026", dry_run=False)
+        assert store.head() == head
+
+    def test_asking_for_a_tree_that_does_not_exist_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Opening a registry creates its directory, and for the local
+        tree that would leave one without the .gitignore entry beside
+        it — the exact hole the split exists to close."""
+        store = WikiStore.init(tmp_path / "w")
+        with pytest.raises(OutmemError, match="no sources-local/ tree"):
+            store.rekey_document("ref/hb-2024", local=True)
+        assert not store.sources_local_path.exists()
+
+
 class TestCli:
     def test_dry_run_prints_the_chain_then_applies(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

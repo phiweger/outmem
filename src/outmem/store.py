@@ -1427,7 +1427,13 @@ class WikiStore:
         method inventing a second wording for the same miss.
         """
         if local is not None:
-            return _sources.local_tree(self) if local else _sources.tracked_tree(self)
+            tree = _sources.local_tree(self) if local else _sources.tracked_tree(self)
+            if not tree.path.is_dir():
+                # Opening a registry creates its directory, and for the
+                # local tree that would leave one without the .gitignore
+                # entry `ensure_sources_local` writes alongside it.
+                raise OutmemError(f"this wiki has no {tree.name}/ tree.")
+            return tree
         key = normalize_document_key(document_key)
         holders = [
             tree
@@ -1442,7 +1448,7 @@ class WikiStore:
                 f"{key!r} is held in both {holders[0].name}/ and "
                 f"{holders[1].name}/. Each tree carries its own registry, so "
                 "those are two different documents — pass local=True/False "
-                "(CLI: --local) to say which one you mean."
+                "(CLI: `--tree`) to say which one you mean."
             )
         return holders[0] if holders else _sources.tracked_tree(self)
 

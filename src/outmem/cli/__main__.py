@@ -568,13 +568,20 @@ def cmd_stale(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "stale": [asdict(c) for c in stale],
+                    # Counted even when the rows themselves are omitted:
+                    # a payload that just shows an empty list reads as
+                    # "nothing to do", which is the silence the whole
+                    # command exists to break.
+                    "acknowledged": len(acknowledged),
                     "unreadable": [str(f.path) for f in failures],
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
-        return 1 if stale or failures else 0
+        # Same codes as the text path: 2 for a page the check could not
+        # run on, 1 for a live report, 0 for clean.
+        return 2 if failures else (1 if stale else 0)
     dropped = _report_dropped_pages([str(f.path) for f in failures])
     suppressed = (
         f" ({len(acknowledged)} acknowledged — `--all` to show)"

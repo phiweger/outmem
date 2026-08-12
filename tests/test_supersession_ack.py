@@ -209,6 +209,20 @@ class TestCli:
         assert row["cited"] == v1
         assert row["acknowledged"] == "compares both editions"
 
+    def test_json_counts_what_it_hid(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Without `--all` the rows are omitted, and a payload showing a
+        bare empty list reads as 'nothing to do' — the silence this
+        command exists to break."""
+        store, _v1, _v2 = _wiki(tmp_path, ack="compares both editions")
+        store.close()
+        rc = main(["stale", "--json", "--root", str(tmp_path / "w")])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["stale"] == []
+        assert payload["acknowledged"] == 1
+        assert rc == 0
+
     def test_json_on_a_clean_wiki_exits_zero(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -217,4 +231,24 @@ class TestCli:
         store.close()
         rc = main(["stale", "--json", "--root", str(tmp_path / "w")])
         assert rc == 0
-        assert json.loads(capsys.readouterr().out) == {"stale": [], "unreadable": []}
+        assert json.loads(capsys.readouterr().out) == {
+            "stale": [],
+            "acknowledged": 0,
+            "unreadable": [],
+        }
+
+    def test_json_uses_the_same_exit_codes_as_the_text_report(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """2 means a page the check could not run on, in both modes. The
+        codes are documented, so a CI gate reading one and getting the
+        other silently changes meaning."""
+        store, _v1, _v2 = _wiki(tmp_path, ack=None)
+        (store.pages_path / "broken.md").write_text(
+            "---\nnot: [valid\n---\nbody\n", encoding="utf-8"
+        )
+        store.close()
+        root = str(tmp_path / "w")
+        assert main(["stale", "--json", "--root", root]) == 2
+        capsys.readouterr()
+        assert main(["stale", "--root", root]) == 2

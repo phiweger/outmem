@@ -3,6 +3,87 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## Unreleased
+
+**Supersession stops depending on how you named the file.** Reported
+from a ~1170-source clinical wiki. `document_key` links a revision to
+what it replaces — but a source ingested without `--as` derives its
+identity from its filename, and the edition marker is usually *in* the
+filename. So `eucast-2024.md` and `eucast-2026.md` became two unrelated
+documents, no edge was written, and `outmem stale` never reported the
+page compacted from the older one. Nothing was wrong in the registry;
+the failure was entirely an absence.
+
+### Added
+
+- **`outmem sources rekey KEY [--to KEY]`** — move a document to another
+  identity and rebuild its supersession chain. The deliberate operation
+  `adopt_document_key` already refused to perform as a side effect.
+
+  It moves **every** row holding the key, so a chain is never split, and
+  **rewrites the edges** across the result. That second half is the
+  point: relabelling alone — the obvious hand repair, and the one a
+  reporter is most likely to reach for — leaves two rows live under one
+  identity, where `latest_for` silently returns the newer and `stale`
+  still reports nothing. The same silence, one step further in.
+
+  Merging is the normal case. With no `--to` it rebuilds the chain in
+  place, which repairs a registry edited out of band. Nothing is
+  deleted, so ingestion history and recorded page references survive —
+  `gc` + re-ingest cascades both away.
+
+  Ingest timestamps are stored to the second, so a bulk ingest can
+  register two editions with the same one. The chain stays deterministic
+  (the preview and the write must agree) but the order is then a guess,
+  and the dry run marks it rather than presenting a coin flip as a fact.
+- **Two lint warnings for versions that should be one chain.**
+  `unlinked-source-versions` names derived identities differing only in
+  a number. It carries the ingest origins as evidence, because "next
+  edition of that" and "different document, similar name" look identical
+  from the path — and it names the remedy for *either* answer, since a
+  check that cannot reach zero gets silenced wholesale. Identities you
+  set with `--as` are never second-guessed: `doi/10.1001-jama-2026` and
+  `-2027` differ only in a digit and are different articles.
+
+  `multiple-live-versions` is the exact version of the same defect — one
+  identity, several rows all reading as current, which outmem's own
+  write paths refuse to create.
+- **`superseded_ok: "<reason>"` on a provenance entry**, with `date:`.
+  A page that *compares* two editions has to cite both, and reporting it
+  forever teaches the reader to skip the report.
+
+  The acknowledgement is **scoped to the version it was made against**,
+  exactly as `finding:` is: it holds only while the acknowledged head is
+  still the head. A newer edition moves past the date and the row fires
+  again. "We deliberately cite 2024 while 2026 exists" says nothing
+  about 2027, and a permanent suppression would restore the silent
+  staleness this feature exists to break — now with a human signature on
+  it. That is what makes `date:` load-bearing rather than decorative;
+  without a usable one nothing is suppressed and `outmem lint` says so
+  (`invalid-supersession-ack`).
+- `outmem stale --all` and `--json`. The default output counts what it
+  hid instead of silently omitting it, and both modes use the same exit
+  codes.
+- `store.rekey_document()`, `store.provenance_annotations()`,
+  `SourceRegistry.rekey()` / `.plan_rekey()`, `sources.sibling_form()`,
+  `sources.version_order()`, `sources.find_unchained_versions()`,
+  `StaleCitation.acknowledged`.
+
+### Fixed
+
+- **A read-only store no longer reaches the bare `SourceRegistry`
+  constructor.** `SourceRegistry.empty()` names the deliberate
+  no-database case, so the one legitimate caller says what it means.
+- `_live_claimants` built entries from a partial column list, reporting
+  `refs_scanned_at=None` for sources that had in fact been scanned. The
+  row→entry mapping now exists once.
+
+### Note
+
+Once a document has been rekeyed, ingest its next edition with
+`--as <key>` and supersession links on its own — the repair is one-time
+per document, and the ingest skill now says so.
+
 ## 0.12.0
 
 Two retrieval gaps reported from a ~600-page clinical wiki after a week

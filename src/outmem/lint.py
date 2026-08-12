@@ -13,6 +13,9 @@ class of problems that don't need an LLM:
 - Stale provenance (the cited source file is missing) and
   provenance citing a sha256 the registry no longer holds
 - ``.sources.db`` disagreeing with what is on disk, in either direction
+- Source versions that should be one supersession chain and are not —
+  two editions under keys differing only in a number, or one key held by
+  several rows all reading as current
 - Orphan pages (zero inbound wikilinks, not referenced from ``log/``)
 - Index drift (``wiki/index.md`` doesn't reflect current pages — happens
   when humans edit the wiki via Obsidian without running outmem)
@@ -159,7 +162,7 @@ def lint_wiki(
         report=report,
     )
     _check_sources_registry(sources_dir, report)
-    _check_unlinked_source_versions(sources_dir, sources_local_dir, report)
+    _check_unchained_source_versions(sources_dir, sources_local_dir, report)
     _check_source_slug_coupling(pages, sources_dir, report)
     _check_orphans(pages, log_dir=log_dir, report=report)
     _check_index_drift(wiki_dir, pages_dir, report)
@@ -471,7 +474,7 @@ def _check_wikilinks(
                 )
 
 
-def _check_unlinked_source_versions(
+def _check_unchained_source_versions(
     sources_dir: Path | None,
     sources_local_dir: Path | None,
     report: LintReport,
@@ -493,23 +496,23 @@ def _check_unlinked_source_versions(
     """
     from outmem.sources import SourceRegistry
 
-    for tree in (sources_dir, sources_local_dir):
-        if tree is None or not tree.is_dir():
+    for tree_dir in (sources_dir, sources_local_dir):
+        if tree_dir is None or not tree_dir.is_dir():
             continue
-        for group in find_unchained_versions(SourceRegistry.load(tree)):
+        for group in find_unchained_versions(SourceRegistry.load(tree_dir)):
             report.findings.append(
                 LintFinding(
                     kind="multiple-live-versions"
                     if group.shares_one_key
                     else "unlinked-source-versions",
                     severity=Severity.WARNING,
-                    path=f"{tree.name}/{group.entries[0].rel_path}",
-                    message=_unlinked_versions_message(group),
+                    path=f"{tree_dir.name}/{group.entries[0].rel_path}",
+                    message=_unchained_versions_message(group),
                 )
             )
 
 
-def _unlinked_versions_message(group: UnchainedVersions) -> str:
+def _unchained_versions_message(group: UnchainedVersions) -> str:
     """Name the rows, then both ways out.
 
     Two derived keys resembling each other is a judgement outmem cannot
@@ -810,11 +813,12 @@ def _check_one_ack(entry: Any, *, page: _LoadedPage, report: LintReport) -> None
         return
     annotation = provenance_annotation(entry)
     if annotation.date is None:
+        has = f"has {entry['date']!r}" if "date" in entry else "has none"
         warn(
-            "`superseded_ok:` needs a `date:` (YYYY-MM-DD) and this entry has "
-            f"{entry.get('date')!r}. An acknowledgement is scoped to the "
-            "version that was current when it was made, so without a date "
-            "there is nothing to compare and the row keeps being reported."
+            f"`superseded_ok:` needs a `date:` (YYYY-MM-DD) and this entry "
+            f"{has}. An acknowledgement is scoped to the version that was "
+            "current when it was made, so without a date there is nothing to "
+            "compare against and the row keeps being reported."
         )
         return
     if provenance_ref(entry) is None:

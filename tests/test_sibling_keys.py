@@ -11,12 +11,18 @@ which is why it takes a check of its own to see.
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 import pytest
 
 from outmem.lint import Severity, lint_wiki
-from outmem.sources import SourceRegistry, find_unchained_versions, sibling_form
+from outmem.sources import (
+    SourceRegistry,
+    find_unchained_versions,
+    sibling_form,
+    version_order,
+)
 from outmem.store import WikiStore
 
 
@@ -60,6 +66,37 @@ class TestSiblingForm:
         """Lossy on purpose. Storing one would merge documents rather
         than report them, which is the opposite of the intent."""
         assert sibling_form("guidelines/eucast-2024") == "guidelines/eucast-#"
+
+    def test_it_is_idempotent(self) -> None:
+        """Forms are compared for equality, so a form that re-forms into
+        something else would group two keys on one pass and not the next."""
+        for key in ("x/report.csv.pdf", "x/a.pdf", "x/a", "doi/10.1001-x", ""):
+            assert sibling_form(sibling_form(key)) == sibling_form(key), key
+
+
+class TestVersionOrder:
+    """The tie-break when `registered_at` cannot order two versions —
+    which a bulk ingest guarantees, since the column stores seconds."""
+
+    def test_numbers_compare_as_numbers(self) -> None:
+        keys = ["g/eucast-v9", "g/eucast-v10", "g/eucast-v2"]
+        assert sorted(keys, key=version_order) == [
+            "g/eucast-v2",
+            "g/eucast-v9",
+            "g/eucast-v10",
+        ]
+        # Lexicographic order gets this wrong, which is why the tie-break
+        # is not just `sorted(keys)`.
+        assert sorted(keys) != sorted(keys, key=version_order)
+
+    def test_no_shape_pair_mixes_int_with_str(self) -> None:
+        """A key alternates literal/number, so the same tuple position
+        always holds the same type. If that ever stopped being true the
+        comparison would raise TypeError mid-sort, on someone's corpus."""
+        shapes = ["a", "a1", "ab", "1", "", "a-1-b", "a-1b", "doi/10.1001-x", "z/9"]
+        for left, right in itertools.combinations(shapes, 2):
+            # Comparing at all is the assertion — a mixed pair raises.
+            assert isinstance(version_order(left) < version_order(right), bool)
 
 
 def _wiki(tmp_path: Path) -> WikiStore:
