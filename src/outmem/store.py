@@ -32,7 +32,7 @@ from outmem._time import ensure_utc, utc_now
 if TYPE_CHECKING:
     from outmem.index import PageLoadFailure
     from outmem.semantic import Match, ReindexResult, VectorStore
-    from outmem.sources import KeyCandidate, RegistryAudit, StaleCitation
+    from outmem.sources import KeyCandidate, RegistryAudit, RekeyResult, StaleCitation
 
 from outmem.backlinks import BacklinkCache
 from outmem.config import (
@@ -98,6 +98,7 @@ from outmem.sources import (
     SourceEntry,
     SourceRef,
     SourceRegistry,
+    normalize_document_key,
 )
 from outmem.state import LastRun, OutmemState
 
@@ -1315,6 +1316,77 @@ class WikiStore:
                 subject=f"sources: assign {written} document identit(ies)",
             )
         return written
+
+    def rekey_document(
+        self,
+        old_key: str,
+        new_key: str | None = None,
+        *,
+        local: bool | None = None,
+        dry_run: bool = True,
+    ) -> RekeyResult:
+        """Move a document to another identity, rebuilding its chain.
+
+        The repair for two editions of one document that landed under
+        different *derived* keys: they hold no edge between them, so
+        ``outmem stale`` never fires for either. Merging is the normal
+        case — pass the key you want to keep as ``new_key`` and the rows
+        are relabelled *and* chained by ``registered_at``.
+
+        Called with no ``new_key`` it rebuilds the chain under the key it
+        is given, which repairs a registry whose ``document_key`` was set
+        out of band (leaving several rows live under one identity, where
+        :meth:`SourceRegistry.latest_for` silently picks the newest).
+
+        ``local`` picks the tree; ``None`` finds whichever holds the key.
+        Each tree has its own registry, so a key held in both names two
+        unrelated documents and must be disambiguated.
+        """
+        tree = self._tree_for_document(old_key, local=local)
+        registry = _sources.get_registry(self, tree)
+        plan = registry.plan_rekey(old_key, new_key)
+        if dry_run or not registry.rekey_needed(plan):
+            return plan
+        written = registry.rekey(old_key, new_key)
+        if tree.tracked:
+            # A local rekey has nothing to commit — that registry lives
+            # inside the gitignored tree, like the sources it indexes.
+            self.commit_registry(
+                f"sources: rekey {normalize_document_key(old_key)} "
+                f"-> {written.document_key}"
+                if new_key is not None
+                else f"sources: rechain {written.document_key}"
+            )
+        return written
+
+    def _tree_for_document(
+        self, document_key: str, *, local: bool | None = None
+    ) -> _sources.SourceTree:
+        """Which source tree holds ``document_key``.
+
+        Falls back to the tracked tree when nothing holds it, so the
+        registry raises its own "no such document" rather than this
+        method inventing a second wording for the same miss.
+        """
+        if local is not None:
+            return _sources.local_tree(self) if local else _sources.tracked_tree(self)
+        key = normalize_document_key(document_key)
+        holders = [
+            tree
+            for tree in _sources.existing_trees(self)
+            if any(
+                e.document_key == key
+                for e in _sources.get_registry(self, tree).entries.values()
+            )
+        ]
+        if len(holders) > 1:
+            raise OutmemError(
+                f"{key!r} is held in both {holders[0].name}/ and "
+                f"{holders[1].name}/. Each tree carries its own registry, so "
+                "those are two different documents — pass local=True/False "
+                "(CLI: --local) to say which one you mean."
+            )
+        return holders[0] if holders else _sources.tracked_tree(self)
 
     def sources_gc(self, *, dry_run: bool = True) -> RegistryAudit:
         """Reconcile ``.sources.db`` against disk; drop rows whose file is gone.

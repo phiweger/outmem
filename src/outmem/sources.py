@@ -72,8 +72,9 @@ import json
 import shutil
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 
 from outmem._sqlite import connect as _sqlite_connect
@@ -343,7 +344,8 @@ class SourceRef:
 class SourceRegistry:
     """SQLite-backed view of the ``wiki/sources/.sources.db`` registry.
 
-    Construct via :meth:`load`. Mutations through :meth:`register` /
+    Construct via :meth:`load`, or :meth:`empty` for the deliberate
+    no-database case. Mutations through :meth:`register` /
     :meth:`record_ingestion` commit immediately and keep
     :attr:`entries` (the in-memory snapshot) in lockstep.
     """
@@ -359,6 +361,20 @@ class SourceRegistry:
         con = _open_registry(sources_dir / REGISTRY_FILENAME)
         entries = _read_all_entries(con)
         return cls(sources_dir=sources_dir, entries=entries, _con=con)
+
+    @classmethod
+    def empty(cls, sources_dir: Path) -> SourceRegistry:
+        """A registry with no rows and no database behind it.
+
+        For a tree whose ``.sources.db`` does not exist and must not be
+        created: :meth:`load` creates both the directory and the file, so
+        a read-only store asked to list sources would write the tracked
+        tree it was opened forbidden to write. Reads answer "nothing
+        registered"; a mutation raises, having no connection to write
+        through — which is the right failure for a caller that reached
+        this constructor by accident.
+        """
+        return cls(sources_dir=sources_dir)
 
     def close(self) -> None:
         """Close the underlying SQLite connection. Idempotent."""
@@ -397,24 +413,30 @@ class SourceRegistry:
         the docs bless via ``xargs -P`` — may have claimed the key since.
         """
         rows = con.execute(
-            "SELECT rel_path, sha256, size_bytes, registered_at, document_key, "
-            "superseded_by, origin_path FROM sources "
+            f"SELECT {_ENTRY_COLUMNS} FROM sources "
             "WHERE document_key = ? AND superseded_by IS NULL AND rel_path != ? "
             "ORDER BY registered_at DESC, rel_path",
             (document_key, excluding),
         ).fetchall()
-        return [
-            SourceEntry(
-                rel_path=r["rel_path"],
-                sha256=r["sha256"],
-                registered_at=parse_iso_z(r["registered_at"]),
-                size_bytes=int(r["size_bytes"]),
-                document_key=r["document_key"],
-                superseded_by=r["superseded_by"],
-                origin_path=r["origin_path"],
-            )
-            for r in rows
-        ]
+        return [_entry_from_row(r) for r in rows]
+
+    def _rows_with_key(
+        self, con: sqlite3.Connection, document_key: str
+    ) -> list[SourceEntry]:
+        """Every row holding ``document_key`` — superseded ones included.
+
+        The counterpart to :meth:`_live_claimants` for :meth:`rekey`,
+        which moves a *document* rather than a version and so must see
+        the whole chain. Reading only the live head would relabel it and
+        strand its predecessors under the old key: two documents where
+        there was one, which is the corruption rekey exists to repair.
+        """
+        rows = con.execute(
+            f"SELECT {_ENTRY_COLUMNS} FROM sources WHERE document_key = ? "
+            "ORDER BY registered_at, rel_path",
+            (document_key,),
+        ).fetchall()
+        return [_entry_from_row(r) for r in rows]
 
     def register(
         self,
@@ -532,8 +554,9 @@ class SourceRegistry:
             raise OutmemError(
                 f"{rel_path!r} is already the identity {entry.document_key!r}. "
                 f"Refusing to silently rename it to {document_key!r} — supersession "
-                "edges point at the old identity. Use `outmem sources gc` and "
-                "re-ingest if the identity is genuinely wrong."
+                "edges point at the old identity. Use `outmem sources rekey "
+                f"{entry.document_key} --to {document_key}`, which moves the whole "
+                "chain instead of stranding it."
             )
         con = self._connection()
         con.execute("BEGIN IMMEDIATE")
@@ -551,6 +574,132 @@ class SourceRegistry:
         con.commit()
         entry.document_key = document_key
         return entry
+
+    def _snapshot_rows_with_key(self, document_key: str) -> list[SourceEntry]:
+        """:meth:`_rows_with_key` against the snapshot, for the dry run."""
+        return sorted(
+            (e for e in self.entries.values() if e.document_key == document_key),
+            key=lambda e: (e.registered_at, e.rel_path),
+        )
+
+    def plan_rekey(self, old_key: str, new_key: str | None = None) -> RekeyResult:
+        """What :meth:`rekey` would do, read off the snapshot. Writes nothing."""
+        old_key = normalize_document_key(old_key)
+        new_key = old_key if new_key is None else normalize_document_key(new_key)
+        old_rows = self._snapshot_rows_with_key(old_key)
+        if not old_rows:
+            raise _no_such_document(old_key)
+        new_rows = [] if new_key == old_key else self._snapshot_rows_with_key(new_key)
+        return _plan_rekey(old_rows, new_rows, new_key)
+
+    def rekey_needed(self, plan: RekeyResult) -> bool:
+        """Whether applying ``plan`` would change anything.
+
+        A rekey that changes nothing must not be written: the registry is
+        a git-tracked binary, so committing an idempotent repair would
+        add a full blob to history on every run. Checked against the
+        snapshot, which is why the caller doing it is advisory — the
+        write path is still safe to run when this returns False.
+        """
+        expected = dict(plan.edges)
+        for rel_path in plan.chain:
+            entry = self.entries.get(rel_path)
+            if entry is None or entry.document_key != plan.document_key:
+                return True
+            if entry.superseded_by != expected.get(rel_path):
+                return True
+        return False
+
+    def rekey(self, old_key: str, new_key: str | None = None) -> RekeyResult:
+        """Move a *document* to another identity, and rebuild its chain.
+
+        The deliberate operation :meth:`adopt_document_key` refuses to
+        perform as a side effect. Two things make it safe where a bare
+        ``UPDATE sources SET document_key`` is not:
+
+        **It moves every row holding the key**, so a chain is never split
+        across two identities.
+
+        **It rewrites the supersession edges** over the resulting set,
+        oldest to newest. That is not bookkeeping — it is the whole point
+        when ``new_key`` is already held, which is the common case: two
+        editions of one document that landed under different *derived*
+        keys (``…-2024`` and ``…-2026``) have no edge between them, and
+        relabelling alone leaves two live heads under one identity.
+        :meth:`latest_for` then silently returns the newer of them and
+        ``outmem stale`` reports nothing — the exact silence supersession
+        exists to break, reintroduced by the repair meant to fix it.
+
+        Called with no ``new_key`` it rebuilds the chain in place, which
+        is the repair for a registry already in that state.
+
+        Nothing is deleted, so ingestion history and recorded page
+        references survive. Returns the same :class:`RekeyResult` shape
+        :meth:`plan_rekey` previews.
+        """
+        old_key = normalize_document_key(old_key)
+        new_key = old_key if new_key is None else normalize_document_key(new_key)
+        con = self._connection()
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            old_rows = self._rows_with_key(con, old_key)
+            if not old_rows:
+                raise _no_such_document(old_key)
+            new_rows = [] if new_key == old_key else self._rows_with_key(con, new_key)
+            plan = _plan_rekey(old_rows, new_rows, new_key)
+            self._refuse_foreign_edges(con, plan.chain)
+            if new_key != old_key:
+                con.execute(
+                    "UPDATE sources SET document_key = ? WHERE document_key = ?",
+                    (new_key, old_key),
+                )
+            for older, newer in plan.edges:
+                con.execute(
+                    "UPDATE sources SET superseded_by = ? WHERE rel_path = ?",
+                    (newer, older),
+                )
+            con.execute(
+                "UPDATE sources SET superseded_by = NULL WHERE rel_path = ?",
+                (plan.chain[-1],),
+            )
+        except BaseException:
+            con.rollback()
+            raise
+        con.commit()
+        for rel_path in plan.chain:
+            entry = self.entries.get(rel_path)
+            if entry is not None:
+                entry.document_key = new_key
+                entry.superseded_by = None
+        for older, newer in plan.edges:
+            if older in self.entries:
+                self.entries[older].superseded_by = newer
+        return replace(plan, applied=True)
+
+    def _refuse_foreign_edges(
+        self, con: sqlite3.Connection, chain: tuple[str, ...]
+    ) -> None:
+        """Refuse if a row outside ``chain`` supersedes one inside it.
+
+        Supersession edges stay within a ``document_key`` by
+        construction, so this cannot fire on a registry outmem wrote
+        alone. It can on one edited out of band — and rewriting the chain
+        under such an edge would leave the outside row pointing into a
+        document it is not a version of, silently.
+        """
+        marks = ",".join("?" * len(chain))
+        rows = con.execute(
+            f"SELECT rel_path, superseded_by FROM sources "
+            f"WHERE superseded_by IN ({marks}) AND rel_path NOT IN ({marks})",
+            (*chain, *chain),
+        ).fetchall()
+        if rows:
+            pointers = ", ".join(f"{r['rel_path']} -> {r['superseded_by']}" for r in rows)
+            raise OutmemError(
+                "refusing to rekey: supersession edge(s) from outside this "
+                f"document point into it ({pointers}). The registry was edited "
+                "out of band; resolve those rows first."
+            )
 
     def record_refs(self, rel_path: str, refs: Iterable[SourceRef]) -> list[SourceRef]:
         """Record which pages a frozen source names, resolved at ingest.
@@ -899,25 +1048,41 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
+_ENTRY_COLUMNS = (
+    "rel_path, sha256, size_bytes, registered_at, document_key, "
+    "superseded_by, origin_path, refs_scanned_at"
+)
+"""Every column :func:`_entry_from_row` reads, in one place.
+
+Shared by the snapshot load and the in-transaction reads. A query that
+selected a subset built entries whose missing fields silently defaulted
+— which is how ``_live_claimants`` used to hand back rows reporting
+``refs_scanned_at=None`` for sources that had in fact been scanned.
+"""
+
+
+def _entry_from_row(row: sqlite3.Row) -> SourceEntry:
+    """Build a :class:`SourceEntry` from a row selected as ``_ENTRY_COLUMNS``."""
+    return SourceEntry(
+        rel_path=row["rel_path"],
+        sha256=row["sha256"],
+        registered_at=parse_iso_z(row["registered_at"]),
+        document_key=row["document_key"],
+        superseded_by=row["superseded_by"],
+        origin_path=row["origin_path"],
+        refs_scanned_at=row["refs_scanned_at"],
+        size_bytes=int(row["size_bytes"]),
+        ingestions=[],
+    )
+
+
 def _read_all_entries(con: sqlite3.Connection) -> dict[str, SourceEntry]:
     cur = con.cursor()
     entries: dict[str, SourceEntry] = {}
     for row in cur.execute(
-        "SELECT rel_path, sha256, size_bytes, registered_at, document_key, "
-        "superseded_by, origin_path, refs_scanned_at FROM sources "
-        "ORDER BY rel_path"
+        f"SELECT {_ENTRY_COLUMNS} FROM sources ORDER BY rel_path"
     ).fetchall():
-        entries[row["rel_path"]] = SourceEntry(
-            rel_path=row["rel_path"],
-            sha256=row["sha256"],
-            registered_at=parse_iso_z(row["registered_at"]),
-            document_key=row["document_key"],
-            superseded_by=row["superseded_by"],
-            origin_path=row["origin_path"],
-            refs_scanned_at=row["refs_scanned_at"],
-            size_bytes=int(row["size_bytes"]),
-            ingestions=[],
-        )
+        entries[row["rel_path"]] = _entry_from_row(row)
     for row in cur.execute(
         "SELECT rel_path, timestamp, prompt, pages_touched FROM ingestions "
         "ORDER BY rel_path, id"
@@ -1022,6 +1187,90 @@ def gc_registry(sources_dir: Path, *, dry_run: bool = True) -> RegistryAudit:
                 entry.superseded_by = successor
         registry.entries.pop(rel_path, None)
     return audit
+
+
+@dataclass(frozen=True)
+class RekeyResult:
+    """What a :meth:`SourceRegistry.rekey` did, or would do."""
+
+    document_key: str
+    """The identity every row in :attr:`chain` ends up holding."""
+    moved: tuple[str, ...]
+    """rel_paths whose ``document_key`` changes (empty for a repair)."""
+    merged_with: tuple[str, ...]
+    """rel_paths that already held the target identity.
+
+    Non-empty means this is a *merge* — two derived keys turning out to
+    name one document, which is the usual reason to rekey at all.
+    """
+    chain: tuple[str, ...]
+    """The document's versions, oldest first, as the chain now reads.
+
+    Every element but the last gains a ``superseded_by`` pointing at its
+    successor; the last is the live head.
+    """
+    applied: bool = False
+    """Whether this result came from a write rather than a preview.
+
+    False from :meth:`SourceRegistry.plan_rekey`, and also from a
+    :meth:`WikiStore.rekey_document` that found nothing to do — so a
+    caller can tell "already correct" from "written", which the chain
+    alone cannot say.
+    """
+    tied_order: tuple[str, ...] = ()
+    """Chain members registered in the same second as their predecessor.
+
+    ``registered_at`` is stored to the second, so a bulk ingest can
+    register two editions with identical timestamps — and then nothing
+    in the registry says which is newer. The chain still orders them
+    (by ``rel_path``, so the preview and the write agree), but that
+    order is arbitrary, and it decides which version ``outmem stale``
+    calls current. Named here so the caller can say so out loud rather
+    than present a coin flip as a fact.
+    """
+
+    @property
+    def edges(self) -> tuple[tuple[str, str], ...]:
+        """``(superseded, successor)`` pairs the chain implies."""
+        return tuple(pairwise(self.chain))
+
+
+def _no_such_document(document_key: str) -> OutmemError:
+    return OutmemError(
+        f"no source holds the identity {document_key!r}. "
+        "`outmem sources list` shows what is registered; note a key is the "
+        "*document* identity, not a file path."
+    )
+
+
+def _plan_rekey(
+    old_rows: list[SourceEntry], new_rows: list[SourceEntry], new_key: str
+) -> RekeyResult:
+    """Order a document's versions and say which rows move.
+
+    Split out because the dry run reads the in-memory snapshot while the
+    write re-reads the DB inside its transaction — the same rule has to
+    produce both, or ``--apply`` writes a chain the preview never showed.
+
+    Ordering is by ``registered_at``, which is the only ordering outmem
+    has and the one :meth:`SourceRegistry.latest_for` already resolves
+    ties with. A pre-existing chain that disagrees with it was written by
+    that same rule, so re-deriving rather than preserving edges is not a
+    loss — and it is what lets a merge interleave two chains instead of
+    concatenating them.
+    """
+    union = sorted([*old_rows, *new_rows], key=lambda e: (e.registered_at, e.rel_path))
+    return RekeyResult(
+        document_key=new_key,
+        moved=tuple(e.rel_path for e in old_rows),
+        merged_with=tuple(e.rel_path for e in new_rows),
+        chain=tuple(e.rel_path for e in union),
+        tied_order=tuple(
+            later.rel_path
+            for earlier, later in pairwise(union)
+            if earlier.registered_at == later.registered_at
+        ),
+    )
 
 
 @dataclass(frozen=True)

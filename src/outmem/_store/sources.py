@@ -139,7 +139,7 @@ def get_registry(store: WikiStore, tree: SourceTree | None = None) -> SourceRegi
 def _load_registry(store: WikiStore, path: Path) -> SourceRegistry:
     """Open a tree's registry, or an empty stand-in for a read-only store."""
     if store.config.read_only and not (path / REGISTRY_FILENAME).is_file():
-        return SourceRegistry(sources_dir=path)
+        return SourceRegistry.empty(path)
     return SourceRegistry.load(path)
 
 

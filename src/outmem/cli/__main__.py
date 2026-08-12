@@ -30,6 +30,7 @@ from outmem import __version__
 from outmem._progress import report_progress
 from outmem.config import SEMANTIC_INDEX_PAGES, SEMANTIC_UNAVAILABLE_HELP
 from outmem.exceptions import OutmemError
+from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
 from outmem.store import AgentIdentity, WikiStore
 
 _TIMESTAMP_FMT = "%H:%M:%S"
@@ -666,6 +667,53 @@ def cmd_sources_backfill(args: argparse.Namespace) -> int:
     return dropped
 
 
+def cmd_sources_rekey(args: argparse.Namespace) -> int:
+    """Move a document to another identity, rebuilding its chain.
+
+    Prints the chain rather than a row count because the chain *is* the
+    result: two editions that landed under different derived keys hold no
+    edge between them, and seeing the edges appear is how the operator
+    confirms `outmem stale` will now fire for the older one.
+    """
+    store = _open_store(args)
+    local = None if args.tree is None else args.tree == SOURCES_LOCAL_DIR
+    try:
+        result = store.rekey_document(
+            args.document_key, args.to, local=local, dry_run=not args.apply
+        )
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 1
+    if result.merged_with:
+        print(
+            f"{result.document_key}  "
+            f"({len(result.moved)} row(s) move onto {len(result.merged_with)} "
+            "already holding this identity)\n"
+        )
+    else:
+        print(f"{result.document_key}  ({len(result.chain)} version(s))\n")
+    for rel_path in result.chain:
+        head = "  (current)" if rel_path == result.chain[-1] else ""
+        tie = "  <- same ingest second as the line above" if rel_path in result.tied_order else ""
+        print(f"  {rel_path}{head}{tie}")
+    if result.tied_order:
+        print(
+            "\nnote: ingest timestamps are stored to the second, and the marked "
+            "row(s) share one with their predecessor. Nothing in the registry "
+            "says which edition is newer, so that order is by path — check it "
+            "before --apply, since it decides which version `outmem stale` "
+            "calls current."
+        )
+    if args.apply:
+        if result.applied:
+            _status(f"sources: {result.document_key} now has one chain")
+        else:
+            _status(f"sources: {result.document_key} was already correct")
+    else:
+        print("\n(dry run — re-run with --apply to write)")
+    return 0
+
+
 def cmd_sources_list(args: argparse.Namespace) -> int:
     """Print every registered source, tree-qualified.
 
@@ -1249,6 +1297,44 @@ def build_parser() -> argparse.ArgumentParser:
         "resolved automatically.",
     )
     p_sources_backfill.set_defaults(func=cmd_sources_backfill)
+
+    p_sources_rekey = sources_sub.add_parser(
+        "rekey",
+        help="Move a document to another identity, merging and re-chaining "
+        "its versions.",
+        parents=[root_parent],
+    )
+    p_sources_rekey.add_argument(
+        "document_key",
+        metavar="KEY",
+        help="The document identity to move (not a file path).",
+    )
+    p_sources_rekey.add_argument(
+        "--to",
+        default=None,
+        metavar="KEY",
+        help="The identity to move it to. If that identity is already held, "
+        "the two are merged into one chain ordered by ingest time — which is "
+        "the point: two editions under different derived keys (…-2024, "
+        "…-2026) hold no supersession edge, so `outmem stale` never fires "
+        "for the older one. Omit to rebuild the chain under the existing key, "
+        "which repairs a registry whose identities were set out of band.",
+    )
+    p_sources_rekey.add_argument(
+        "--tree",
+        choices=[SOURCES_DIR, SOURCES_LOCAL_DIR],
+        default=None,
+        help="Which source tree to act on. Only needed when both hold this "
+        "identity — each tree has its own registry, so those are two "
+        "different documents.",
+    )
+    p_sources_rekey.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually write. Without this it's a dry run — the registry is "
+        "tracked in git, so every apply commits a full blob.",
+    )
+    p_sources_rekey.set_defaults(func=cmd_sources_rekey)
 
     p_stale = sub.add_parser(
         "stale",
