@@ -732,24 +732,41 @@ def _hyde_document(model: Any, question: str) -> tuple[str | None, str | None]:
 
 
 # Tiny stopword set — enough to stop the keyword net from being dominated
-# by function words. Not linguistics; just the 80-20.
+# by function words. Not linguistics; just the 80-20, in the two languages
+# outmem wikis are written in in practice (English + German — tokens
+# under 3 chars are dropped before this set is consulted, so the short
+# function words of both languages need no entries).
 _STOP = frozenset({
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "at",
     "by", "from", "is", "are", "was", "were", "be", "been", "being", "this",
     "that", "these", "those", "it", "its", "as", "how", "what", "when", "why",
     "who", "which", "does", "do", "did", "can", "could", "should", "would",
     "about", "into", "out", "over", "under",
+    # German function words. A few collide with English content words
+    # ("war" the noun, "man") — accepted: dropping one of up to twelve
+    # terms costs little, while a function word in the alternation
+    # matches half the corpus.
+    "und", "oder", "der", "die", "das", "den", "dem", "des", "ein", "eine",
+    "einen", "einem", "einer", "ist", "sind", "war", "waren", "wird",
+    "werden", "wurde", "wurden", "nicht", "kein", "keine", "mit", "bei",
+    "von", "aus", "auf", "für", "über", "unter", "nach", "vor", "durch",
+    "wie", "wann", "warum", "wer", "welche", "welcher", "welches", "auch",
+    "noch", "nur", "als", "wenn", "dann", "sich", "man", "hat", "haben",
+    "kann", "können", "soll", "sollte", "muss", "beim", "zur", "zum",
 })
 
 
 def _keywords(question: str, *, max_terms: int = 12) -> str:
     """NL question → a ripgrep alternation pattern (``term1|term2|…``).
 
-    Lowercase, split on non-alphanumerics, drop short/stopword tokens,
-    dedup, cap. Tokens are alphanumeric so they need no regex escaping.
+    Lowercase, split on non-word characters (Unicode-aware, so umlauted
+    and accented terms survive whole — ``häufig`` must not degrade to the
+    junk substring ``ufig``), drop short/stopword tokens, dedup, cap.
+    Tokens are word characters only, which no regex dialect treats as
+    metacharacters, so they need no escaping in the alternation.
     """
     seen: list[str] = []
-    for tok in re.split(r"[^a-zA-Z0-9]+", question.lower()):
+    for tok in re.split(r"[\W_]+", question.lower()):
         if len(tok) >= 3 and tok not in _STOP and tok not in seen:
             seen.append(tok)
     return "|".join(seen[:max_terms])

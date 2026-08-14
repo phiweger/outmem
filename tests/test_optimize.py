@@ -35,6 +35,7 @@ from outmem.optimize.blocks import (
     RetrievalResult,
     SemanticRetriever,
     _gate_excerpt,
+    _keywords,
 )
 from outmem.store import WikiPage, WikiStore
 
@@ -535,6 +536,24 @@ class TestGateExcerptWindow:
         )
         assert "Meropenem MIC over 8" in excerpt
 
+    def test_umlaut_terms_locate_the_window(self) -> None:
+        """A German query term must survive tokenization whole. Under the
+        old ASCII split, "häufig" degraded to the junk substring "ufig"
+        and "hämolytisch" to "molytisch" — fragments that can mis-anchor
+        the window or match unrelated words."""
+        body = (
+            self._filler
+            + "## Diagnostik\n"
+            + "Routine sentences describing laboratory workflow follow.\n" * 40
+            + "Blutkulturen sind in über 95 % der Fälle häufig negativ.\n"
+            + self._filler
+        )
+        excerpt = _gate_excerpt(
+            _page(body), "Wie häufig sind Blutkulturen negativ?", context_chars=2000
+        )
+        assert "häufig negativ" in excerpt
+        assert "[…]" in excerpt
+
     def test_end_to_end_gate_sees_deep_evidence(self, store: WikiStore) -> None:
         """Through the real retriever: bm25 shortlists the page on its deep
         terms, and the gate prompt must contain those terms."""
@@ -556,6 +575,56 @@ class TestGateExcerptWindow:
 
 
 # --- semantic block (wiring tested with a stubbed index) -------------------
+
+
+class TestKeywords:
+    """The shared query tokenizer behind lexical, bm25, and the gate window."""
+
+    def test_umlauts_survive_whole(self) -> None:
+        terms = _keywords("Wie häufig sind Blutkulturen positiv?").split("|")
+        assert "häufig" in terms
+        assert "blutkulturen" in terms
+        assert "positiv" in terms
+        # No ASCII-split shrapnel:
+        assert "ufig" not in terms
+        assert "h" not in terms
+
+    def test_german_function_words_are_dropped(self) -> None:
+        terms = _keywords("Wie häufig sind die Blutkulturen bei einer Sepsis?")
+        for stop in ("wie", "sind", "die", "bei", "einer"):
+            assert stop not in terms.split("|")
+        assert "sepsis" in terms.split("|")
+
+    def test_english_behaviour_is_unchanged(self) -> None:
+        assert _keywords("What is the penicillin dose?") == "penicillin|dose"
+
+    def test_underscores_still_separate_tokens(self) -> None:
+        # \w includes "_", so the split pattern names it explicitly — a
+        # snake_case identifier stays two searchable terms.
+        assert _keywords("check pricing_formula now") == "check|pricing|formula|now"
+
+
+def test_lexical_retrieves_by_umlaut_term(store: WikiStore) -> None:
+    """End to end through ripgrep: the Unicode alternation must match."""
+    store.write_page(
+        "clinical:blutkulturen",
+        title="Blutkulturen",
+        body="Bei Verdacht auf Sepsis sind Blutkulturen häufig entscheidend.",
+    )
+    result = LexicalRetriever(store).retrieve("Wie häufig sind Blutkulturen?", k=3)
+    assert "clinical:blutkulturen" in result.slugs
+
+
+def test_bm25_retrieves_by_umlaut_term(store: WikiStore) -> None:
+    """End to end through FTS5 — the shortlist tier of the default
+    ``rerank(bm25)`` strategy must rank on whole umlauted terms."""
+    store.write_page(
+        "clinical:blutkulturen",
+        title="Blutkulturen",
+        body="Bei Verdacht auf Sepsis sind Blutkulturen häufig entscheidend.",
+    )
+    result = BM25Retriever(store).retrieve("Wie häufig sind Blutkulturen?", k=3)
+    assert "clinical:blutkulturen" in result.slugs
 
 
 class TestSemanticBlock:

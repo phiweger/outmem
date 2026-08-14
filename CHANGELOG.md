@@ -38,6 +38,17 @@ history (`git log --grep '^release:'`).
 
 ### Fixed
 
+- **Query tokenization is Unicode-aware.** `_keywords` — the shared
+  extraction behind `lexical`, `bm25`, and the rerank gate's match
+  window — split on ASCII alphanumerics, so umlauted terms fragmented:
+  `häufig` degraded to the junk substring `ufig`, `hämolytisch` to
+  `molytisch` — fragments that match unrelated words and mis-anchor
+  windows. Tokens now keep any Unicode word character (underscores
+  still separate), and the stopword set gains the German 80-20, which
+  the fix makes newly relevant: `für`/`über` previously shattered into
+  droppable shrapnel, and ASCII German function words (`und`, `der`,
+  `die`…) always slipped through as search terms.
+
 - **One-shot LLM calls no longer opt into Anthropic automatic prompt
   caching.** The rerank gate, HyDE, and `generate_bank`'s question
   generation sent `anthropic_cache: True`, which places the server-side
