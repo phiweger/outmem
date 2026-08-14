@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from outmem._progress import report_progress
 from outmem.config import (
-    ANTHROPIC_CACHE_SETTINGS,
+    ANTHROPIC_CACHE_ONESHOT,
     DEFAULT_OPTIMIZE_CONCURRENCY,
     DEFAULT_OPTIMIZE_PER_PAGE,
     DEFAULT_OPTIMIZE_UNANSWERABLE_LIMIT,
@@ -217,8 +217,12 @@ async def _generate_pages(
     flight. Returns ``(slug, source, questions)`` in input order."""
     from pydantic_ai import Agent
 
+    # ONESHOT: one call per page, each with a different page body in the
+    # prompt — automatic caching would bill every page as an unread cache
+    # write (see config.py). The static system prompt marker still helps
+    # nothing here (below the cacheable minimum) but costs nothing.
     agent_kwargs: dict[str, Any] = {
-        "model_settings": {**ANTHROPIC_CACHE_SETTINGS, "max_tokens": 1024}
+        "model_settings": {**ANTHROPIC_CACHE_ONESHOT, "max_tokens": 1024}
     }
     agent: Agent[None, _Questions] = Agent(
         model,

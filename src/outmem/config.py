@@ -108,17 +108,32 @@ DEFAULT_LOGFIRE_ENABLED = False
 LOGFIRE_SERVICE_NAME = "outmem"
 
 # Anthropic prompt-caching keys for ``model_settings`` (pydantic_ai passes
-# them through; no-ops on non-Anthropic models). Caching the static system
-# prompt + tool-def array across the many calls an agent or tuning loop
-# makes cuts the bill ~5-10x. Spread into a per-call ``model_settings``
-# dict alongside ``max_tokens``; agents that expose tools use the
-# ``*_WITH_TOOLS`` variant to also cache the tool schemas.
-ANTHROPIC_CACHE_SETTINGS: dict[str, bool] = {
-    "anthropic_cache": True,               # top-level auto-cache breakpoint
+# them through; no-ops on non-Anthropic models). Which dict a caller gets
+# is decided by the CALL SHAPE, not by taste:
+#
+# ``ANTHROPIC_CACHE_ONESHOT`` — single-shot calls whose prompt is unique
+# per call (the rerank gate, HyDE, question generation). Only the static
+# system prompt is marked. ``anthropic_cache`` is deliberately absent:
+# that key enables *automatic* caching, where the server drops the
+# breakpoint after the last block — i.e. after the per-call-unique
+# content — so every call writes a cache entry (billed at 1.25x) that no
+# later call can read. Measured on a production wiki: a flat ~25%
+# surcharge on every rerank call, zero cache hits. The instructions
+# marker is kept because it is free when below the model's cacheable
+# minimum and correct if the static prefix ever grows past it.
+#
+# ``ANTHROPIC_CACHE_WITH_TOOLS`` — multi-turn tool-loop agents (the
+# agent runtime, consult, the optimizer). The conversation grows
+# monotonically, which is exactly what automatic caching is built for:
+# the breakpoint moves forward with the transcript, so each turn writes
+# only the new suffix and reads everything before it (~5-10x cheaper on
+# long runs). Tool schemas are cached too.
+ANTHROPIC_CACHE_ONESHOT: dict[str, bool] = {
     "anthropic_cache_instructions": True,  # cache the system-prompt block
 }
 ANTHROPIC_CACHE_WITH_TOOLS: dict[str, bool] = {
-    **ANTHROPIC_CACHE_SETTINGS,
+    "anthropic_cache": True,               # auto-cache: moving breakpoint
+    "anthropic_cache_instructions": True,  # cache the system-prompt block
     "anthropic_cache_tool_definitions": True,  # cache the tool-def array
 }
 

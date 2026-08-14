@@ -164,3 +164,39 @@ class TestInferModelCached:
                 max_relevant=3,
             )
         assert calls["n"] == 1  # 5 calls, one inference (one client) in this thread
+
+
+class TestCacheSettingsShape:
+    """Cache opt-ins are decided by call shape, and the shape is pinned here.
+
+    ``anthropic_cache`` enables *automatic* caching: the server places the
+    breakpoint after the last block of the prompt. On a one-shot call whose
+    prompt is unique per call (the gate: new query + new candidates every
+    time) that bills the entire prompt as a cache write (1.25x) that no
+    later call can ever read — a flat ~25% surcharge, measured in
+    production telemetry as ``cache_creation == input, cache_read == 0``
+    on every call. On a multi-turn agent the same key is what makes long
+    runs cheap. So: one-shot settings must never carry it; agent settings
+    must.
+    """
+
+    def test_oneshot_never_opts_into_automatic_caching(self) -> None:
+        from outmem.config import ANTHROPIC_CACHE_ONESHOT
+
+        assert "anthropic_cache" not in ANTHROPIC_CACHE_ONESHOT
+        assert ANTHROPIC_CACHE_ONESHOT.get("anthropic_cache_instructions") is True
+
+    def test_multi_turn_agents_keep_automatic_caching(self) -> None:
+        from outmem.config import ANTHROPIC_CACHE_WITH_TOOLS
+
+        assert ANTHROPIC_CACHE_WITH_TOOLS.get("anthropic_cache") is True
+        assert ANTHROPIC_CACHE_WITH_TOOLS.get("anthropic_cache_instructions") is True
+        assert (
+            ANTHROPIC_CACHE_WITH_TOOLS.get("anthropic_cache_tool_definitions") is True
+        )
+
+    def test_gate_model_settings_are_oneshot(self) -> None:
+        from outmem.relevance import _RELEVANCE_MODEL_SETTINGS
+
+        assert "anthropic_cache" not in _RELEVANCE_MODEL_SETTINGS
+        assert _RELEVANCE_MODEL_SETTINGS.get("anthropic_cache_instructions") is True

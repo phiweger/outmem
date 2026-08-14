@@ -21,6 +21,25 @@ history (`git log --grep '^release:'`).
   though per-token pricing is unchanged. The rerank/HyDE gate stays
   on `claude-haiku-4-5`, which is still the current Haiku.
 
+### Fixed
+
+- **One-shot LLM calls no longer opt into Anthropic automatic prompt
+  caching.** The rerank gate, HyDE, and `generate_bank`'s question
+  generation sent `anthropic_cache: True`, which places the server-side
+  cache breakpoint after the *whole* prompt — on calls whose prompt is
+  unique every time (a fresh query + candidate set, a different page
+  body), that wrote the entire prompt to cache at the 1.25× write rate
+  with zero chance of a later read. Telemetry from a production wiki
+  showed the signature plainly: `cache_creation ≈ input, cache_read = 0`
+  on every rerank call — a flat ~25% surcharge on the dominant cost item
+  of a `search_wiki` call. One-shot callers now use
+  `ANTHROPIC_CACHE_ONESHOT` (system-prompt marker only, harmless);
+  multi-turn agents (agent runtime, `consult_wiki`, the optimizer) keep
+  automatic caching, which is what makes their growing conversations
+  cheap. `ANTHROPIC_CACHE_SETTINGS` was renamed to
+  `ANTHROPIC_CACHE_ONESHOT` so the name states the call shape it is
+  safe for.
+
 ## 0.13.0
 
 **Supersession stops depending on how you named the file.** Reported

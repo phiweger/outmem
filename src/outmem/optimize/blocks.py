@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from outmem.config import (
-    ANTHROPIC_CACHE_SETTINGS,
+    ANTHROPIC_CACHE_ONESHOT,
     DEFAULT_OPTIMIZE_MAX_CANDIDATES,
     DEFAULT_OPTIMIZE_MAX_RELEVANT,
     DEFAULT_OPTIMIZE_RERANK_SOURCE,
@@ -580,8 +580,10 @@ def _hyde_document(model: Any, question: str) -> tuple[str | None, str | None]:
 
     from outmem.relevance import infer_model_cached
 
+    # ONESHOT: each hyde call is a fresh single-turn prompt — automatic
+    # caching would only pay the write surcharge (see config.py).
     agent_kwargs: dict[str, Any] = {
-        "model_settings": {**ANTHROPIC_CACHE_SETTINGS, "max_tokens": 512}
+        "model_settings": {**ANTHROPIC_CACHE_ONESHOT, "max_tokens": 512}
     }
     # infer_model_cached: reuse one httpx client per worker thread instead
     # of spinning up a fresh provider/client per call — under the threaded

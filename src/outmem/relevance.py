@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from outmem.config import ANTHROPIC_CACHE_SETTINGS
+from outmem.config import ANTHROPIC_CACHE_ONESHOT
 
 log = logging.getLogger(__name__)
 
@@ -40,12 +40,15 @@ class RelevantPage:
     slug: str
 
 
-# Haiku-friendly settings. The Anthropic cache keys are no-ops on other
-# providers (silently ignored); on Anthropic they cache the system prompt
-# across calls. Output is a short structured list, so a small max_tokens
-# is plenty.
+# Haiku-friendly settings. The Anthropic cache key is a no-op on other
+# providers (silently ignored). ONESHOT, not WITH_TOOLS: every gate call
+# carries a different query + candidate set, so there is no growing
+# conversation for automatic caching to help with — opting in would bill
+# the whole per-call-unique prompt as a cache write nothing ever reads
+# (see the constant's comment in config.py). Output is a short
+# structured list, so a small max_tokens is plenty.
 _RELEVANCE_MODEL_SETTINGS: dict[str, Any] = {
-    **ANTHROPIC_CACHE_SETTINGS,  # no tools (structured output) → no tool-def cache
+    **ANTHROPIC_CACHE_ONESHOT,
     "max_tokens": 2048,
 }
 
