@@ -119,6 +119,97 @@ into the `retrieval:` block. See
 [configuration.md](configuration.md#retrieval--what-the-agents-wiki-search-runs)
 for the full strategy table and knobs.
 
+## Under the hood — the `rerank` pipeline
+
+`rerank(<source>)` is two tiers: a **recall** tier (the source block —
+`bm25` by default, or `lexical`/`semantic`/`hyde`) produces a wide
+shortlist of up to `max_candidates` pages, and a **precision** tier — one
+cheap LLM call (`rerank_model`, Haiku by default) — answers yes/no per
+candidate and keeps only the yeses, up to `max_relevant`. The gate is a
+*filter, not a ranker*: an empty answer is a real abstention, and no LLM
+ever writes wiki content here — it consumes excerpts and emits slugs. If
+the gate call fails (timeout, refusal, malformed output), retrieval falls
+back to the source order, so a gate failure can never make search worse
+than its source.
+
+**What the gate sees per candidate** — each page is presented as its
+slug plus an excerpt built fresh from disk (never from index chunks):
+
+```
+[slug: clinical:breakpoints]
+Breakpoints — clinical, eucast          ← the page's title and tags
+…page opening…                          ← what the page IS
+[…]                                     ← splice: middle omitted
+[section: Diagnostik > Blutkulturen]    ← heading path of the window
+…the passage around the query terms…    ← why it matched
+```
+
+The title/tags line exists because `parse_wiki_page` strips frontmatter
+before the body is excerpted — without it, a page's two cheapest
+relevance signals never reach the gate at all. The window exists because
+term-matched sources shortlist a page *because* the query terms occur in
+it, possibly thousands of characters deep: a head-only excerpt would
+show the gate an intro with no evidence, and the gate's own
+no-false-positives instruction would push it to reject — long pages get
+systematically under-selected exactly when they matter. The window is
+cut around the densest cluster of query-term occurrences (the same term
+extraction the `lexical`/`bm25` sources search with, so "where the
+source matched" and "where the window looks" agree). The excerpt stays
+head-only when the page fits the ~2000-char budget, nothing matches, or
+the evidence already sits in the opening.
+
+Cost shape: one gate call per `search_wiki` query, sized by
+`max_candidates × ~2000` chars. The call is single-shot with a
+per-query-unique prompt, so it deliberately does **not** opt into
+Anthropic automatic prompt caching (that would bill the whole prompt as
+a cache write nothing ever reads).
+
+## Under the hood — the semantic pipeline (what gets embedded, and why)
+
+The `semantic` strategy and `find_similar` search a vector index
+(`sqlite-vec`, at `<wiki>/.vectors.db`, committed alongside the wiki and
+kept in step by the pre-commit hook). What is in that index is a set of
+deliberate choices:
+
+* **Chunks, not pages.** Bodies are split into paragraph-aware chunks
+  (`chunk_size` ≈ 2000 chars, hard ceiling `chunk_max`, one paragraph of
+  overlap) so a match points at the *passage*, and long pages don't
+  average themselves into mush. `search_wiki`'s semantic path then maps
+  matched chunks back to page slugs (best chunk wins) — the agent always
+  gets whole pages to read.
+* **Pages by default, sources opt-in** (`semantic.index`). Raw sources
+  are near-duplicates of the pages distilled from them; indexed, they
+  compete with those pages for the fixed `top_k` slots — and the page
+  path discards non-page chunks *after* retrieval, so a source chunk can
+  only ever displace a page hit, never be one. Index sources
+  (`pages+sources`) only if you rely on `find_similar` over raw
+  material. `wiki/sources-local/` is **never** indexed: the index stores
+  chunk text verbatim and is committed, which would ship exactly the
+  bytes that tree exists to withhold.
+* **Frontmatter and headings are invisible unless you opt in.**
+  `parse_wiki_page` strips frontmatter before chunking, and the chunker
+  treats a `## Heading` as just another paragraph — so by default a
+  page's title, tags, and section headings are not in any embedded text.
+  `semantic.embed_frontmatter` / `semantic.embed_headings` fix this at
+  embed time; they are off by default only because flipping them
+  re-embeds the corpus (a real API bill), not because they're the lesser
+  choice. The `rerank` gate needs no such flags — it re-reads pages from
+  disk and adds title/tags and heading paths to its excerpts
+  unconditionally.
+* **Queries embed verbatim.** `find_similar` and the semantic strategy
+  embed your text as-is; headers are a document-side change only.
+* **Embeddings go through PydanticAI's `Embedder`** —
+  `semantic.embedding_model`, default `openai:text-embedding-3-small`
+  (Anthropic has no embeddings API; any PydanticAI-supported provider
+  string works, e.g. `voyage:…`). Re-embedding is incremental: content
+  hashes skip unchanged chunks, and every write path
+  (`write_page`/`extend_page`/`add_source`/the hook) updates the index
+  in the same commit as the text.
+
+Install/ops (building the index, the hook, failure modes):
+[features.md](features.md#semantic-index). Every knob:
+[configuration.md](configuration.md#semanticindex--what-gets-embedded).
+
 ## Semantic similarity (`find_similar`)
 
 A parallel door, reached through `find_similar(text)` — vector cosine

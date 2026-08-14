@@ -164,7 +164,11 @@ only — `find_similar` embeds your query verbatim — so stored vectors
 shift slightly away from raw-body queries; if you rely on `find_similar`
 for near-duplicate detection, re-check `similarity_threshold` (0.80 was
 tuned without headers). And it does not affect the `rerank` gate, which
-re-reads the page body from disk by slug and never sees chunk text.
+re-reads the page from disk by slug and never sees chunk text — the gate
+builds the same `"<title> — <tags>"` line itself, unconditionally (its
+prompt is per-query and ephemeral, so there is no corpus to re-embed;
+see [search.md](search.md#under-the-hood--the-rerank-pipeline)). This
+flag governs *embedding-side* visibility only.
 
 Turning it on changes what is embedded, so the next `outmem reindex`
 re-embeds every page (the header participates in the content hash, so
@@ -196,12 +200,14 @@ The path is taken at the chunk's *start* — the section it is continuing
 — because paragraph and section boundaries do not coincide and a chunk
 can straddle a heading.
 
-Same two limits as `embed_frontmatter` (document side only; no effect on
-the `rerank` gate), and the same cost: turning it on changes what is
-embedded, so the next `outmem reindex` re-embeds every page. The flag
-itself participates in the content hash, so flipping it invalidates
-correctly rather than leaving the index reporting `skipped` while
-serving vectors built under the old policy.
+Same two limits as `embed_frontmatter` (document side only; the `rerank`
+gate carries its own heading paths — a spliced gate excerpt prefixes its
+deep window with the window's heading trail, always on), and the same
+cost: turning it on changes what is embedded, so the next `outmem
+reindex` re-embeds every page. The flag itself participates in the
+content hash, so flipping it invalidates correctly rather than leaving
+the index reporting `skipped` while serving vectors built under the old
+policy.
 
 ### `retrieval:` — what the agent's wiki search runs
 
