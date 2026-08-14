@@ -497,6 +497,19 @@ class TestGateExcerptWindow:
         assert "[…]" not in excerpt
         assert "Meropenem dosing" in excerpt
 
+    def test_match_just_past_the_head_is_contiguous_not_spliced(self) -> None:
+        # The cluster begins right after the head cut: the window backs off
+        # into the head, head and window are one unbroken span — a […]
+        # marker would claim an omitted middle that does not exist.
+        body = (
+            self._filler[:900]
+            + "Meropenem MIC over 8 is resistant.\n"
+            + self._filler
+        )
+        excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
+        assert "Meropenem MIC over 8" in excerpt
+        assert "[…]" not in excerpt
+
     def test_short_page_is_shown_whole(self) -> None:
         body = "Short page.\nMeropenem note at the end."
         excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)

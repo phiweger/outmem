@@ -466,7 +466,10 @@ def _gate_body_cut(body: str, question: str, context_chars: int) -> str:
     start = _densest_window_start(deep, window_chars)
     start = min(start, len(body) - window_chars)
     start = _snap_to_line_start(body, start)
-    start = max(start, head_chars)  # never re-show the head's own text
+    if start <= head_chars:
+        # The cluster sits right past the opening — head and window are
+        # contiguous, so show one unbroken span rather than a fake splice.
+        return body[:context_chars]
     window = body[start : start + window_chars]
     parts = [body[:head_chars], _GATE_SPLICE]
     trail = _heading_trail(body, start)
