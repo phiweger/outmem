@@ -55,7 +55,9 @@ _RELEVANCE_MODEL_SETTINGS: dict[str, Any] = {
 _RELEVANCE_SYSTEM_PROMPT = (
     "You are a relevance gate between a first-pass search and an "
     "expensive downstream agent. You are given a QUERY and a list of "
-    "CANDIDATE wiki pages, each with its slug and a verbatim excerpt.\n\n"
+    "CANDIDATE wiki pages, each with its slug and an excerpt — the "
+    "page's title and tags on the first line, then verbatim text from "
+    "the page.\n\n"
     "For each candidate decide a single yes/no question: is this page "
     "relevant to the QUERY? Return ONLY the slugs of the relevant ones.\n\n"
     "Rules:\n"

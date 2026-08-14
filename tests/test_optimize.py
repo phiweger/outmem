@@ -364,6 +364,67 @@ def test_rerank_block_uses_configured_source(
     )
 
 
+# --- gate excerpts (what the relevance model gets to see) ------------------
+
+
+def _capturing_rerank_model(slugs: list[str], sink: list[str]) -> FunctionModel:
+    """Like ``_rerank_model`` but records the user prompt it was shown."""
+
+    def respond(messages: Any, info: AgentInfo) -> ModelResponse:
+        for msg in messages:
+            for part in getattr(msg, "parts", []):
+                content = getattr(part, "content", None)
+                if isinstance(content, str):
+                    sink.append(content)
+        name = info.output_tools[0].name
+        return ModelResponse(
+            parts=[ToolCallPart(tool_name=name, args={"relevant": slugs})]
+        )
+
+    return FunctionModel(respond)
+
+
+class TestGateExcerpts:
+    """The gate judges what it can see — so what it sees is pinned here.
+
+    ``parse_wiki_page`` strips frontmatter before the body is excerpted,
+    so without an explicit header line the page's own title and tags
+    never reach the gate. The same blind spot exists for the embedder
+    (``semantic.embed_frontmatter``), but there it is opt-in because
+    flipping it re-embeds the corpus; the gate prompt is ephemeral, so
+    here it is unconditional.
+    """
+
+    def test_gate_sees_title_and_tags(self, store: WikiStore) -> None:
+        store.write_page(
+            "abx:meropenem",
+            title="Meropenem",
+            body="Carbapenem reserve agent; 1g IV q8h.",
+            tags=["antibiotics", "reserve"],
+        )
+        seen: list[str] = []
+        retriever = build_retriever(
+            store,
+            RetrievalConfig(strategy="rerank"),
+            model=_capturing_rerank_model(["abx:meropenem"], seen),
+        )
+        retriever.retrieve("meropenem dosing", k=3)
+        prompt = "\n".join(seen)
+        assert "Meropenem — antibiotics, reserve" in prompt
+
+    def test_gate_sees_title_without_tags(self, store: WikiStore) -> None:
+        seen: list[str] = []
+        retriever = build_retriever(
+            store,
+            RetrievalConfig(strategy="rerank"),
+            model=_capturing_rerank_model([], seen),
+        )
+        retriever.retrieve("penicillin dose", k=3)
+        prompt = "\n".join(seen)
+        # Fixture pages carry a title but no tags: bare-title header line.
+        assert "\nPenicillin\nIV penicillin G" in prompt
+
+
 # --- semantic block (wiring tested with a stubbed index) -------------------
 
 

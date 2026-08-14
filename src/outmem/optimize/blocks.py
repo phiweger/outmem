@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from outmem._store.semantic import frontmatter_header
 from outmem.config import (
     ANTHROPIC_CACHE_ONESHOT,
     DEFAULT_OPTIMIZE_MAX_CANDIDATES,
@@ -46,7 +47,7 @@ from outmem.slug import PAGES_DIR, relpath_to_slug
 
 if TYPE_CHECKING:
     from outmem.config import RetrievalSettings
-    from outmem.store import WikiStore
+    from outmem.store import WikiPage, WikiStore
 
 log = logging.getLogger(__name__)
 
@@ -386,10 +387,12 @@ class RerankRetriever:
         excerpts: list[tuple[str, str]] = []
         for slug in shortlist[:self._max_candidates]:
             try:
-                body = self._store.read(slug).body
+                page = self._store.read(slug)
             except OutmemError:
                 continue
-            excerpts.append((slug, body[:self._context_chars]))
+            excerpts.append(
+                (slug, _gate_excerpt(page, question, context_chars=self._context_chars))
+            )
         if not excerpts:
             return RetrievalResult(())
         kept, error = judge_relevance(
@@ -400,6 +403,21 @@ class RerankRetriever:
         )
         note = f"rerank fell back to source order: {error}" if error else None
         return RetrievalResult(kept[:k], note=note)
+
+
+def _gate_excerpt(page: WikiPage, question: str, *, context_chars: int) -> str:
+    """What the relevance gate sees for one candidate page.
+
+    ``parse_wiki_page`` splits the frontmatter off before the body is
+    excerpted, so without the header line the page's own title and tags —
+    the two cheapest relevance signals a page has — never reach the gate
+    at all (the same blind spot ``semantic.embed_frontmatter`` exists to
+    fix for the embedder, but the gate prompt is per-query and ephemeral,
+    so here it is always on: no corpus to re-embed, no cache to bust).
+    """
+    header = frontmatter_header(page.frontmatter)
+    excerpt = page.body[:context_chars]
+    return f"{header}\n{excerpt}" if header else excerpt
 
 
 class SemanticRetriever:
