@@ -21,6 +21,21 @@ history (`git log --grep '^release:'`).
   though per-token pricing is unchanged. The rerank/HyDE gate stays
   on `claude-haiku-4-5`, which is still the current Haiku.
 
+- **The rerank gate now sees evidence, not just the page opening.**
+  A candidate excerpt used to be `body[:2000]` — frontmatter stripped,
+  so the page's own title and tags never reached the gate, and a page
+  shortlisted by lexical/bm25 *because* the query terms occur in it
+  could show the gate an intro containing none of them. Combined with
+  the gate's no-false-positives instruction, long pages were
+  systematically under-selected. Excerpts now carry the page's
+  `<title> — <tags>` line (the `embed_frontmatter` format, but always
+  on: the gate prompt is ephemeral, nothing to re-embed), and long
+  pages are spliced: the opening (identity) plus a window around the
+  densest query-term cluster (evidence), prefixed with the window's
+  markdown heading path. Head-only when the page fits, nothing
+  matches, or the match already sits in the opening. Behavior change
+  to retrieval — worth re-running `outmem optimize` on tuned wikis.
+
 ### Fixed
 
 - **One-shot LLM calls no longer opt into Anthropic automatic prompt

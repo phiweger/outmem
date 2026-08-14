@@ -18,6 +18,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from outmem.exceptions import OutmemError
+from outmem.frontmatter import WikiFrontmatter
 from outmem.optimize import (
     EvalEvent,
     Question,
@@ -33,8 +34,9 @@ from outmem.optimize.blocks import (
     LexicalRetriever,
     RetrievalResult,
     SemanticRetriever,
+    _gate_excerpt,
 )
-from outmem.store import WikiStore
+from outmem.store import WikiPage, WikiStore
 
 
 @pytest.fixture
@@ -423,6 +425,121 @@ class TestGateExcerpts:
         prompt = "\n".join(seen)
         # Fixture pages carry a title but no tags: bare-title header line.
         assert "\nPenicillin\nIV penicillin G" in prompt
+
+
+def _page(body: str, *, title: str = "Breakpoints") -> WikiPage:
+    return WikiPage(
+        slug="clinical:breakpoints",
+        frontmatter=WikiFrontmatter(title=title, slug="clinical:breakpoints"),
+        body=body,
+        path=Path("/nonexistent"),
+    )
+
+
+class TestGateExcerptWindow:
+    """Deep matches must reach the gate, not just the page opening.
+
+    Term-matched sources (lexical, bm25) shortlist a page BECAUSE the
+    query terms occur in it — possibly thousands of chars in. A head-only
+    excerpt then shows the gate an intro with no evidence, and the gate's
+    own no-false-positives instruction pushes it to reject: long pages
+    get systematically under-selected. The cut is therefore spliced:
+    opening + window around the densest term cluster.
+    """
+
+    # A body whose intro never mentions the topic and whose evidence sits
+    # deep under a heading path. Filler is line-structured so line
+    # snapping has boundaries to work with.
+    _filler = "General preamble about the clinical wiki and its scope.\n" * 40
+
+    def _long_body(self) -> str:
+        # The evidence sits deep INSIDE the section (not right under the
+        # heading), so the window's back-off cannot reach the heading
+        # lines — the [section: …] breadcrumb has to supply them.
+        section_filler = (
+            "Routine sentences describing laboratory workflow in general.\n" * 40
+        )
+        return (
+            self._filler  # ~2240 chars of intro
+            + "## Diagnostik\n"
+            + "### Blutkulturen\n"
+            + section_filler
+            + "Meropenem breakpoints for Enterobacterales were revised.\n"
+            + "Meropenem MIC over 8 is resistant.\n"
+            + self._filler
+        )
+
+    def test_deep_match_gets_a_window(self) -> None:
+        excerpt = _gate_excerpt(
+            _page(self._long_body()), "meropenem breakpoints", context_chars=2000
+        )
+        assert "Meropenem MIC over 8" in excerpt          # evidence visible
+        assert "General preamble" in excerpt              # head still present
+        assert "[…]" in excerpt                           # splice is marked
+
+    def test_window_carries_its_heading_path(self) -> None:
+        excerpt = _gate_excerpt(
+            _page(self._long_body()), "meropenem breakpoints", context_chars=2000
+        )
+        assert "[section: Diagnostik > Blutkulturen]" in excerpt
+
+    def test_no_term_match_keeps_the_head(self) -> None:
+        excerpt = _gate_excerpt(
+            _page(self._long_body()), "unrelated query words", context_chars=2000
+        )
+        assert excerpt.splitlines()[0] == "Breakpoints"   # header line
+        assert "[…]" not in excerpt
+        assert "Meropenem" not in excerpt
+
+    def test_match_in_the_head_needs_no_splice(self) -> None:
+        body = "Meropenem dosing is covered here.\n" + self._filler
+        excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
+        assert "[…]" not in excerpt
+        assert "Meropenem dosing" in excerpt
+
+    def test_short_page_is_shown_whole(self) -> None:
+        body = "Short page.\nMeropenem note at the end."
+        excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
+        assert body in excerpt
+        assert "[…]" not in excerpt
+
+    def test_stopword_only_query_keeps_the_head(self) -> None:
+        excerpt = _gate_excerpt(
+            _page(self._long_body()), "the and of", context_chars=2000
+        )
+        assert "[…]" not in excerpt
+
+    def test_budget_is_respected(self) -> None:
+        # The splice may overhang by the marker + heading line, not more.
+        excerpt = _gate_excerpt(
+            _page(self._long_body()), "meropenem breakpoints", context_chars=800
+        )
+        assert len(excerpt) <= 800 + 200
+
+    def test_matching_is_case_insensitive(self) -> None:
+        excerpt = _gate_excerpt(
+            _page(self._long_body()), "MEROPENEM Breakpoints", context_chars=2000
+        )
+        assert "Meropenem MIC over 8" in excerpt
+
+    def test_end_to_end_gate_sees_deep_evidence(self, store: WikiStore) -> None:
+        """Through the real retriever: bm25 shortlists the page on its deep
+        terms, and the gate prompt must contain those terms."""
+        store.write_page(
+            "clinical:breakpoints",
+            title="Breakpoints",
+            body=self._long_body(),
+        )
+        seen: list[str] = []
+        retriever = build_retriever(
+            store,
+            RetrievalConfig(strategy="rerank", rerank_source="bm25"),
+            model=_capturing_rerank_model(["clinical:breakpoints"], seen),
+        )
+        out = retriever.retrieve("meropenem breakpoints", k=3)
+        assert out.slugs == ("clinical:breakpoints",)
+        prompt = "\n".join(seen)
+        assert "Meropenem MIC over 8" in prompt
 
 
 # --- semantic block (wiring tested with a stubbed index) -------------------

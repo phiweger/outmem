@@ -405,19 +405,129 @@ class RerankRetriever:
         return RetrievalResult(kept[:k], note=note)
 
 
+# A split gate excerpt spends this share of the budget on the page
+# opening (what the page IS); the rest goes to the window around the
+# densest query-term cluster (why it matched). 40/60 keeps enough head
+# for identity while the window stays wide enough for a full passage.
+_GATE_HEAD_FRACTION = 0.4
+_GATE_SPLICE = "[…]"
+# How far a window start may back off to the previous line boundary, and
+# how much lead-in it gives before the cluster's first match, so the term
+# arrives mid-sentence-with-context rather than at char 0 of the window.
+_GATE_SNAP_CHARS = 200
+
+_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(\S.*)$", re.MULTILINE)
+
+
 def _gate_excerpt(page: WikiPage, question: str, *, context_chars: int) -> str:
     """What the relevance gate sees for one candidate page.
 
-    ``parse_wiki_page`` splits the frontmatter off before the body is
-    excerpted, so without the header line the page's own title and tags —
-    the two cheapest relevance signals a page has — never reach the gate
-    at all (the same blind spot ``semantic.embed_frontmatter`` exists to
-    fix for the embedder, but the gate prompt is per-query and ephemeral,
-    so here it is always on: no corpus to re-embed, no cache to bust).
+    Two blind spots this repairs, both consequences of judging a page by
+    ``body[:N]``:
+
+    * ``parse_wiki_page`` splits the frontmatter off before the body is
+      excerpted, so without the header line the page's own title and
+      tags — the two cheapest relevance signals a page has — never reach
+      the gate at all (the same blind spot ``semantic.embed_frontmatter``
+      exists to fix for the embedder, but the gate prompt is per-query
+      and ephemeral, so here it is always on: no corpus to re-embed, no
+      cache to bust).
+
+    * A term-matched page (lexical/bm25 sources shortlist a page BECAUSE
+      the query terms occur in it) may hold its match deep in the body,
+      past the head — the gate then judges an intro that shows no
+      evidence, and its own no-false-positives instruction pushes it to
+      reject. Long pages are therefore spliced: the opening (identity)
+      plus the window around the densest query-term cluster (evidence),
+      with the window's heading path restoring the context the omitted
+      middle would have given.
     """
     header = frontmatter_header(page.frontmatter)
-    excerpt = page.body[:context_chars]
+    excerpt = _gate_body_cut(page.body, question, context_chars)
     return f"{header}\n{excerpt}" if header else excerpt
+
+
+def _gate_body_cut(body: str, question: str, context_chars: int) -> str:
+    """Cut ``body`` down to ~``context_chars`` for the gate prompt.
+
+    Head-of-page when the page fits, has no query-term match, or matches
+    only in the opening (the head already shows the evidence). Otherwise
+    a head + deep-window splice. The splice may run ~a heading line and
+    marker past ``context_chars``; the budget is a cost cap, not a wire
+    limit, so the overhang is not worth trimming content for.
+    """
+    if len(body) <= context_chars:
+        return body
+    head_chars = int(context_chars * _GATE_HEAD_FRACTION)
+    window_chars = context_chars - head_chars
+    deep = [p for p in _term_positions(body, question) if p >= head_chars]
+    if not deep:
+        return body[:context_chars]
+    start = _densest_window_start(deep, window_chars)
+    start = min(start, len(body) - window_chars)
+    start = _snap_to_line_start(body, start)
+    start = max(start, head_chars)  # never re-show the head's own text
+    window = body[start : start + window_chars]
+    parts = [body[:head_chars], _GATE_SPLICE]
+    trail = _heading_trail(body, start)
+    if trail:
+        parts.append(f"[section: {trail}]")
+    parts.append(window)
+    return "\n".join(parts)
+
+
+def _term_positions(body: str, question: str) -> list[int]:
+    """Ascending start offsets of every query-term occurrence in ``body``.
+
+    Terms come from :func:`_keywords` — the same extraction the lexical
+    and bm25 sources search with, so "where the source matched" and
+    "where the window looks" agree. Substring, case-insensitive matching,
+    also mirroring the sources (ripgrep alternation / FTS5 tokens).
+    """
+    terms = [t for t in _keywords(question).split("|") if t]
+    if not terms:
+        return []
+    pattern = re.compile("|".join(map(re.escape, terms)), re.IGNORECASE)
+    return [m.start() for m in pattern.finditer(body)]
+
+
+def _densest_window_start(positions: list[int], window_chars: int) -> int:
+    """Start offset for the ``window_chars`` window covering the most
+    positions (earliest cluster wins ties), backed off slightly so the
+    first match lands with lead-in context rather than at offset 0."""
+    best_i = 0
+    best_count = 0
+    hi = 0
+    for i in range(len(positions)):
+        if hi < i:
+            hi = i
+        while hi < len(positions) and positions[hi] < positions[i] + window_chars:
+            hi += 1
+        if hi - i > best_count:
+            best_i, best_count = i, hi - i
+    return max(0, positions[best_i] - _GATE_SNAP_CHARS)
+
+
+def _snap_to_line_start(body: str, pos: int) -> int:
+    """Back ``pos`` up to the nearest line start within ``_GATE_SNAP_CHARS``."""
+    newline = body.rfind("\n", max(0, pos - _GATE_SNAP_CHARS), pos)
+    return newline + 1 if newline != -1 else pos
+
+
+def _heading_trail(body: str, pos: int, *, max_levels: int = 3) -> str:
+    """The markdown heading path governing offset ``pos`` (``A > B > C``).
+
+    Walks headings before ``pos`` keeping a level stack, so a deep window
+    carries the section context its splice omitted. Empty when no heading
+    precedes the window.
+    """
+    stack: list[tuple[int, str]] = []
+    for m in _HEADING_RE.finditer(body, 0, pos):
+        level = len(m.group(1))
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        stack.append((level, m.group(2).strip()))
+    return " > ".join(text for _, text in stack[-max_levels:])
 
 
 class SemanticRetriever:
