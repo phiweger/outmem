@@ -107,7 +107,7 @@ class TestInferModelCached:
         # at inference time, so two ids resolve to two distinct cached models.
         monkeypatch.setenv("ANTHROPIC_API_KEY", "x-not-real")
         a = infer_model_cached("anthropic:claude-haiku-4-5")
-        b = infer_model_cached("anthropic:claude-sonnet-4-6")
+        b = infer_model_cached("anthropic:claude-sonnet-5")
         assert a is not b
         assert infer_model_cached("anthropic:claude-haiku-4-5") is a  # still cached
 

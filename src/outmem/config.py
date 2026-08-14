@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "config.yaml"
 
-DEFAULT_MODEL = "anthropic:claude-sonnet-4-6"
+DEFAULT_MODEL = "anthropic:claude-sonnet-5"
 DEFAULT_AGENT_NAME = "outmem agent"
 DEFAULT_AGENT_EMAIL = "agent@host"
 DEFAULT_REMOTE = "origin"

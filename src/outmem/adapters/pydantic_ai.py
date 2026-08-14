@@ -9,7 +9,7 @@ PydanticAI's schema extraction. Consumers attach them to their own
     from outmem.adapters.pydantic_ai import wiki_tools
 
     store = WikiStore.open("/srv/agent")
-    agent = Agent("anthropic:claude-sonnet-4-6", tools=wiki_tools(store))
+    agent = Agent("anthropic:claude-sonnet-5", tools=wiki_tools(store))
 
 No hard dependency on ``pydantic_ai`` — the functions are vanilla
 Python and PydanticAI introspects them at attach time. Install
@@ -1035,7 +1035,7 @@ def wiki_read_tools(store: WikiStore) -> list[WikiTool]:
 
         store = WikiStore.open("/srv/curated-wiki", read_only=True)
         agent = Agent(
-            "anthropic:claude-sonnet-4-6",
+            "anthropic:claude-sonnet-5",
             tools=wiki_read_tools(store),
             system_prompt="You answer from the wiki only. Cite [[slugs]].",
         )
@@ -1078,7 +1078,7 @@ _CONSULT_MODEL_SETTINGS: dict[str, Any] = {
 def build_consult_wiki(
     wiki_path: str | Path,
     *,
-    model: Any = "anthropic:claude-sonnet-4-6",
+    model: Any = "anthropic:claude-sonnet-5",
 ) -> Callable[[str], str]:
     """One-call factory: a ``consult_wiki(question) -> str`` tool function.
 
@@ -1122,7 +1122,7 @@ def build_consult_wiki(
         consult_wiki = build_consult_wiki("/srv/curated-wiki")
 
         my_assistant = Agent(
-            "anthropic:claude-sonnet-4-6",
+            "anthropic:claude-sonnet-5",
             tools=[consult_wiki],
             system_prompt=(
                 "You're a helpful assistant. For questions about "
@@ -1135,10 +1135,10 @@ def build_consult_wiki(
         wiki_path: Path to a curated wiki directory (must already
             exist; use ``outmem init`` to scaffold one).
         model: Anything :class:`pydantic_ai.Agent` accepts — a model ID
-            string (``"anthropic:claude-sonnet-4-6"``), a
+            string (``"anthropic:claude-sonnet-5"``), a
             :class:`~pydantic_ai.models.Model` instance, or
             :class:`~pydantic_ai.models.test.TestModel` for tests.
-            Defaults to ``anthropic:claude-sonnet-4-6``.
+            Defaults to ``anthropic:claude-sonnet-5``.
     """
     from pydantic_ai import Agent
 
@@ -1209,7 +1209,7 @@ def skill_text(
         from outmem.adapters.pydantic_ai import skill_text
 
         system = "You are an agent. " + skill_text("write")
-        agent = Agent("anthropic:claude-sonnet-4-6", system_prompt=system, ...)
+        agent = Agent("anthropic:claude-sonnet-5", system_prompt=system, ...)
 
     Args:
         skill_name: One of the bundled skill names (e.g. ``"write"``).

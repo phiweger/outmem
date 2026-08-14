@@ -149,7 +149,7 @@ export OUTMEM_PATH=/srv/my-wiki
 ${EDITOR:-vi} /srv/my-wiki/wiki/AGENTS.md
 
 # Optional: ask the agent something (requires outmem[agent] + an API key).
-export OUTMEM_MODEL="anthropic:claude-sonnet-4-6"
+export OUTMEM_MODEL="anthropic:claude-sonnet-5"
 echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
 outmem ask "what's our pricing policy?"
 ```
@@ -279,7 +279,7 @@ bank = generate_bank(
 
 result = optimize_retrieval(
     store, bank,
-    optimizer_model="anthropic:claude-sonnet-4-6",
+    optimizer_model="anthropic:claude-sonnet-5",
     eval_sample=30,        # score each config on 30 questions, not the whole bank
     #                        (the winner is re-scored on the full bank, so it's honest).
     #                        THE cost lever: rerank/hyde make 1 model call PER question,
@@ -338,7 +338,7 @@ model call *per question*:
 
 ```python
 result = optimize_retrieval(
-    store, bank, optimizer_model="anthropic:claude-sonnet-4-6",
+    store, bank, optimizer_model="anthropic:claude-sonnet-5",
     allowed_strategies=["lexical", "bm25", "semantic"],   # skip rerank/hyde entirely
 )
 ```
@@ -425,7 +425,7 @@ from outmem.agent import render_system_prompt
 store = WikiStore.open("/path/to/wiki")
 
 agent = Agent(
-    "anthropic:claude-sonnet-4-6",
+    "anthropic:claude-sonnet-5",
     tools=wiki_tools(store),                   # 14 tools (15 with semantic)
     system_prompt=render_system_prompt(store), # identical to outmem ask's
 )
@@ -459,7 +459,7 @@ from outmem.adapters.pydantic_ai import skill_text, wiki_tools
 
 agents_md = store.read_agents_md() or ""
 agent = Agent(
-    "anthropic:claude-sonnet-4-6",
+    "anthropic:claude-sonnet-5",
     tools=wiki_tools(store),
     system_prompt=(
         "You are a helpful assistant.\n\n"
@@ -484,7 +484,7 @@ from outmem.adapters.pydantic_ai import build_consult_wiki
 consult_wiki = build_consult_wiki("/srv/curated-wiki")
 
 my_assistant = Agent(
-    "anthropic:claude-sonnet-4-6",
+    "anthropic:claude-sonnet-5",
     tools=[consult_wiki],
     system_prompt=(
         "You're a helpful assistant. For questions about internal "
@@ -528,7 +528,7 @@ from outmem.adapters.pydantic_ai import wiki_read_tools
 
 store = WikiStore.open("/srv/curated-wiki", read_only=True)
 agent = Agent(
-    "anthropic:claude-sonnet-4-6",
+    "anthropic:claude-sonnet-5",
     tools=wiki_read_tools(store),
     system_prompt="You answer from the wiki only. Cite [[slugs]].",
 )

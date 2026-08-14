@@ -3,7 +3,7 @@
 Each :meth:`EvalRun.judge` call sends one (criterion, response) pair
 to a separate :class:`pydantic_ai.Agent` configured with
 ``output_type=JudgeVerdict``. The judge defaults to
-``anthropic:claude-sonnet-4-6``; override via ``--judge-model`` or
+``anthropic:claude-sonnet-5``; override via ``--judge-model`` or
 :func:`set_judge_model`.
 
 The judge agent is held in a module-level cache so repeated calls
@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-DEFAULT_JUDGE_MODEL = "anthropic:claude-sonnet-4-6"
+DEFAULT_JUDGE_MODEL = "anthropic:claude-sonnet-5"
 
 
 def _resolve_default() -> str:

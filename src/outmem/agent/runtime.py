@@ -159,7 +159,7 @@ def _resolve_model(model: Any | None, store: WikiStore | None = None) -> Any:
         return store.config.outmem.model
     raise OutmemError(
         "No model specified. Pass `model=...`, set "
-        f"${DEFAULT_MODEL_ENV} (e.g. 'anthropic:claude-sonnet-4-6'), "
+        f"${DEFAULT_MODEL_ENV} (e.g. 'anthropic:claude-sonnet-5'), "
         "or add `model:` to config.yaml."
     )
 
@@ -184,7 +184,9 @@ DEFAULT_OUTPUT_RETRIES = 3
 # gets truncated, and PydanticAI sees a write_page call missing its
 # `body` argument — surfaced to the user as "body: Field required" with
 # no obvious cause. 16k is a comfortable headroom that still bounds
-# token cost.
+# token cost. On models that think by default when no `thinking` config
+# is sent (Sonnet 5+; outmem sends none), thinking tokens come out of
+# this same budget.
 DEFAULT_MAX_TOKENS = 16384
 
 
@@ -199,7 +201,7 @@ def build_agent(
     """Construct a :class:`pydantic_ai.Agent` configured for outmem.
 
     ``model`` accepts anything :class:`pydantic_ai.Agent` accepts — a
-    string ID (``"anthropic:claude-sonnet-4-6"``), a :class:`Model`
+    string ID (``"anthropic:claude-sonnet-5"``), a :class:`Model`
     instance, or :class:`TestModel` for testing. When ``None``, falls
     back to ``$OUTMEM_MODEL``.
 

@@ -9,8 +9,8 @@ Reads the ``evals:`` block:
 .. code-block:: yaml
 
     evals:
-      agent_model: anthropic:claude-sonnet-4-6   # optional
-      judge_model: anthropic:claude-sonnet-4-6 # optional
+      agent_model: anthropic:claude-sonnet-5   # optional
+      judge_model: anthropic:claude-sonnet-5 # optional
 
 Resolution chain (highest priority first), enforced in
 :mod:`evals.run`:

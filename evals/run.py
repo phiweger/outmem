@@ -7,7 +7,7 @@ Usage::
     python -m evals.run --case duplicate-trap  # one case by name
     python -m evals.run --case duplicate-trap --case approval-fallback
     python -m evals.run --model anthropic:claude-haiku-4-5
-    python -m evals.run --judge-model anthropic:claude-sonnet-4-6
+    python -m evals.run --judge-model anthropic:claude-sonnet-5
     python -m evals.run --json out/evals.json
 
 Exit code = number of failing cases (0 on full pass).
@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         "--judge-model",
         default=None,
         help="PydanticAI model id for the LLM judge "
-        "(defaults to anthropic:claude-sonnet-4-6).",
+        "(defaults to anthropic:claude-sonnet-5).",
     )
     parser.add_argument(
         "--json",

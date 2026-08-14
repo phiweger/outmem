@@ -72,7 +72,7 @@ outmem ask "what is our pricing formula?"
 # → tool calls logged to stderr: [HH:MM:SS] [tool] search_wiki question='…' …
 
 outmem ask --stdin <<< "what is our pricing formula?"
-outmem ask "explain pricing" --model anthropic:claude-sonnet-4-6
+outmem ask "explain pricing" --model anthropic:claude-sonnet-5
 outmem ask "..." --quiet                          # suppress the per-tool-call trace
 outmem ask "..." --no-push --no-record --show-meta
 # --show-meta prints a "--\nturn ... commits: <shas> pushed: <bool>" footer on stderr

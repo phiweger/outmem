@@ -108,7 +108,7 @@ def _build_outer_agent(store):
     from pydantic_ai import Agent
 
     return Agent(
-        "anthropic:claude-sonnet-4-6",
+        "anthropic:claude-sonnet-5",
         tools=[_make_consult_wiki(store)],
         system_prompt=_OUTER_SYSTEM_PROMPT,
     )

@@ -12,7 +12,7 @@ modes:
   whether the agent's final response satisfies a natural-language
   criterion. See :mod:`evals.judges.llm_judge`.
 
-Default judge: ``anthropic:claude-sonnet-4-6``. Override per-run with
+Default judge: ``anthropic:claude-sonnet-5``. Override per-run with
 ``--judge-model``.
 
 Run::

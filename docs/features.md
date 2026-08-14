@@ -132,7 +132,7 @@ from outmem.optimize import generate_bank, optimize_retrieval, QuestionBank
 store = WikiStore.open("/srv/wiki")
 bank = generate_bank(store, model="anthropic:claude-haiku-4-5")
 # …or, for sensitive corpora: bank = QuestionBank.load("bank.json")
-result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-4-6")
+result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-5")
 print(result.best_config, result.best_score)   # then write it into config.yaml
 ```
 

@@ -1175,7 +1175,7 @@ def test_save_preserves_other_config_and_comments(
     dest = tmp_path / "nested" / "config.yaml"
     dest.parent.mkdir(parents=True)
     dest.write_text(
-        "model: anthropic:claude-sonnet-4-6\n\n"
+        "model: anthropic:claude-sonnet-5\n\n"
         "# my notes\n"
         "retrieval:\n  strategy: lexical\n\n"
         "logfire:\n  enabled: true\n",
@@ -1192,7 +1192,7 @@ def test_save_preserves_other_config_and_comments(
     written = result.save(1, store, path=dest)
     assert written == dest
     text = dest.read_text(encoding="utf-8")
-    assert "model: anthropic:claude-sonnet-4-6" in text  # untouched
+    assert "model: anthropic:claude-sonnet-5" in text  # untouched
     assert "# my notes" in text  # comment preserved
     assert "logfire:\n  enabled: true" in text  # later block intact
     assert "from_optimization: true" in text  # new block written

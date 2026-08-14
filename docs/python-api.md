@@ -480,7 +480,7 @@ from outmem.adapters.pydantic_ai import wiki_tools, skill_text
 store = WikiStore.open("/srv/agent")
 
 agent = Agent(
-    "anthropic:claude-sonnet-4-6",
+    "anthropic:claude-sonnet-5",
     tools=wiki_tools(store),
     system_prompt=(
         "You answer with citations. "
@@ -540,7 +540,7 @@ from outmem.adapters.pydantic_ai import build_consult_wiki
 consult_wiki = build_consult_wiki("/srv/curated-wiki")
 
 my_assistant = Agent(
-    "anthropic:claude-sonnet-4-6",
+    "anthropic:claude-sonnet-5",
     tools=[consult_wiki],
     system_prompt=(
         "You're a helpful assistant. For questions about internal "
@@ -592,7 +592,7 @@ from outmem.adapters.pydantic_ai import wiki_read_tools
 
 store = WikiStore.open("/srv/curated-wiki", read_only=True)
 agent = Agent(
-    "anthropic:claude-sonnet-4-6",
+    "anthropic:claude-sonnet-5",
     tools=wiki_read_tools(store),    # 8 tools, no write paths
     system_prompt="You answer from the wiki only. Cite [[slugs]].",
 )
@@ -639,7 +639,7 @@ store = WikiStore.open("/srv/agent")
 result = ask_sync(
     store,
     query="what did we decide about pricing?",
-    model="anthropic:claude-sonnet-4-6",   # or None to read $OUTMEM_MODEL
+    model="anthropic:claude-sonnet-5",   # or None to read $OUTMEM_MODEL
 )
 result.response                          # the agent's text reply
 result.wrote_back                        # True if the agent committed
@@ -692,7 +692,7 @@ from outmem.optimize import (
 
 store = WikiStore.open("/srv/wiki")
 bank = generate_bank(store, model="anthropic:claude-haiku-4-5")  # or QuestionBank.load("bank.json")
-result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-4-6")
+result = optimize_retrieval(store, bank, optimizer_model="anthropic:claude-sonnet-5")
 result.best_config   # winning strategy + knobs for this corpus
 result.best_score    # the metric it achieved (Hit@k blended with abstention)
 result.trace         # [(config_dict, score), ...] — every config tried

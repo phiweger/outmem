@@ -11,7 +11,7 @@ Public surface::
     answer = ask_sync(store, query="what did we decide about pricing?")
 
 The agent is model-agnostic: the consumer sets ``OUTMEM_MODEL`` (e.g.
-``anthropic:claude-sonnet-4-6``, ``openai:gpt-5``) and provides the
+``anthropic:claude-sonnet-5``, ``openai:gpt-5``) and provides the
 appropriate API key in the environment. PydanticAI handles model
 resolution.
 """

@@ -67,7 +67,7 @@ want it.
 
 ```yaml
 # config.yaml — wiki-level config for the agent runtime
-model: anthropic:claude-sonnet-4-6
+model: anthropic:claude-sonnet-5
 
 agent:
   name: outmem agent

@@ -184,7 +184,7 @@ bank = generate_bank(store, model="anthropic:claude-haiku-4-5", max_pages=50)
 result = optimize_retrieval(
     store,
     bank,
-    optimizer_model="anthropic:claude-sonnet-4-6",
+    optimizer_model="anthropic:claude-sonnet-5",
     eval_sample=30,       # score each config on 30 questions while tuning
     eval_concurrency=8,   # 8 retrievals in flight per eval
 )

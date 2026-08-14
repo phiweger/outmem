@@ -18,13 +18,13 @@
 
 # Default model that `outmem init` writes into a new wiki's
 # `config.yaml`. Edit to change the per-user default.
-model: anthropic:claude-sonnet-4-6
+model: anthropic:claude-sonnet-5
 
 evals:
   # Agent under test. Leave commented to fall through to $OUTMEM_MODEL
   # or the fixture wiki's own config.yaml model field.
-  # agent_model: anthropic:claude-sonnet-4-6
+  # agent_model: anthropic:claude-sonnet-5
 
-  # LLM judge model. Sonnet 4.6 is a good cost/quality balance; bump
+  # LLM judge model. Sonnet 5 is a good cost/quality balance; bump
   # to Opus for stricter grading on contentious cases.
-  judge_model: anthropic:claude-sonnet-4-6
+  judge_model: anthropic:claude-sonnet-5

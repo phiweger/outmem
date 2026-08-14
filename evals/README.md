@@ -36,8 +36,8 @@ of `pyproject.toml`, *not* a wiki's own `config.yaml`):
 
 ```yaml
 evals:
-  # agent_model: anthropic:claude-sonnet-4-6   # optional fallback
-  judge_model: anthropic:claude-sonnet-4-6
+  # agent_model: anthropic:claude-sonnet-5   # optional fallback
+  judge_model: anthropic:claude-sonnet-5
 ```
 
 Resolution, highest priority first:
@@ -49,7 +49,7 @@ Resolution, highest priority first:
 ## Run
 
 ```bash
-# All 8 cases, trace + LLM judge (default judge: anthropic:claude-sonnet-4-6).
+# All 8 cases, trace + LLM judge (default judge: anthropic:claude-sonnet-5).
 python -m evals.run
 
 # Trace-only — still calls the agent's LLM, but skips the judge step
@@ -64,7 +64,7 @@ python -m evals.run --case duplicate-trap --case approval-fallback
 OUTMEM_MODEL=anthropic:claude-haiku-4-5 python -m evals.run
 
 # Override the judge model.
-python -m evals.run --judge-model anthropic:claude-sonnet-4-6
+python -m evals.run --judge-model anthropic:claude-sonnet-5
 
 # Machine-readable report.
 python -m evals.run --json out/evals.json
@@ -102,7 +102,7 @@ By default each case streams to stderr as it runs:
 ## Costs
 
 Per case: ~3-10 agent turns × ~$0.01-0.05 + 2-4 judge calls × ~$0.005.
-Full 8-case suite: **~$0.30-1.00** with Opus 4.7 (agent) + Sonnet 4.6
+Full 8-case suite: **~$0.30-1.00** with Opus (agent) + Sonnet 5
 (judge). Use `--no-judge` and Haiku to cut to ~$0.05.
 
 ## Subagent end-to-end eval
@@ -126,7 +126,7 @@ ANTHROPIC_API_KEY=... python -m evals.subagent_e2e
 ```
 
 Exits 0 on full pass, 1 on any failure, 2 if no API key. Tmp wiki
-is cleaned up automatically. ~$0.10-0.20 per run on sonnet-4-6.
+is cleaned up automatically. ~$0.10-0.20 per run on sonnet-5.
 
 ## The 8 cases
 
@@ -195,7 +195,7 @@ r.expect_commit(subject_contains="pricing-formula")
 ## LLM judge
 
 Each `r.judge("...")` call ships the criterion + the agent's response
-to the judge agent (Sonnet 4.6 by default) and expects a structured
+to the judge agent (Sonnet 5 by default) and expects a structured
 `JudgeVerdict(passed: bool, reasoning: str)` back. Failures surface
 the reasoning in the report.
 

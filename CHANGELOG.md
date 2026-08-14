@@ -3,6 +3,24 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## Unreleased
+
+### Changed
+
+- Default Sonnet bumped: `anthropic:claude-sonnet-4-6` →
+  `anthropic:claude-sonnet-5` everywhere the string was pinned — the
+  agent default (`DEFAULT_MODEL`), `consult_wiki`'s parameter default,
+  the eval judge, and the repo-level `config.yaml` that `outmem init`
+  seeds new wikis from. Existing wikis are untouched: the model is
+  pinned in each wiki's own `config.yaml`, so the bump reaches new
+  wikis (and anyone resolving through env/defaults), not old ones.
+  Two things shift with the model: Sonnet 5 runs adaptive thinking by
+  default when no `thinking` config is sent (outmem sends none), and
+  thinking shares the `max_tokens` budget; its tokenizer also counts
+  ~30% more tokens for the same text, so cost baselines move even
+  though per-token pricing is unchanged. The rerank/HyDE gate stays
+  on `claude-haiku-4-5`, which is still the current Haiku.
+
 ## 0.13.0
 
 **Supersession stops depending on how you named the file.** Reported
