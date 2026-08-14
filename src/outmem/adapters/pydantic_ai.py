@@ -1071,7 +1071,7 @@ _CONSULT_WIKI_SYSTEM_PROMPT = (
 # dependency on the optional `outmem.agent` runtime.
 _CONSULT_MODEL_SETTINGS: dict[str, Any] = {
     **ANTHROPIC_CACHE_WITH_TOOLS,
-    "max_tokens": 16384,
+    "max_tokens": 20480,  # keep in step with agent.runtime.DEFAULT_MAX_TOKENS
 }
 
 

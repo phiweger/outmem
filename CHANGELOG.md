@@ -18,8 +18,12 @@ history (`git log --grep '^release:'`).
   default when no `thinking` config is sent (outmem sends none), and
   thinking shares the `max_tokens` budget; its tokenizer also counts
   ~30% more tokens for the same text, so cost baselines move even
-  though per-token pricing is unchanged. The rerank/HyDE gate stays
-  on `claude-haiku-4-5`, which is still the current Haiku.
+  though per-token pricing is unchanged. To keep the anti-truncation
+  headroom `DEFAULT_MAX_TOKENS` exists for, the agent and
+  `consult_wiki` budgets rise 16384 → 20480 — just under the ~21.3k
+  ceiling the Anthropic SDK enforces for non-streaming requests. The
+  rerank/HyDE gate stays on `claude-haiku-4-5`, which is still the
+  current Haiku.
 
 - **The rerank gate now sees evidence, not just the page opening.**
   A candidate excerpt used to be `body[:2000]` — frontmatter stripped,
@@ -32,9 +36,13 @@ history (`git log --grep '^release:'`).
   on: the gate prompt is ephemeral, nothing to re-embed), and long
   pages are spliced: the opening (identity) plus a window around the
   densest query-term cluster (evidence), prefixed with the window's
-  markdown heading path. Head-only when the page fits, nothing
-  matches, or the match already sits in the opening. Behavior change
-  to retrieval — worth re-running `outmem optimize` on tuned wikis.
+  markdown heading path (via the fence-aware outline parser, so a
+  `# comment` in a code block never becomes a section label). Head-only
+  when the page fits, nothing matches, or the match already sits in
+  the opening. The optimizer's `read_page` diagnostic tool gets the
+  same title/tags line and now says when a page was truncated.
+  Behavior change to retrieval — worth re-running `outmem optimize`
+  on tuned wikis.
 
 ### Fixed
 

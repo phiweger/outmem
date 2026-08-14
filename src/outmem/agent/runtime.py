@@ -183,11 +183,15 @@ DEFAULT_OUTPUT_RETRIES = 3
 # reasoning, 4096 tokens regularly runs out mid-tool-call, the response
 # gets truncated, and PydanticAI sees a write_page call missing its
 # `body` argument — surfaced to the user as "body: Field required" with
-# no obvious cause. 16k is a comfortable headroom that still bounds
-# token cost. On models that think by default when no `thinking` config
-# is sent (Sonnet 5+; outmem sends none), thinking tokens come out of
-# this same budget.
-DEFAULT_MAX_TOKENS = 16384
+# no obvious cause. On models that think by default when no `thinking`
+# config is sent (Sonnet 5+; outmem sends none), thinking tokens come
+# out of this same budget — and Sonnet 5's tokenizer counts ~30% more
+# tokens for the same text — so the old 16k headroom shrank on both
+# ends. 20480 restores it while staying under the ~21.3k ceiling the
+# Anthropic SDK enforces for NON-streaming requests at its default
+# timeout (PydanticAI runs non-streaming; a larger value would make the
+# SDK refuse the request outright).
+DEFAULT_MAX_TOKENS = 20480
 
 
 def build_agent(

@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from outmem._store.semantic import frontmatter_header
 from outmem.config import (
     ANTHROPIC_CACHE_WITH_TOOLS,
     DEFAULT_OPTIMIZE_CONCURRENCY,
@@ -452,12 +453,21 @@ def optimize_retrieval(
                             eval_sample=eval_sample)
 
     def read_page(slug: str) -> str:
-        """Read a wiki page's body (truncated) to diagnose why retrieval
-        missed it. Use on the gold slugs of failing questions."""
+        """Read a wiki page (title/tags line + truncated body) to diagnose
+        why retrieval missed it. Use on the gold slugs of failing questions."""
         try:
-            return store.read(slug).body[:2000]
+            page = store.read(slug)
         except OutmemError as exc:
             return f"(no such page {slug!r}: {exc})"
+        # Same blind spots the gate excerpt repairs: frontmatter is split
+        # off before the body (title/tags invisible), and a bare truncation
+        # hides that there IS more page — exactly what an agent diagnosing
+        # "why did retrieval miss this?" must not be blind to.
+        header = frontmatter_header(page.frontmatter)
+        body = page.body[:2000]
+        if len(page.body) > 2000:
+            body += f"\n… (+{len(page.body) - 2000} more chars not shown)"
+        return f"{header}\n{body}" if header else body
 
     agent_kwargs: dict[str, Any] = {"model_settings": _MODEL_SETTINGS}
     agent: Agent[None, str] = Agent(

@@ -42,6 +42,7 @@ from outmem.config import (
     DEFAULT_RELEVANCE_MODEL,
 )
 from outmem.exceptions import OutmemError
+from outmem.outline import heading_path_at, parse_outline
 from outmem.relevance import judge_relevance
 from outmem.slug import PAGES_DIR, relpath_to_slug
 
@@ -416,8 +417,6 @@ _GATE_SPLICE = "[…]"
 # arrives mid-sentence-with-context rather than at char 0 of the window.
 _GATE_SNAP_CHARS = 200
 
-_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(\S.*)$", re.MULTILINE)
-
 
 def _gate_excerpt(page: WikiPage, question: str, *, context_chars: int) -> str:
     """What the relevance gate sees for one candidate page.
@@ -463,14 +462,22 @@ def _gate_body_cut(body: str, question: str, context_chars: int) -> str:
     deep = [p for p in _term_positions(body, question) if p >= head_chars]
     if not deep:
         return body[:context_chars]
-    start = _densest_window_start(deep, window_chars)
-    start = min(start, len(body) - window_chars)
-    start = _snap_to_line_start(body, start)
+    start_raw = _densest_window_start(deep, window_chars)
+    start_raw = min(start_raw, len(body) - window_chars)
+    # The end is pinned BEFORE line-snapping: snapping must widen the
+    # window leftward, never slide it. A slid window loses its right
+    # edge — and when the tail clamp above ran, the right edge is the
+    # end of the page, where the match is.
+    end = start_raw + window_chars
+    start = _snap_to_line_start(body, start_raw)
     if start <= head_chars:
-        # The cluster sits right past the opening — head and window are
-        # contiguous, so show one unbroken span rather than a fake splice.
-        return body[:context_chars]
-    window = body[start : start + window_chars]
+        # Head and window are contiguous (cluster near the opening, or a
+        # short page's tail clamp pulled the window back to the head) —
+        # one unbroken span, no fake splice. max(): when the clamp ran,
+        # ``end`` reaches past context_chars and must win, or a match in
+        # the page's final chars would be cut off with the budget.
+        return body[: max(context_chars, end)]
+    window = body[start:end]
     parts = [body[:head_chars], _GATE_SPLICE]
     trail = _heading_trail(body, start)
     if trail:
@@ -497,7 +504,9 @@ def _term_positions(body: str, question: str) -> list[int]:
 def _densest_window_start(positions: list[int], window_chars: int) -> int:
     """Start offset for the ``window_chars`` window covering the most
     positions (earliest cluster wins ties), backed off slightly so the
-    first match lands with lead-in context rather than at offset 0."""
+    first match lands with lead-in context rather than at offset 0. The
+    back-off is capped at a quarter of the window so a small budget can
+    never back off past its own width and lose the match."""
     best_i = 0
     best_count = 0
     hi = 0
@@ -508,7 +517,8 @@ def _densest_window_start(positions: list[int], window_chars: int) -> int:
             hi += 1
         if hi - i > best_count:
             best_i, best_count = i, hi - i
-    return max(0, positions[best_i] - _GATE_SNAP_CHARS)
+    lead_in = min(_GATE_SNAP_CHARS, window_chars // 4)
+    return max(0, positions[best_i] - lead_in)
 
 
 def _snap_to_line_start(body: str, pos: int) -> int:
@@ -518,19 +528,16 @@ def _snap_to_line_start(body: str, pos: int) -> int:
 
 
 def _heading_trail(body: str, pos: int, *, max_levels: int = 3) -> str:
-    """The markdown heading path governing offset ``pos`` (``A > B > C``).
+    """The markdown heading path enclosing offset ``pos`` (``A > B``).
 
-    Walks headings before ``pos`` keeping a level stack, so a deep window
-    carries the section context its splice omitted. Empty when no heading
-    precedes the window.
+    Reuses the outline parser — fence-aware (a ``# comment`` inside a
+    code block is not a section) and closed-ATX-stripping — so the
+    gate's section labels agree with ``read_page``'s section maps and
+    the embedder's heading paths, and any heading-grammar fix lands in
+    one place. Empty when ``pos`` sits in the page's preamble.
     """
-    stack: list[tuple[int, str]] = []
-    for m in _HEADING_RE.finditer(body, 0, pos):
-        level = len(m.group(1))
-        while stack and stack[-1][0] >= level:
-            stack.pop()
-        stack.append((level, m.group(2).strip()))
-    return " > ".join(text for _, text in stack[-max_levels:])
+    path = heading_path_at(parse_outline(body), pos)
+    return " > ".join(path[-max_levels:])
 
 
 class SemanticRetriever:

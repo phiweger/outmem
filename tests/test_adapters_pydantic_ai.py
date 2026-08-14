@@ -397,7 +397,7 @@ def test_build_consult_wiki_inner_settings_match_runtime(tmp_path: Path) -> None
     consult = build_consult_wiki(seed.root, model=TestModel())
     inner = consult.__closure__[0].cell_contents  # type: ignore[index]
     settings = inner.model_settings or {}
-    assert settings.get("max_tokens") == 16384
+    assert settings.get("max_tokens") == 20480
     assert settings.get("anthropic_cache") is True
     assert settings.get("anthropic_cache_instructions") is True
     assert settings.get("anthropic_cache_tool_definitions") is True

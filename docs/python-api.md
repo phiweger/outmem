@@ -575,7 +575,7 @@ What "read-only" guarantees:
   wiki's filesystem state (including `.outmem/`) is left exactly as
   the caller found it. The mode is safe to use against a literally
   read-only mount.
-- The inner `consult_wiki` agent carries `max_tokens=16384` and the
+- The inner `consult_wiki` agent carries `max_tokens=20480` and the
   Anthropic prompt-caching keys (`anthropic_cache`,
   `anthropic_cache_instructions`, `anthropic_cache_tool_definitions`),
   matching the full `outmem ask` runtime. Without these, multi-page

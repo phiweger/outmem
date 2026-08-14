@@ -498,6 +498,40 @@ class TestGateExcerptWindow:
         assert "[…]" not in excerpt
         assert "Meropenem dosing" in excerpt
 
+    def test_match_in_the_final_chars_of_a_barely_long_page(self) -> None:
+        """Tail-clamp regression: a match in the last chars of a page just
+        over budget. The clamp pulls the window back to the head, and the
+        unbroken-span branch must extend PAST context_chars to keep the
+        match — returning body[:context_chars] silently dropped it."""
+        body = self._filler[:2004] + "Meropenem MIC over 8 is resistant."
+        excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
+        assert "Meropenem MIC over 8" in excerpt
+
+    def test_match_in_the_final_chars_of_a_long_page(self) -> None:
+        """Same regression, splice variant: line-snapping must widen the
+        window leftward, never slide it — a slid window's right edge
+        retreats from the end of the page, where the match is."""
+        body = self._filler[:2900] + "Meropenem MIC over 8 is resistant."
+        excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
+        assert "Meropenem MIC over 8" in excerpt
+        assert "[…]" in excerpt
+
+    def test_fenced_code_comments_are_not_section_labels(self) -> None:
+        """A '# comment' inside a fenced block before the window must not
+        become the [section: …] label — the outline parser is fence-aware,
+        and the gate reuses it."""
+        body = (
+            self._filler
+            + "## Therapie\n"
+            + "```bash\n# install deps\npip install x\n```\n"
+            + "Routine sentences describing laboratory workflow follow.\n" * 40
+            + "Meropenem MIC over 8 is resistant.\n"
+            + self._filler
+        )
+        excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
+        assert "[section: Therapie]" in excerpt
+        assert excerpt.count("[section:") == 1  # the code comment never labels
+
     def test_match_just_past_the_head_is_contiguous_not_spliced(self) -> None:
         # The cluster begins right after the head cut: the window backs off
         # into the head, head and window are one unbroken span — a […]
