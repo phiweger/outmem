@@ -3,7 +3,7 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
-## Unreleased
+## 0.14.0
 
 ### Changed
 
