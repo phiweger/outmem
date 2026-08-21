@@ -49,7 +49,12 @@ from outmem.config import (
     starter_agents_md,
     starter_yaml,
 )
-from outmem.exceptions import FrontmatterError, OutmemError, SlugError
+from outmem.exceptions import (
+    FrontmatterError,
+    IncompleteBodyError,
+    OutmemError,
+    SlugError,
+)
 from outmem.frontmatter import (
     ProvenanceEntry,
     WikiFrontmatter,
@@ -790,6 +795,7 @@ class WikiStore:
         created: datetime | None = None,
         extra: dict[str, Any] | None = None,
         commit_subject: str | None = None,
+        allow_elision: bool = False,
     ) -> str:
         """Create a new wiki page (under ``wiki/pages/``) and commit it.
 
@@ -829,6 +835,8 @@ class WikiStore:
             tags=list(tags or []),
             extra=dict(extra or {}),
         )
+        if not allow_elision:
+            _reject_incomplete_body(body, tool="write_page")
         page_text = serialize_wiki_page(frontmatter, body)
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(page_text, encoding="utf-8")
@@ -1022,6 +1030,7 @@ class WikiStore:
         body: str,
         provenance: Sequence[ProvenanceEntry] | None = None,
         commit_subject: str | None = None,
+        allow_elision: bool = False,
     ) -> str:
         """Replace the body of an existing page and commit.
 
@@ -1046,6 +1055,8 @@ class WikiStore:
                 "Cannot edit the reserved 'index' slug — `wiki/index.md` "
                 "is auto-maintained by outmem on every page write."
             )
+        if not allow_elision:
+            _reject_incomplete_body(body, tool="extend_page")
         page = self.read(slug)
         if provenance is not None:
             page.frontmatter.provenance = list(provenance)
@@ -1068,6 +1079,7 @@ class WikiStore:
         body: str,
         provenance: Sequence[ProvenanceEntry] | None = None,
         commit_subject: str | None = None,
+        allow_elision: bool = False,
     ) -> str:
         """Append to an existing page's body and commit.
 
@@ -1106,6 +1118,8 @@ class WikiStore:
                 "append_page: body is empty — nothing to append. Pass the "
                 "section text, or use `extend_page` to replace the body."
             )
+        if not allow_elision:
+            _reject_incomplete_body(body, tool="append_page")
         page = self.read(slug)
         existing = page.body.rstrip()
         merged = f"{existing}\n\n{body.strip()}\n" if existing else f"{body.strip()}\n"
@@ -2010,6 +2024,36 @@ class WikiStore:
 
 def _format_log_filename(d: date) -> str:
     return d.isoformat()
+
+
+def _reject_incomplete_body(body: str, *, tool: str) -> None:
+    """Raise if ``body`` stops at an elision marker.
+
+    Deliberately at the store layer rather than in the tool wrapper, so
+    the refusal covers the CLI, the Python API, and any downstream app
+    driving its own agent — not just outmem's own tool palette.
+
+    The escape hatch (``allow_elision=True``) is a keyword on the store
+    methods and is **not** exposed as a tool argument. That asymmetry is
+    the point: a human writing an unusual page needs a way through, and
+    a model under budget pressure must not have one, or the guard
+    becomes a checkbox it learns to tick.
+    """
+    from outmem.completeness import find_elision_markers
+
+    found = find_elision_markers(body)
+    if not found:
+        return
+    lines = tuple(f"line {e.line}: {e.text}" for e in found[:3])
+    raise IncompleteBodyError(
+        f"{tool}: the body stops at an elision marker "
+        f"({found[0].marker!r}) — outmem pages must carry the complete "
+        f"text, since nothing downstream can tell a shortened page from a "
+        f"finished one. Write the full content; if it does not fit in one "
+        f"call, send what fits now and add the rest with `append_page`. "
+        f"Offending: {'; '.join(lines)}",
+        markers=lines,
+    )
 
 
 def _merge_provenance(

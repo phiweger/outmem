@@ -39,6 +39,26 @@ class ConflictError(OutmemError):
     """A merge or rebase conflict requires human resolution."""
 
 
+class IncompleteBodyError(OutmemError):
+    """A page body stops early — it ends at an elision marker.
+
+    The one content-level refusal in a write path otherwise concerned
+    with structure. It exists because the alternative failure is silent:
+    a body truncated under output-budget pressure is schema-valid, so
+    without this the call commits and nothing downstream can tell the
+    page apart from a complete one.
+
+    Carries ``markers`` (the offending lines) so a caller can quote them,
+    and the adapter turns it into a ``ModelRetry`` — the model still has
+    the source in context at that moment, which is the only point where
+    recovery is cheap.
+    """
+
+    def __init__(self, message: str, *, markers: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.markers = markers
+
+
 class IdentityWarning(OutmemError):
     """A git author was not found in ``CONTRIBUTORS.md``.
 

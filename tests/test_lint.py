@@ -557,10 +557,14 @@ def test_truncated_page_is_warning(tmp_path: Path) -> None:
     """The defect that motivated the check: a page whose body stops early
     while every structural invariant around it is correct."""
     store = WikiStore.init(tmp_path / "w")
+    # allow_elision: the write guard now refuses this shape outright, so
+    # the only way to have such a page is to predate the guard — which is
+    # exactly the corpus this lint check exists for.
     store.write_page(
         "clinical:erreger",
         title="Erreger",
         body="## Diagnostik\n\nDie PCR ist Methode der Wahl. […]\n",
+        allow_elision=True,
     )
     report = lint_wiki(store.wiki_path, log_dir=store.log_path)
     found = [f for f in report.findings if f.kind == "truncated-page"]
@@ -604,6 +608,7 @@ def test_tool_output_pasted_into_a_page_is_flagged(tmp_path: Path) -> None:
         "clinical:quelle",
         title="Quelle",
         body=f"Ein Absatz.\n\n{tool_note('source truncated at 200000 chars')}\n",
+        allow_elision=True,
     )
     report = lint_wiki(store.wiki_path, log_dir=store.log_path)
     found = [f for f in report.findings if f.kind == "tool-output-in-page"]

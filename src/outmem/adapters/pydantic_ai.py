@@ -27,17 +27,34 @@ import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from outmem.config import ANTHROPIC_CACHE_WITH_TOOLS
 from outmem.exceptions import (
     FrontmatterError,
+    IncompleteBodyError,
     OutmemError,
     SlugError,
     WritebackError,
 )
 from outmem.skills import bundled_registry
 from outmem.store import WikiStore
+
+
+def _retry_incomplete(exc: IncompleteBodyError) -> NoReturn:
+    """Hand an incomplete body back to the model as a retryable error.
+
+    ``ModelRetry`` is imported here rather than at module scope to keep
+    this module importable without ``pydantic_ai`` — ``wiki_tools``
+    returns plain callables and some consumers only want those. Without
+    the dependency there is nothing to retry *with*, so the original
+    error propagates and the caller sees the same refusal.
+    """
+    try:
+        from pydantic_ai import ModelRetry
+    except ImportError:  # pragma: no cover - only without the agent extra
+        raise exc from None
+    raise ModelRetry(str(exc)) from exc
 
 # Public type for the returned function list — kept as ``Any`` so we
 # don't pretend a tight signature we can't enforce across nine arities.
@@ -849,6 +866,13 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             )
         except WritebackError:
             raise  # propagate; the service surfaces this to the caller
+        except IncompleteBodyError as exc:
+            # The one error handed BACK to the model rather than returned
+            # as advisory text. A shortened body is recoverable only while
+            # the source is still in context, which is now — ModelRetry
+            # spends one of the existing retries to get the full text.
+            _log_error("write_page", exc)
+            _retry_incomplete(exc)
         except SlugError as exc:
             _log_error("write_page", exc)
             return (
@@ -900,6 +924,13 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             return store.extend_page(slug, body=body, provenance=provenance)
         except WritebackError:
             raise
+        except IncompleteBodyError as exc:
+            # The one error handed BACK to the model rather than returned
+            # as advisory text. A shortened body is recoverable only while
+            # the source is still in context, which is now — ModelRetry
+            # spends one of the existing retries to get the full text.
+            _log_error("extend_page", exc)
+            _retry_incomplete(exc)
         except SlugError as exc:
             _log_error("extend_page", exc)
             return f"(invalid slug {slug!r})"
@@ -951,6 +982,13 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             return store.append_page(slug, body=body, provenance=provenance)
         except WritebackError:
             raise
+        except IncompleteBodyError as exc:
+            # The one error handed BACK to the model rather than returned
+            # as advisory text. A shortened body is recoverable only while
+            # the source is still in context, which is now — ModelRetry
+            # spends one of the existing retries to get the full text.
+            _log_error("append_page", exc)
+            _retry_incomplete(exc)
         except SlugError as exc:
             _log_error("append_page", exc)
             return f"(invalid slug {slug!r})"
