@@ -2091,19 +2091,26 @@ def _reject_incomplete_body(
     the refusal covers the CLI, the Python API, and any downstream app
     driving its own agent — not just outmem's own tool palette.
 
-    The escape hatch (``allow_elision=True``) is a keyword on the store
-    methods and is **not** exposed as a tool argument. That asymmetry is
-    the point: a human writing an unusual page needs a way through, and
-    a model under budget pressure must not have one, or the guard
-    becomes a checkbox it learns to tick.
+    The guard is a positional heuristic and therefore fallible, so every
+    caller needs a way past it — but not the *same* way. A human has a
+    one-step override (``allow_elision=True``, ``--allow-elision``, or a
+    reviewer edit under the approval gate). A model has no argument at
+    all: its only route is to submit the identical body again after
+    being handed the refusal, which the tool wrapper registers via
+    :meth:`WikiStore.allow_elision_body`. That asymmetry is the design.
+    A flag the model could set would become a checkbox it learns to
+    tick; re-sending unchanged costs a round trip, distinguishes "this
+    text is right" from "I ran out of room" (a truncating model adds
+    content rather than repeating itself), and leaves the page reported
+    by ``outmem lint`` either way.
     """
-    # A tool-output marker in a page body is the same defect one step
-    # earlier: outmem withheld content from a tool result and the model
-    # wrote the page from what it was shown anyway. Caught here for the
-    # same reason as the elision — while the source is still in context.
     if allowed is not None and _body_text_key(body) in allowed:
         return
 
+    # A tool-output marker in a page body is the same defect one step
+    # earlier: outmem withheld content from a tool result and the page
+    # was written from what was shown anyway. Caught here for the same
+    # reason as the elision — while the source is still in context.
     sentinels = find_tool_sentinels(body)
     if sentinels:
         lines = tuple(f"line {e.line}: {e.text}" for e in sentinels[:3])
