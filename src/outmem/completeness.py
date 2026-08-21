@@ -72,6 +72,7 @@ _TRAILING_OK_RE = re.compile(rf"^[\s.;,:!?)\]\"'{_CLOSERS}]*$")
 
 _FENCE_RE = re.compile(r"^\s*(?P<ticks>```+|~~~+)")
 _BLOCKQUOTE_RE = re.compile(r"^\s*>")
+_TICKS_RE = re.compile(r"`+")
 # CommonMark indented code — four spaces or a tab, with no fence to key
 # on. Excludes list markers, whose continuation lines are indented the
 # same way and are ordinary prose.
@@ -123,7 +124,7 @@ def _inline_code_spans(line: str) -> list[tuple[int, int]]:
     """
     spans: list[tuple[int, int]] = []
     pos = 0
-    while (opener := re.compile(r"`+").search(line, pos)) is not None:
+    while (opener := _TICKS_RE.search(line, pos)) is not None:
         ticks = opener.group(0)
         closer = line.find(ticks, opener.end())
         if closer == -1:

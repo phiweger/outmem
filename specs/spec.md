@@ -260,7 +260,7 @@ Either path produces a commit. Promotion from log to wiki is deferred to v0.2 �
 
 Before pushing, the agent runs `git pull --rebase`. If the rebase succeeds, it pushes. If push is rejected (another commit landed between pull and push) the agent retries the pull-rebase-push loop once. If the second push is still rejected, or if the rebase produces a conflict that cannot be resolved automatically, the agent treats writeback as failed: it logs the failure and surfaces a hard error to the caller. It does not respond to the user as if the commit succeeded, and it does not silently drop the writeback. A failed writeback is a system fault that needs attention, not a recoverable runtime condition to paper over.
 
-Commit messages follow a structured convention so they're parseable: `compact: <slug>` for new wiki pages, `extend: <slug>` for updates, `log: <topic>` for log entries. This makes TARS *Retained* (§10) trivially computable as a `git log` filter.
+Commit messages follow a structured convention so they're parseable: `compact: <slug>` for new wiki pages, `extend: <slug>` for body replacements, `append: <slug>` for added sections, `log: <topic>` for log entries. This makes TARS *Retained* (§10) trivially computable as a `git log` filter.
 
 ---
 
@@ -291,7 +291,7 @@ A frozen **test corpus** lives in `tests/fixtures/` — a `wiki/sources/` of ~20
 
 **Property tests** to ship with v0.1:
 
-Every wiki page has valid frontmatter (parseable YAML, required fields present). Every wiki page's `provenance:` entries point to files that exist in a source tree at compile time (the test fixture freezes both, so this is checkable). No orphan wikilinks except those explicitly tracked in `log/`. Commit-message convention: every commit on the test branch matches one of `compact:`, `extend:`, or `log:` so the TARS *Retained* query (§10) does not silently drop results.
+Every wiki page has valid frontmatter (parseable YAML, required fields present). Every wiki page's `provenance:` entries point to files that exist in a source tree at compile time (the test fixture freezes both, so this is checkable). No orphan wikilinks except those explicitly tracked in `log/`. Commit-message convention: every commit on the test branch matches one of `compact:`, `extend:`, `append:`, or `log:` so the TARS *Retained* query (§10) does not silently drop results.
 
 **Replay harness** for the steering loop. Capture real `git log` outputs from prior sessions, replay as steering input, snapshot the agent's planning context, assert that user-A's edits and user-B's edits arrive as separately tagged channels rather than a merged blob. This bug class is invisible until it bites and very hard to diagnose post-hoc.
 

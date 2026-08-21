@@ -21,7 +21,8 @@ diff --git a/wiki/pricing-formula.md b/wiki/pricing-formula.md
 ## What to look for
 
 - **Commit subjects matter.** Outmem encodes intent in the subject
-  prefix: `compact:` (new page), `extend:` (edit), `log:` (decision/
+  prefix: `compact:` (new page), `extend:` (body replaced),
+  `append:` (section added), `log:` (decision/
   observation). Scanning subjects gives you the *story* without
   reading any diffs.
 - **Hunks tell you where in the file the change happened.** A change

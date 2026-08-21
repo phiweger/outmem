@@ -178,7 +178,7 @@ async def ask(
             from pydantic_ai.tools import DeferredToolRequests
 
             while isinstance(result.output, DeferredToolRequests):
-                deferred_results = apply_verdicts(reviewer, result.output)
+                deferred_results = apply_verdicts(reviewer, result.output, store)
                 result = await agent.run(
                     message_history=result.all_messages(),
                     deferred_tool_results=deferred_results,

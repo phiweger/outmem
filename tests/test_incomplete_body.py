@@ -186,3 +186,84 @@ class TestToolRaisesModelRetry:
         )
         assert isinstance(out, str)
         assert "invalid slug" in out
+
+
+SENTINEL_BODY = (
+    "## Erreger\n\n"
+    "⟪ outmem: source truncated — 200000 of 512345 chars shown ⟫\n"
+)
+
+
+class TestToolSentinelIsRefusedAtWriteTime:
+    """The same defect one step earlier: outmem withheld content from a
+    tool result and the page was written from what was shown anyway.
+    Caught here for the same reason as the elision — while the source is
+    still in context, which lint (minutes to days later) is not."""
+
+    def test_write_page_refuses_it(self, store: WikiStore) -> None:
+        with pytest.raises(IncompleteBodyError, match="tool-output marker"):
+            store.write_page("clinical:neu", title="Neu", body=SENTINEL_BODY)
+
+    def test_the_message_says_to_read_the_source(self, store: WikiStore) -> None:
+        with pytest.raises(IncompleteBodyError) as caught:
+            store.write_page("clinical:neu", title="Neu", body=SENTINEL_BODY)
+        assert "read_source" in str(caught.value)
+
+    def test_allow_elision_overrides_it_too(self, store: WikiStore) -> None:
+        store.write_page(
+            "clinical:neu", title="Neu", body=SENTINEL_BODY, allow_elision=True
+        )
+
+
+class TestHumanAdjudicationIsHonoured:
+    """The guard exists to catch a model truncating under budget pressure,
+    not to overrule the person the approval gate was installed for."""
+
+    def test_a_reviewed_body_passes(self, store: WikiStore) -> None:
+        """Under the HITL gate the reviewer can edit the body; the edited
+        text is re-run through the tool. Without registering it, the
+        human's deliberate edit is bounced to the MODEL to rewrite."""
+        from pydantic_ai.tools import ToolApproved
+
+        from outmem.agent.approval import _allow_reviewed_body
+
+        _allow_reviewed_body(store, ToolApproved(override_args={"body": TRUNCATED}))
+        store.write_page("clinical:neu", title="Neu", body=TRUNCATED)
+        assert "[…]" in store.read("clinical:neu").body
+
+    def test_a_plain_approval_registers_nothing(self, store: WikiStore) -> None:
+        """Approving the model's own body unchanged is not an adjudication
+        of the text — only an edit is."""
+        from pydantic_ai.tools import ToolApproved
+
+        from outmem.agent.approval import _allow_reviewed_body
+
+        _allow_reviewed_body(store, ToolApproved())
+        with pytest.raises(IncompleteBodyError):
+            store.write_page("clinical:neu", title="Neu", body=TRUNCATED)
+
+    def test_allowance_is_by_text_not_slug(self, store: WikiStore) -> None:
+        """An adjudication is about the words. Keying on the slug would
+        make the same decision have to be taken again per page — and
+        would break across an alias round-trip."""
+        store.allow_elision_body(TRUNCATED)
+        store.write_page("clinical:a", title="A", body=TRUNCATED)
+        store.write_page("clinical:b", title="B", body=TRUNCATED)
+
+
+def test_cli_offers_an_escape(tmp_path: Path) -> None:
+    """The refusal message promises one; through the CLI it has to exist."""
+    from outmem.cli.__main__ import main
+
+    root = tmp_path / "w"
+    WikiStore.init(root).close()
+    import sys
+    from io import StringIO
+
+    sys.stdin = StringIO("Die Punkte sind: [...]\n")
+    try:
+        rc = main(["write", "q", "--title", "X", "--allow-elision", "--root", str(root)])
+    finally:
+        sys.stdin = sys.__stdin__
+    assert rc == 0
+    assert "[...]" in WikiStore.open(root).read("q").body

@@ -153,6 +153,7 @@ def cmd_write(args: argparse.Namespace) -> int:
         body=body,
         provenance=args.provenance or None,
         tags=args.tag or None,
+        allow_elision=args.allow_elision,
     )
     print(sha)
     return 0
@@ -164,7 +165,10 @@ def cmd_extend(args: argparse.Namespace) -> int:
     if not body.strip():
         print("extend: refusing to write empty body (read from stdin).", file=sys.stderr)
         return 2
-    sha = store.extend_page(args.slug, body=body, provenance=args.provenance)
+    sha = store.extend_page(
+        args.slug, body=body, provenance=args.provenance,
+        allow_elision=args.allow_elision,
+    )
     print(sha)
     return 0
 
@@ -175,7 +179,10 @@ def cmd_append(args: argparse.Namespace) -> int:
     if not body.strip():
         print("append: refusing to append empty body (read from stdin).", file=sys.stderr)
         return 2
-    sha = store.append_page(args.slug, body=body, provenance=args.provenance)
+    sha = store.append_page(
+        args.slug, body=body, provenance=args.provenance,
+        allow_elision=args.allow_elision,
+    )
     print(sha)
     return 0
 
@@ -937,6 +944,14 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     # The agent's commits are now in history; record this ingestion against
     # the source registry. pages_touched comes from the commit subjects.
+    if result.budget_truncated_writes:
+        print(
+            "outmem: WARNING — a model turn ran out of output room while "
+            f"writing {', '.join(result.budget_truncated_writes)}. The "
+            "page(s) may be short without saying so; check them against "
+            "the source.",
+            file=sys.stderr,
+        )
     pages = _slugs_from_commits(result.commit_subjects)
     store.record_ingestion(
         entry.rel_path,
@@ -1255,6 +1270,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Tag value. Repeat for multiple tags.",
     )
+    p_write.add_argument(
+        "--allow-elision",
+        action="store_true",
+        help="Accept a body ending in an ellipsis. The guard is a "
+        "heuristic; use this when the marker belongs to a quotation. "
+        "`outmem lint` still reports the page as truncated-page.",
+    )
     p_write.set_defaults(func=cmd_write)
 
     p_extend = sub.add_parser(
@@ -1269,6 +1291,13 @@ def build_parser() -> argparse.ArgumentParser:
         "Use when re-compacting against a newer source version — this is "
         "what stops `outmem stale` reporting the page. Omit to leave "
         "provenance untouched.",
+    )
+    p_extend.add_argument(
+        "--allow-elision",
+        action="store_true",
+        help="Accept a body ending in an ellipsis. The guard is a "
+        "heuristic; use this when the marker belongs to a quotation. "
+        "`outmem lint` still reports the page as truncated-page.",
     )
     p_extend.set_defaults(func=cmd_extend)
 
@@ -1285,6 +1314,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="ADD source pointers (duplicates ignored). Unlike `extend`, "
         "this keeps the page's existing citations — an appended section "
         "usually draws on sources the earlier sections already cite.",
+    )
+    p_append.add_argument(
+        "--allow-elision",
+        action="store_true",
+        help="Accept a body ending in an ellipsis. The guard is a "
+        "heuristic; use this when the marker belongs to a quotation. "
+        "`outmem lint` still reports the page as truncated-page.",
     )
     p_append.set_defaults(func=cmd_append)
 

@@ -61,6 +61,24 @@ invariant and only ever *asked* for completeness.
   notice can never collide; a test pins that every note outmem emits
   survives its own detector.
 
+**Page writes are serialised.** `write_page`, `extend_page`,
+`append_page`, `append_log`, and `rename_page` each read the current
+state, rewrite files, regenerate the index, and commit — and PydanticAI
+runs a response's tool calls concurrently. Since the guidance is now
+explicitly "one `append_page` per section", parallel appends to one page
+are the ordinary path: unguarded, four of them lost sections outright
+and raised `cannot lock ref 'HEAD'` and half-read-file
+`FrontmatterError`. A per-store re-entrant lock spans read-through-commit.
+
+**Every caller has an escape from the elision guard.** It is a
+positional heuristic and therefore fallible, so `--allow-elision` (CLI),
+`allow_elision=True` (API), and a body a human reviewer edited under the
+HITL approval gate all pass — alongside the model re-sending a body
+unchanged. Allowances are keyed by the body text, not the slug: an
+adjudication is about the words. The page is still reported as
+`truncated-page`; the bargain is bounded damage and a visible record,
+not silence.
+
 **The write guard yields rather than deadlocking.** The detector is a
 fallible heuristic — which is why lint reports it at WARNING — so making
 it a hard block risked the opposite failure: a false positive on a

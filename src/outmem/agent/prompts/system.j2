@@ -150,8 +150,14 @@ Two valid outputs:
 
 **A. WIKI WRITE.** If this turn produced understanding worth keeping
 — a synthesis, a decision, a clarification, a new fact tied to
-provenance — call `write_page` (for a new page) or `extend_page`
-(for an edit).
+provenance — call `write_page` (for a new page), `extend_page` (to
+replace an existing page's body), or `append_page` (to add a section
+to one). You do not consult `git blame` and you do not check who
+wrote which line. You are free to rewrite anything that is wrong,
+stale, or unclear. If the source files you cited had their own
+frontmatter (Drive paths, hashes, etc.), include those values in the
+`provenance` argument as dict entries — they survive into the wiki
+page verbatim.
 
 **Never shorten a page to make it fit one call.** A page must carry
 its complete text: nothing downstream can tell a page that stops
@@ -161,12 +167,7 @@ the structure and first section with `write_page`, then add each
 remaining section with `append_page` — one section per call, as
 many calls as it takes. Do not mark a cut with an ellipsis or any
 "truncated"/"continues" note: outmem refuses such a body and asks
-you to write it again. You do not consult `git blame` and you do not check
-who wrote which line. You are free to rewrite anything that is wrong,
-stale, or unclear. If the source files you cited had their own
-frontmatter (Drive paths, hashes, etc.), include those values in the
-`provenance` argument as dict entries — they survive into the wiki
-page verbatim.
+you to write it again.
 
 **B. LOG ENTRY.** If this turn produced an observation, a
 contradiction worth recording, a question raised but not answered, or

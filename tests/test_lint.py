@@ -571,8 +571,12 @@ def test_truncated_page_is_warning(tmp_path: Path) -> None:
     assert len(found) == 1
     assert found[0].severity == Severity.WARNING
     # Line number is in FILE coordinates — a body-relative number would
-    # not match what an editor or `grep_wiki` shows for the same page.
-    line = int(found[0].path.rsplit(":", 1)[1])
+    # not match what an editor or `grep_wiki` shows for the same page. It
+    # is its own field, not a suffix on `path`, since callers build real
+    # paths out of that field.
+    assert found[0].path.endswith(".md")
+    line = found[0].line
+    assert line is not None
     text = (store.pages_path / "clinical" / "erreger.md").read_text(encoding="utf-8")
     assert "[…]" in text.splitlines()[line - 1]
 
@@ -666,3 +670,20 @@ def test_omitted_is_not_a_tool_argument(tmp_path: Path) -> None:
     store = WikiStore.init(tmp_path / "w")
     for tool in wiki_tools(store):
         assert "omitted" not in inspect.signature(tool).parameters, tool.__name__
+
+
+def test_declared_omission_accepts_a_mapping(tmp_path: Path) -> None:
+    """`omitted: {therapie: "on clinical:therapie"}` is the shape an author
+    reaches for first. Silently ignoring it would let a page be made clean
+    by announcing what it left out — the one thing this check prevents."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page(
+        "clinical:sepsis",
+        title="Sepsis",
+        body="Text.\n",
+        extra={"omitted": {"therapie": "on clinical:therapie"}},
+    )
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path)
+    found = [f for f in report.findings if f.kind == "declared-omission"]
+    assert len(found) == 1
+    assert "therapie" in found[0].message

@@ -16,6 +16,7 @@ exactly once and returns the new HEAD SHA — and the runtime sequences
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from collections.abc import Callable, Sequence
@@ -36,7 +37,11 @@ if TYPE_CHECKING:
     from outmem.sources import KeyCandidate, RegistryAudit, RekeyResult, StaleCitation
 
 from outmem.backlinks import BacklinkCache
-from outmem.completeness import find_elision_markers
+from outmem.completeness import (
+    TOOL_SENTINEL_OPEN,
+    find_elision_markers,
+    find_tool_sentinels,
+)
 from outmem.config import (
     CONFIG_FILENAME,
     DEFAULT_AGENT_EMAIL,
@@ -319,6 +324,29 @@ class WikiStore:
         # concurrently across a thread pool, so the check-then-open must be
         # atomic or 8 threads each build an embedder + orphan 7 connections.
         self._vector_store_lock = threading.Lock()
+        # Serialises every read-modify-write-commit on the wiki. Page
+        # writes are not atomic on their own: each reads the current
+        # body, rewrites the file, regenerates the index, and commits.
+        # PydanticAI runs a response's tool calls concurrently, and the
+        # write guidance is explicitly "one `append_page` per section",
+        # so this is the ordinary path, not an exotic one. Unguarded,
+        # four parallel appends lose sections outright and raise
+        # `cannot lock ref 'HEAD'` / half-read-file FrontmatterError —
+        # silent content loss, which is the exact failure the
+        # completeness work exists to prevent.
+        #
+        # Re-entrant because these methods legitimately nest (a write
+        # path calling another guarded helper must not deadlock).
+        self._write_lock = threading.RLock()
+        # Body texts pre-authorised past the elision guard. The guard is
+        # a positional heuristic and therefore fallible, so every caller
+        # needs a way to say "I looked, this text is right": the tool
+        # wrapper adds a body the model re-sent unchanged, the approval
+        # gate adds one a human reviewer edited and approved, and the CLI
+        # has `--allow-elision`. Keyed by the text itself, not by slug —
+        # an adjudication is about the words, and an alias must not make
+        # the same decision be taken twice.
+        self._elision_allowed: set[str] = set()
 
     # ------------------------------------------------------------------
     # Construction
@@ -807,48 +835,51 @@ class WikiStore:
         depends on the prefix grammar — see spec §9).
         ``wiki/index.md`` is regenerated and staged in the same commit.
         """
-        if slug == INDEX_SLUG:
-            raise OutmemError(
-                "Cannot write to the reserved 'index' slug — `wiki/index.md` "
-                "is auto-maintained by outmem on every page write."
+        with self._write_lock:
+            if slug == INDEX_SLUG:
+                raise OutmemError(
+                    "Cannot write to the reserved 'index' slug — `wiki/index.md` "
+                    "is auto-maintained by outmem on every page write."
+                )
+            page_path = self._page_path(slug)
+            if page_path.exists():
+                raise OutmemError(f"Page already exists: {slug}. Use extend_page() to edit it.")
+            owner = self._alias_index().get(slug)
+            if owner is not None:
+                # Writing here would succeed (no file at that path) and then win
+                # resolution file-first, silently retargeting every [[slug]] in
+                # the corpus from `owner` to this new stub. Lint would report it
+                # afterwards, by which point the links have changed meaning.
+                raise OutmemError(
+                    f"{slug!r} is an alias of {owner!r}; writing a page here would "
+                    f"silently retarget every [[{slug}]] link. Remove the alias from "
+                    f"{owner!r} first, or choose another slug."
+                )
+            now = utc_now()
+            frontmatter = WikiFrontmatter(
+                title=title,
+                slug=slug,
+                provenance=list(provenance or []),
+                created=(created or now).replace(microsecond=0),
+                updated=now,
+                tags=list(tags or []),
+                extra=dict(extra or {}),
             )
-        page_path = self._page_path(slug)
-        if page_path.exists():
-            raise OutmemError(f"Page already exists: {slug}. Use extend_page() to edit it.")
-        owner = self._alias_index().get(slug)
-        if owner is not None:
-            # Writing here would succeed (no file at that path) and then win
-            # resolution file-first, silently retargeting every [[slug]] in
-            # the corpus from `owner` to this new stub. Lint would report it
-            # afterwards, by which point the links have changed meaning.
-            raise OutmemError(
-                f"{slug!r} is an alias of {owner!r}; writing a page here would "
-                f"silently retarget every [[{slug}]] link. Remove the alias from "
-                f"{owner!r} first, or choose another slug."
+            if not allow_elision:
+                _reject_incomplete_body(
+                body, tool="write_page", allowed=self._elision_allowed
             )
-        now = utc_now()
-        frontmatter = WikiFrontmatter(
-            title=title,
-            slug=slug,
-            provenance=list(provenance or []),
-            created=(created or now).replace(microsecond=0),
-            updated=now,
-            tags=list(tags or []),
-            extra=dict(extra or {}),
-        )
-        if not allow_elision:
-            _reject_incomplete_body(body, tool="write_page")
-        page_text = serialize_wiki_page(frontmatter, body)
-        page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text(page_text, encoding="utf-8")
-        self._regenerate_index()
-        return self._commit_paths(
-            [
-                self._page_relpath(slug),
-                f"{self.config.wiki_dir}/{INDEX_FILENAME}",
-            ],
-            subject=commit_subject or f"compact: {slug}",
-        )
+            page_text = serialize_wiki_page(frontmatter, body)
+            page_path.parent.mkdir(parents=True, exist_ok=True)
+            page_path.write_text(page_text, encoding="utf-8")
+            self._regenerate_index()
+            return self._commit_paths(
+                [
+                    self._page_relpath(slug),
+                    f"{self.config.wiki_dir}/{INDEX_FILENAME}",
+                ],
+                subject=commit_subject or f"compact: {slug}",
+            )
 
     def rename_page(
         self,
@@ -875,67 +906,68 @@ class WikiStore:
 
         Returns the new HEAD SHA.
         """
-        old_slug = self.resolve_slug(old_slug)
-        validate_slug(old_slug)
-        validate_slug(new_slug)
-        if old_slug == new_slug:
-            raise OutmemError(f"Cannot rename {old_slug!r} to itself.")
-        if INDEX_SLUG in (old_slug, new_slug):
-            raise OutmemError("The reserved 'index' slug cannot be renamed.")
-        old_path = self._page_path(old_slug)
-        if not old_path.exists():
-            raise OutmemError(f"No such wiki page: {old_slug}")
-        new_path = self._page_path(new_slug)
-        if new_path.exists():
-            raise OutmemError(f"Page already exists: {new_slug}")
-        owner = self._alias_index().get(new_slug)
-        if owner is not None and owner != old_slug:
-            raise OutmemError(
-                f"{new_slug!r} is an alias of {owner!r}; renaming here would "
-                f"silently retarget every [[{new_slug}]] link."
+        with self._write_lock:
+            old_slug = self.resolve_slug(old_slug)
+            validate_slug(old_slug)
+            validate_slug(new_slug)
+            if old_slug == new_slug:
+                raise OutmemError(f"Cannot rename {old_slug!r} to itself.")
+            if INDEX_SLUG in (old_slug, new_slug):
+                raise OutmemError("The reserved 'index' slug cannot be renamed.")
+            old_path = self._page_path(old_slug)
+            if not old_path.exists():
+                raise OutmemError(f"No such wiki page: {old_slug}")
+            new_path = self._page_path(new_slug)
+            if new_path.exists():
+                raise OutmemError(f"Page already exists: {new_slug}")
+            owner = self._alias_index().get(new_slug)
+            if owner is not None and owner != old_slug:
+                raise OutmemError(
+                    f"{new_slug!r} is an alias of {owner!r}; renaming here would "
+                    f"silently retarget every [[{new_slug}]] link."
+                )
+
+            frontmatter, body = parse_wiki_page(
+                old_path.read_text(encoding="utf-8"), fallback_slug=old_slug
             )
+            frontmatter.slug = new_slug
+            if alias and old_slug not in frontmatter.aliases:
+                frontmatter.aliases = [*frontmatter.aliases, old_slug]
+            touch_updated(frontmatter)
 
-        frontmatter, body = parse_wiki_page(
-            old_path.read_text(encoding="utf-8"), fallback_slug=old_slug
-        )
-        frontmatter.slug = new_slug
-        if alias and old_slug not in frontmatter.aliases:
-            frontmatter.aliases = [*frontmatter.aliases, old_slug]
-        touch_updated(frontmatter)
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            new_path.write_text(serialize_wiki_page(frontmatter, body), encoding="utf-8")
+            old_path.unlink()
+            touched = [self._page_relpath(old_slug), self._page_relpath(new_slug)]
 
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        new_path.write_text(serialize_wiki_page(frontmatter, body), encoding="utf-8")
-        old_path.unlink()
-        touched = [self._page_relpath(old_slug), self._page_relpath(new_slug)]
+            if rewrite_links:
+                touched.extend(self._rewrite_links_to(old_slug, new_slug))
 
-        if rewrite_links:
-            touched.extend(self._rewrite_links_to(old_slug, new_slug))
+            # A frozen source naming this page cannot be rewritten — that is
+            # what content addressing means — but the mapping recorded at
+            # ingest can be, and that is the point of recording it. Do this
+            # even when rewrite_links is off: the caller declined to touch
+            # *page* text, not to corrupt the registry.
+            #
+            # BOTH registries. A local source's refs go stale on rename for
+            # exactly the same reason a tracked one's do, and the local tree
+            # is the one whose drift nobody can spot in a diff. Only the
+            # tracked registry is staged — the local one lives inside the
+            # gitignored tree, so there is nothing for git to record.
+            for tree in _sources.existing_trees(self):
+                repointed = _sources.get_registry(self, tree).repoint_refs(
+                    old_slug, new_slug
+                )
+                if repointed and tree.tracked:
+                    touched.append(tree.repo_registry_relpath)
 
-        # A frozen source naming this page cannot be rewritten — that is
-        # what content addressing means — but the mapping recorded at
-        # ingest can be, and that is the point of recording it. Do this
-        # even when rewrite_links is off: the caller declined to touch
-        # *page* text, not to corrupt the registry.
-        #
-        # BOTH registries. A local source's refs go stale on rename for
-        # exactly the same reason a tracked one's do, and the local tree
-        # is the one whose drift nobody can spot in a diff. Only the
-        # tracked registry is staged — the local one lives inside the
-        # gitignored tree, so there is nothing for git to record.
-        for tree in _sources.existing_trees(self):
-            repointed = _sources.get_registry(self, tree).repoint_refs(
-                old_slug, new_slug
+            self._alias_map = None  # the page moved; any cached map is stale
+            self._regenerate_index()
+            touched.append(f"{self.config.wiki_dir}/{INDEX_FILENAME}")
+            return self._commit_paths(
+                touched,
+                subject=commit_subject or f"rename: {old_slug} -> {new_slug}",
             )
-            if repointed and tree.tracked:
-                touched.append(tree.repo_registry_relpath)
-
-        self._alias_map = None  # the page moved; any cached map is stale
-        self._regenerate_index()
-        touched.append(f"{self.config.wiki_dir}/{INDEX_FILENAME}")
-        return self._commit_paths(
-            touched,
-            subject=commit_subject or f"rename: {old_slug} -> {new_slug}",
-        )
 
     def commit_registry(self, subject: str) -> str | None:
         """Commit ``.sources.db`` alone, for registry-only mutations."""
@@ -1050,28 +1082,42 @@ class WikiStore:
         # _page_relpath(slug) would not, so the commit would stage a path
         # that doesn't exist — after the page and index.md were already
         # rewritten on disk.
-        slug = self.resolve_slug(slug)
-        if slug == INDEX_SLUG:
-            raise OutmemError(
-                "Cannot edit the reserved 'index' slug — `wiki/index.md` "
-                "is auto-maintained by outmem on every page write."
+        with self._write_lock:
+            slug = self.resolve_slug(slug)
+            if slug == INDEX_SLUG:
+                raise OutmemError(
+                    "Cannot edit the reserved 'index' slug — `wiki/index.md` "
+                    "is auto-maintained by outmem on every page write."
+                )
+            if not allow_elision:
+                _reject_incomplete_body(
+                body, tool="extend_page", allowed=self._elision_allowed
             )
-        if not allow_elision:
-            _reject_incomplete_body(body, tool="extend_page")
-        page = self.read(slug)
-        if provenance is not None:
-            page.frontmatter.provenance = list(provenance)
-        touch_updated(page.frontmatter)
-        page_text = serialize_wiki_page(page.frontmatter, body)
-        page.path.write_text(page_text, encoding="utf-8")
-        self._regenerate_index()
-        return self._commit_paths(
-            [
-                self._page_relpath(slug),
-                f"{self.config.wiki_dir}/{INDEX_FILENAME}",
-            ],
-            subject=commit_subject or f"extend: {slug}",
-        )
+            page = self.read(slug)
+            if provenance is not None:
+                page.frontmatter.provenance = list(provenance)
+            touch_updated(page.frontmatter)
+            page_text = serialize_wiki_page(page.frontmatter, body)
+            page.path.write_text(page_text, encoding="utf-8")
+            self._regenerate_index()
+            return self._commit_paths(
+                [
+                    self._page_relpath(slug),
+                    f"{self.config.wiki_dir}/{INDEX_FILENAME}",
+                ],
+                subject=commit_subject or f"extend: {slug}",
+            )
+
+    def allow_elision_body(self, body: str) -> None:
+        """Pre-authorise this exact body text past the elision guard.
+
+        For callers that have already adjudicated the text: a human
+        reviewer who edited and approved it, or a model that re-sent it
+        unchanged after being handed the refusal. The page is still
+        reported by ``outmem lint`` as ``truncated-page`` — the bargain
+        is bounded damage and a visible record, not silence.
+        """
+        self._elision_allowed.add(_body_text_key(body))
 
     def append_page(
         self,
@@ -1108,38 +1154,41 @@ class WikiStore:
         :meth:`extend_page`, whose replace semantics exist so a
         re-compaction can drop a superseded source.
         """
-        slug = self.resolve_slug(slug)
-        if slug == INDEX_SLUG:
-            raise OutmemError(
-                "Cannot edit the reserved 'index' slug — `wiki/index.md` "
-                "is auto-maintained by outmem on every page write."
+        with self._write_lock:
+            slug = self.resolve_slug(slug)
+            if slug == INDEX_SLUG:
+                raise OutmemError(
+                    "Cannot edit the reserved 'index' slug — `wiki/index.md` "
+                    "is auto-maintained by outmem on every page write."
+                )
+            if not body.strip():
+                raise OutmemError(
+                    "append_page: body is empty — nothing to append. Pass the "
+                    "section text, or use `extend_page` to replace the body."
+                )
+            if not allow_elision:
+                _reject_incomplete_body(
+                body, tool="append_page", allowed=self._elision_allowed
             )
-        if not body.strip():
-            raise OutmemError(
-                "append_page: body is empty — nothing to append. Pass the "
-                "section text, or use `extend_page` to replace the body."
+            page = self.read(slug)
+            existing = page.body.rstrip()
+            merged = f"{existing}\n\n{body.strip()}\n" if existing else f"{body.strip()}\n"
+            if provenance:
+                page.frontmatter.provenance = _merge_provenance(
+                    page.frontmatter.provenance, provenance
+                )
+            touch_updated(page.frontmatter)
+            page.path.write_text(
+                serialize_wiki_page(page.frontmatter, merged), encoding="utf-8"
             )
-        if not allow_elision:
-            _reject_incomplete_body(body, tool="append_page")
-        page = self.read(slug)
-        existing = page.body.rstrip()
-        merged = f"{existing}\n\n{body.strip()}\n" if existing else f"{body.strip()}\n"
-        if provenance:
-            page.frontmatter.provenance = _merge_provenance(
-                page.frontmatter.provenance, provenance
+            self._regenerate_index()
+            return self._commit_paths(
+                [
+                    self._page_relpath(slug),
+                    f"{self.config.wiki_dir}/{INDEX_FILENAME}",
+                ],
+                subject=commit_subject or f"append: {slug}",
             )
-        touch_updated(page.frontmatter)
-        page.path.write_text(
-            serialize_wiki_page(page.frontmatter, merged), encoding="utf-8"
-        )
-        self._regenerate_index()
-        return self._commit_paths(
-            [
-                self._page_relpath(slug),
-                f"{self.config.wiki_dir}/{INDEX_FILENAME}",
-            ],
-            subject=commit_subject or f"append: {slug}",
-        )
 
     def rebuild_index(self, *, commit: bool = True) -> str | None:
         """Regenerate ``wiki/index.md`` from the current wiki state.
@@ -1179,24 +1228,25 @@ class WikiStore:
         callers compose their own structure (timestamp, session ID, etc.).
         Commit message defaults to ``log: <topic>``.
         """
-        if not topic.strip():
-            raise OutmemError("append_log: topic must be non-empty.")
-        ts = ensure_utc(when) if when else utc_now()
-        log_date = ts.date()
-        log_file = self.log_path / f"{_format_log_filename(log_date)}.md"
-        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with self._write_lock:
+            if not topic.strip():
+                raise OutmemError("append_log: topic must be non-empty.")
+            ts = ensure_utc(when) if when else utc_now()
+            log_date = ts.date()
+            log_file = self.log_path / f"{_format_log_filename(log_date)}.md"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
 
-        existed = log_file.exists()
-        existing = log_file.read_text(encoding="utf-8") if existed else ""
-        prefix = "" if not existed else "\n"
-        if not existed:
-            existing = f"# {log_date.isoformat()}\n\n"
-        log_file.write_text(existing + prefix + content.rstrip() + "\n", encoding="utf-8")
+            existed = log_file.exists()
+            existing = log_file.read_text(encoding="utf-8") if existed else ""
+            prefix = "" if not existed else "\n"
+            if not existed:
+                existing = f"# {log_date.isoformat()}\n\n"
+            log_file.write_text(existing + prefix + content.rstrip() + "\n", encoding="utf-8")
 
-        return self._commit_paths(
-            [f"{self.config.log_dir}/{log_file.name}"],
-            subject=commit_subject or f"log: {topic}",
-        )
+            return self._commit_paths(
+                [f"{self.config.log_dir}/{log_file.name}"],
+                subject=commit_subject or f"log: {topic}",
+            )
 
     # ------------------------------------------------------------------
     # Sources — implementations live in :mod:`outmem._store.sources`
@@ -2027,7 +2077,14 @@ def _format_log_filename(d: date) -> str:
     return d.isoformat()
 
 
-def _reject_incomplete_body(body: str, *, tool: str) -> None:
+def _body_text_key(body: str) -> str:
+    """Identity of one adjudicated body text."""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _reject_incomplete_body(
+    body: str, *, tool: str, allowed: set[str] | None = None
+) -> None:
     """Raise if ``body`` stops at an elision marker.
 
     Deliberately at the store layer rather than in the tool wrapper, so
@@ -2040,6 +2097,26 @@ def _reject_incomplete_body(body: str, *, tool: str) -> None:
     a model under budget pressure must not have one, or the guard
     becomes a checkbox it learns to tick.
     """
+    # A tool-output marker in a page body is the same defect one step
+    # earlier: outmem withheld content from a tool result and the model
+    # wrote the page from what it was shown anyway. Caught here for the
+    # same reason as the elision — while the source is still in context.
+    if allowed is not None and _body_text_key(body) in allowed:
+        return
+
+    sentinels = find_tool_sentinels(body)
+    if sentinels:
+        lines = tuple(f"line {e.line}: {e.text}" for e in sentinels[:3])
+        raise IncompleteBodyError(
+            f"{tool}: the body contains an outmem tool-output marker "
+            f"({TOOL_SENTINEL_OPEN!r}) — that marker means outmem itself "
+            f"withheld content from a tool result, so this page would be "
+            f"built on material it never showed you. Read the source in "
+            f"full (`read_source`, or narrow the range) and write the "
+            f"passage from that. Offending: {'; '.join(lines)}",
+            markers=lines,
+        )
+
     found = find_elision_markers(body)
     if not found:
         return
@@ -2050,8 +2127,9 @@ def _reject_incomplete_body(body: str, *, tool: str) -> None:
         f"text, since nothing downstream can tell a shortened page from a "
         f"finished one. Write the full content; if it does not fit in one "
         f"call, send what fits now and add the rest with `append_page`. "
-        f"If the ellipsis is part of a quotation and the text is already "
-        f"complete, send the same body again unchanged. "
+        f"If the ellipsis belongs to a quotation and the text is already "
+        f"complete, submit the same body again unchanged — or pass "
+        f"`--allow-elision` (CLI) / `allow_elision=True` (API). "
         f"Offending: {'; '.join(lines)}",
         markers=lines,
     )
@@ -2083,12 +2161,16 @@ def _merge_provenance(
             merged.append(entry)
             continue
         if ref in at:
-            # Same source, re-cited. Replace rather than skip: the new
-            # entry may carry an updated sha256 or label, and dropping it
-            # would leave the page citing a superseded version that
-            # `outmem stale` then reports forever — with no way to fix it
-            # through append_page.
-            if entry != merged[at[ref]]:
+            # Same source, re-cited. Take the new entry only when it is at
+            # least as informative: a dict may carry an updated sha256 or
+            # label, and skipping it would leave the page citing a
+            # superseded version that `outmem stale` reports forever. But
+            # a bare path must NEVER overwrite a dict — the appended
+            # section usually re-cites what the page already has, and
+            # replacing there would drop the recorded sha256 and silently
+            # disable the staleness check for that page.
+            current = merged[at[ref]]
+            if isinstance(entry, dict) and entry != current:
                 merged[at[ref]] = entry
             continue
         at[ref] = len(merged)

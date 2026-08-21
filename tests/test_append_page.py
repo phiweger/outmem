@@ -161,3 +161,72 @@ class TestAdapterTool:
 
         tool = next(t for t in wiki_tools(store) if t.__name__ == "append_page")
         assert "append_page failed" in tool(slug="no:such:page", body="Text.")
+
+
+class TestConcurrentWrites:
+    """PydanticAI runs a response's tool calls concurrently, and the write
+    guidance is explicitly "one `append_page` per section" — so parallel
+    appends to one page are the ordinary path, not an exotic one.
+
+    Unguarded, each call read the body, rewrote the file, regenerated the
+    index and committed, with no serialisation: sections vanished, git
+    raised `cannot lock ref 'HEAD'`, and a reader caught a half-written
+    file as FrontmatterError. Silent content loss — reached through the
+    very path the completeness work recommends.
+    """
+
+    def test_parallel_appends_all_land(self, store: WikiStore) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        sections = ["Diagnostik", "Therapie", "Prävention", "Meldepflicht"]
+
+        def add(name: str) -> str:
+            return store.append_page("clinical:sepsis", body=f"## {name}\n\nText.\n")
+
+        with ThreadPoolExecutor(max_workers=len(sections)) as pool:
+            shas = list(pool.map(add, sections))
+
+        assert len(set(shas)) == len(sections)  # one distinct commit each
+        body = store.read("clinical:sepsis").body
+        for name in sections:
+            assert f"## {name}" in body, f"{name} was lost"
+        assert "Gramnegative Erreger dominieren." in body  # original survives
+
+    def test_parallel_writes_to_different_pages(self, store: WikiStore) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def write(n: int) -> str:
+            return store.write_page(f"p{n}", title=f"P{n}", body=f"Body {n}.\n")
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(write, range(4)))
+        for n in range(4):
+            assert store.read(f"p{n}").body.strip() == f"Body {n}."
+
+    def test_a_bare_recite_never_downgrades_a_rich_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """The appended section usually re-cites a source the page already
+        has, and the model has no reason to restate the metadata. Letting a
+        bare path overwrite the dict would drop the recorded sha256 and
+        silently disable the staleness check for that page."""
+        s = WikiStore.init(tmp_path / "rich")
+        rich = {
+            "path": "sources/abc123def456/doc.md",
+            "sha256": "deadbeef" * 8,
+            "label": "Leitlinie",
+        }
+        s.write_page("p", title="P", body="Text.\n", provenance=[rich])
+        s.append_page("p", body="## Mehr\n\nText.\n", provenance=[rich["path"]])
+        assert s.read("p").frontmatter.provenance == [rich]
+
+    def test_a_richer_recite_refreshes_the_entry(self, tmp_path: Path) -> None:
+        """The direction that must work: a re-ingested source cited with a
+        new sha has to land, or the page cites a superseded version forever
+        with no way to fix it through append_page."""
+        s = WikiStore.init(tmp_path / "refresh")
+        path = "sources/abc123def456/doc.md"
+        s.write_page("p", title="P", body="Text.\n", provenance=[{"path": path, "sha256": "old"}])
+        s.append_page("p", body="## Mehr\n\nText.\n", provenance=[{"path": path, "sha256": "new"}])
+        (entry,) = s.read("p").frontmatter.provenance
+        assert entry["sha256"] == "new"

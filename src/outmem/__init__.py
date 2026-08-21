@@ -7,7 +7,7 @@ Public API::
     store = WikiStore.open("/srv/agent")
     hits = store.search("pricing formula")
     page = store.read("pricing-formula")
-    store.extend_page("pricing-formula", body="…")
+    store.extend_page("pricing-formula", body="Revised: cost-plus 40%.")
     store.append_log(topic="pricing", content="noticed an inconsistency")
 
 See ``docs/`` for the conceptual rationale, the v0.1 spec, and integration

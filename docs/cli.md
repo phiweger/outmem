@@ -56,7 +56,8 @@ outmem write discounts \
 outmem extend pricing-formula <<< "Revised: cost-plus 40%."
 # --provenance replaces the page's source pointers (repeat for several);
 # omit it and they are left untouched. See "Staleness" below.
-outmem extend pricing-formula --provenance sources/deck/a1b2c3d4e5f6/q2.md <<< "…"
+outmem extend pricing-formula --provenance sources/deck/a1b2c3d4e5f6/q2.md \
+    <<< "Revised: cost-plus 40%."
 
 outmem append pricing-formula <<< "## Volume tiers
 
@@ -351,7 +352,8 @@ step — `--provenance` replaces the pointers, and is the only way to change
 them:
 
 ```bash
-outmem extend abx:amikacin --provenance sources/fachinfo/e77a10b4c503/document.md <<< "…"
+outmem extend abx:amikacin --provenance sources/fachinfo/e77a10b4c503/document.md \
+    <<< "15 mg/kg once daily, per the 2026 edition."
 ```
 
 It **reports only** — deciding whether a page still stands is a judgement call,

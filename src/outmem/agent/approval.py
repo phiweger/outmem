@@ -211,19 +211,39 @@ def require_interactive_reviewer(approval_required: bool) -> Reviewer | None:
     return CliReviewer()
 
 
-def apply_verdicts(reviewer: Reviewer, requests: Any) -> Any:
+def apply_verdicts(reviewer: Reviewer, requests: Any, store: Any = None) -> Any:
     """Walk ``requests.approvals`` and build a ``DeferredToolResults``.
 
     Logs a one-line trace per call so the operator can see what the
     reviewer decided. Tests can substitute their own logger; the
     default goes to ``outmem.agent.approval``.
+
+    When ``store`` is given, a body the reviewer edited is registered
+    past the elision guard. Without that, a human who deliberately
+    approves a page ending in a quoted ellipsis has their edit bounced
+    to the *model* to rewrite — the guard exists to catch a model
+    truncating under budget pressure, not to overrule the person the
+    approval gate was installed for.
     """
     approvals: dict[str, Any] = {}
     for call in requests.approvals:
         verdict = reviewer.review(call)
         approvals[call.tool_call_id] = verdict
+        if store is not None:
+            _allow_reviewed_body(store, verdict)
         log.info("review %s → %s", call.tool_name, _summarise_verdict(verdict))
     return requests.build_results(approvals=approvals)
+
+
+def _allow_reviewed_body(store: Any, verdict: Any) -> None:
+    """Register a reviewer-supplied body past the elision guard."""
+    from pydantic_ai.tools import ToolApproved
+
+    if not isinstance(verdict, ToolApproved):
+        return
+    body = (verdict.override_args or {}).get("body")
+    if isinstance(body, str) and body:
+        store.allow_elision_body(body)
 
 
 def _summarise_verdict(verdict: Any) -> str:

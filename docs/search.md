@@ -101,8 +101,8 @@ with generous context truncates sooner.
 Only `wiki` scope is slug-shaped; `sources`/`log`/`all` return real paths.
 A `sources` hit's prefix tells you which tree it came from — see
 [sources.md](sources.md).
-Output is capped at **8 KiB** (a soft token ceiling); past that you get a
-trailing `(truncated — narrow the pattern)`.
+Output is capped at **8 KiB** (a soft token ceiling); past that you get a trailing
+`⟪ outmem: results truncated at the output cap — narrow the pattern ⟫`.
 
 ## Retrieval strategies (what `search_wiki` runs)
 
@@ -259,6 +259,6 @@ tools = wiki_read_tools(store)        # retrieval only (read-only consult)
 | ------------------------------------------ | -------------------------------------------------------------- |
 | `(no matches)`                             | `grep_wiki` found nothing — broaden, drop `-F`, or try `search_wiki` |
 | `(no pages matched — …)`                   | `search_wiki` ranked nothing — rephrase, or `grep_wiki` for a literal |
-| `(truncated — narrow the pattern)`         | hit the 8 KiB cap — tighten the query or raise `--max-hits`     |
+| `⟪ outmem: results truncated … ⟫`          | hit the 8 KiB cap — tighten the query or raise `--max-hits`     |
 | `(search failed: …)`                       | ripgrep not installed / bad regex — the message says which     |
 | `(search_wiki failed: … not built)`        | a semantic strategy with no index — run `outmem reindex`        |

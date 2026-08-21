@@ -5,16 +5,17 @@ filters are reliable. The TARS *Retained* metric (spec §10) is one
 `git log --grep` call away from being computable — that breaks the
 moment the prefix grammar drifts.
 
-## The three prefixes
+## The four prefixes
 
 | Prefix | Produced by | Meaning |
 |---|---|---|
 | `compact: <slug>` | `outmem write` | A new wiki page was created. |
-| `extend: <slug>` | `outmem extend` | An existing wiki page was edited. |
+| `extend: <slug>` | `outmem extend` | An existing wiki page was edited (body replaced). |
+| `append: <slug>` | `outmem append` | A section was added to an existing page. |
 | `log: <topic>` | `outmem log` | A log entry was appended; no wiki write. |
 
 These are pinned in the writeback service — every commit produced by
-outmem matches one of these three shapes. The agent should never need
+outmem matches one of these four shapes. The agent should never need
 to write a commit message manually; the CLI handles it.
 
 ## What "topic" should be

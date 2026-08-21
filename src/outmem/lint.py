@@ -86,6 +86,11 @@ class LintFinding:
     severity: Severity
     path: str  # repo-relative
     message: str
+    # 1-based line within ``path``, when the finding is about one line.
+    # Kept separate rather than smuggled into ``path`` as "file.md:13":
+    # callers build real paths out of that field (``wiki_dir / path``),
+    # and a line suffix silently turns those into nonexistent files.
+    line: int | None = None
 
 
 @dataclass
@@ -299,6 +304,14 @@ def _declared_omissions(value: Any) -> tuple[str, ...]:
         return (value.strip(),) if value.strip() else ()
     if isinstance(value, list):
         return tuple(str(v).strip() for v in value if str(v).strip())
+    if isinstance(value, dict):
+        # `omitted: {therapie: "on clinical:therapie"}` is the shape an
+        # author reaches for first. Silently returning () there would let
+        # a page be made clean by announcing what it left out — the one
+        # thing this check exists to prevent.
+        return tuple(
+            f"{k}: {v}".strip() for k, v in value.items() if str(v).strip()
+        )
     return ()
 
 
@@ -360,7 +373,8 @@ def _check_page_completeness(
                 LintFinding(
                     kind="truncated-page",
                     severity=Severity.WARNING,
-                    path=f"{page.rel_path}:{elision.line + page.body_line_offset}",
+                    path=page.rel_path,
+                    line=elision.line + page.body_line_offset,
                     message=(
                         f"page appears to stop early — {elision.marker!r} ends "
                         f"the line {elision.text!r}. If content is missing, "
@@ -376,7 +390,8 @@ def _check_page_completeness(
                 LintFinding(
                     kind="tool-output-in-page",
                     severity=Severity.WARNING,
-                    path=f"{page.rel_path}:{sentinel.line + page.body_line_offset}",
+                    path=page.rel_path,
+                    line=sentinel.line + page.body_line_offset,
                     message=(
                         "an outmem tool-output marker was copied into the page "
                         f"({sentinel.text!r}) — that marker means outmem itself "
@@ -1454,6 +1469,11 @@ def format_report(report: LintReport) -> str:
     for kind in sorted(groups):
         lines.append(f"## {kind}")
         for finding in groups[kind]:
-            lines.append(f"  [{finding.severity.value}] {finding.path}: {finding.message}")
+            where = (
+                f"{finding.path}:{finding.line}"
+                if finding.line is not None
+                else finding.path
+            )
+            lines.append(f"  [{finding.severity.value}] {where}: {finding.message}")
         lines.append("")
     return "\n".join(lines)
