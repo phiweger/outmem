@@ -70,6 +70,11 @@ class AskResult:
     started_at: datetime
     finished_at: datetime
     usage: TokenUsage = field(default_factory=TokenUsage)
+    # Writes made by a model turn that ended because it ran out of output
+    # room. Not an error — the commit landed and may well be fine — but
+    # the one signal that a page might be short without saying so, which
+    # is otherwise indistinguishable from a finished page.
+    budget_truncated_writes: tuple[str, ...] = ()
 
     @property
     def wrote_back(self) -> bool:
@@ -197,6 +202,14 @@ async def ask(
 
     response_text: str = result.output if isinstance(result.output, str) else str(result.output)
     usage = _extract_usage(result)
+    truncated_writes = _budget_truncated_writes(result)
+    if truncated_writes:
+        log.warning(
+            "a model turn ran out of output room while writing %s — the "
+            "page(s) may be short without saying so; verify against the "
+            "cited sources",
+            ", ".join(truncated_writes),
+        )
 
     head_after = head_or_none(store.root)
     commits = _new_agent_commits(head_before, head_after, store)
@@ -227,6 +240,7 @@ async def ask(
         concurrent_human_commit_landed=push_outcome.concurrent_human_commit_landed,
         started_at=started,
         finished_at=finished,
+        budget_truncated_writes=truncated_writes,
     )
 
 
@@ -319,6 +333,48 @@ def _push_with_retry(store: WikiStore) -> _PushOutcome:
             return _PushOutcome(pushed=True, concurrent_human_commit_landed=True)
         except OutmemError as second:
             raise WritebackError(f"push failed after one pull-rebase retry: {second}") from second
+
+
+# Tools whose argument is page content, so a turn cut short while calling
+# one may have written a shortened page.
+_CONTENT_WRITE_TOOLS = frozenset({"write_page", "extend_page", "append_page"})
+
+
+def _budget_truncated_writes(run_result: Any) -> tuple[str, ...]:
+    """Slugs written by a model turn that ended because it ran out of room.
+
+    The elision guard catches a body the model *marked* as cut. This
+    catches the case it did not mark: the response ends on ``length``
+    (Anthropic ``max_tokens`` or a blown context window) and that same
+    response called a content-write tool, so whatever it wrote is
+    suspect however complete it looks. Nothing else downstream can
+    distinguish that page from a finished one.
+
+    Deliberately conservative — it flags for verification rather than
+    failing the run, because by the time the turn is over the commit has
+    landed and the honest report is "check this page", not a rollback.
+
+    Everything is read defensively: ``finish_reason`` arrived in a recent
+    ``pydantic_ai`` and outmem supports older ones, where the signal is
+    simply unavailable and no page is flagged.
+    """
+    suspect: list[str] = []
+    for message in getattr(run_result, "all_messages", lambda: [])():
+        if getattr(message, "finish_reason", None) != "length":
+            continue
+        for part in getattr(message, "parts", ()):
+            name = getattr(part, "tool_name", None)
+            if name not in _CONTENT_WRITE_TOOLS:
+                continue
+            args = getattr(part, "args", None)
+            if callable(getattr(part, "args_as_dict", None)):
+                with suppress(Exception):
+                    args = part.args_as_dict()
+            slug = args.get("slug") if isinstance(args, dict) else None
+            entry = f"{name}({slug})" if slug else name
+            if entry not in suspect:
+                suspect.append(entry)
+    return tuple(suspect)
 
 
 def _extract_usage(run_result: Any) -> TokenUsage:

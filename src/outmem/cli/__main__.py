@@ -1109,6 +1109,17 @@ def cmd_ask(args: argparse.Namespace) -> int:
     sys.stdout.write(result.response)
     if not result.response.endswith("\n"):
         sys.stdout.write("\n")
+    if result.budget_truncated_writes:
+        # Deliberately outside `--show-meta`: this is a correctness signal,
+        # not diagnostics. The commit landed and the page looks finished,
+        # which is exactly why nobody would go looking for it.
+        print(
+            "outmem: WARNING — a model turn ran out of output room while "
+            f"writing {', '.join(result.budget_truncated_writes)}. The "
+            "page(s) may be short without saying so; check them against "
+            "their cited sources.",
+            file=sys.stderr,
+        )
     if args.show_meta:
         commits = ", ".join(c.sha[:10] for c in result.commits) or "(none)"
         race_note = (
