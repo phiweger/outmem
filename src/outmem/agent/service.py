@@ -205,7 +205,8 @@ async def ask(
         raise WritebackError(
             "Agent produced no commits this turn (mandatory writeback failed). "
             "The agent's system prompt should ensure at least one "
-            "`write_page`, `extend_page`, or `append_log` call per run."
+            "`write_page`, `extend_page`, `append_page`, or `append_log` "
+            "call per run."
         )
 
     push_outcome = _PushOutcome(pushed=False, concurrent_human_commit_landed=False)

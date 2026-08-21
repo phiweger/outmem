@@ -1061,6 +1061,71 @@ class WikiStore:
             subject=commit_subject or f"extend: {slug}",
         )
 
+    def append_page(
+        self,
+        slug: str,
+        *,
+        body: str,
+        provenance: Sequence[ProvenanceEntry] | None = None,
+        commit_subject: str | None = None,
+    ) -> str:
+        """Append to an existing page's body and commit.
+
+        The counterpart :meth:`extend_page` never had. ``extend_page``
+        *replaces* the whole body, so building a long page in pieces
+        means re-emitting everything written so far on every call: the
+        calls grow monotonically and the last one still has to emit the
+        entire page in a single turn. That is the exact output-budget
+        pressure that makes a model truncate, so "write it in sections"
+        was not actually a way to avoid it — and a model that reads
+        ``extend`` as *append* silently destroys the earlier sections
+        instead.
+
+        Appending removes the constraint: each call carries one section,
+        sized to comfortably fit, and the page's length stops being
+        bounded by a single turn's output budget.
+
+        ``body`` is separated from the existing text by a blank line, so
+        callers pass a section rather than worrying about joins.
+        ``provenance`` *adds* pointers the page doesn't already cite
+        (dedup by path) — appended content often comes from a source the
+        earlier sections didn't use, and additive is the only semantic
+        that lets a section be written without restating the citations
+        of every section before it. This is deliberately unlike
+        :meth:`extend_page`, whose replace semantics exist so a
+        re-compaction can drop a superseded source.
+        """
+        slug = self.resolve_slug(slug)
+        if slug == INDEX_SLUG:
+            raise OutmemError(
+                "Cannot edit the reserved 'index' slug — `wiki/index.md` "
+                "is auto-maintained by outmem on every page write."
+            )
+        if not body.strip():
+            raise OutmemError(
+                "append_page: body is empty — nothing to append. Pass the "
+                "section text, or use `extend_page` to replace the body."
+            )
+        page = self.read(slug)
+        existing = page.body.rstrip()
+        merged = f"{existing}\n\n{body.strip()}\n" if existing else f"{body.strip()}\n"
+        if provenance:
+            page.frontmatter.provenance = _merge_provenance(
+                page.frontmatter.provenance, provenance
+            )
+        touch_updated(page.frontmatter)
+        page.path.write_text(
+            serialize_wiki_page(page.frontmatter, merged), encoding="utf-8"
+        )
+        self._regenerate_index()
+        return self._commit_paths(
+            [
+                self._page_relpath(slug),
+                f"{self.config.wiki_dir}/{INDEX_FILENAME}",
+            ],
+            subject=commit_subject or f"append: {slug}",
+        )
+
     def rebuild_index(self, *, commit: bool = True) -> str | None:
         """Regenerate ``wiki/index.md`` from the current wiki state.
 
@@ -1945,3 +2010,29 @@ class WikiStore:
 
 def _format_log_filename(d: date) -> str:
     return d.isoformat()
+
+
+def _merge_provenance(
+    existing: Sequence[ProvenanceEntry], additions: Sequence[ProvenanceEntry]
+) -> list[ProvenanceEntry]:
+    """``existing`` plus any of ``additions`` it doesn't already cite.
+
+    Compared by source path, so re-citing a source the page already
+    points at is a no-op rather than a duplicate entry — an appended
+    section usually draws on sources earlier sections already used, and
+    the model has no cheap way to know which. Entries outmem can't read
+    a path from are appended as-is: dropping an unparseable pointer
+    would lose provenance an upstream ingester may rely on.
+    """
+    from outmem.lint import provenance_ref
+
+    merged = list(existing)
+    seen = {ref for entry in merged if (ref := provenance_ref(entry)) is not None}
+    for entry in additions:
+        ref = provenance_ref(entry)
+        if ref is not None and ref in seen:
+            continue
+        if ref is not None:
+            seen.add(ref)
+        merged.append(entry)
+    return merged

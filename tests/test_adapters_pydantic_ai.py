@@ -64,6 +64,7 @@ def test_wiki_tools_returns_expected_set(seeded_store: WikiStore) -> None:
         "topic_evolution",
         "write_page",
         "extend_page",
+        "append_page",
         "append_log",
         # Source / ingestion tools (added in the ingestion PR).
         "list_sources",

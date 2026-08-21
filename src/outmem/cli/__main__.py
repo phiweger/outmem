@@ -169,6 +169,17 @@ def cmd_extend(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_append(args: argparse.Namespace) -> int:
+    store = _open_store(args)
+    body = sys.stdin.read()
+    if not body.strip():
+        print("append: refusing to append empty body (read from stdin).", file=sys.stderr)
+        return 2
+    sha = store.append_page(args.slug, body=body, provenance=args.provenance)
+    print(sha)
+    return 0
+
+
 def cmd_log(args: argparse.Namespace) -> int:
     store = _open_store(args)
     content = sys.stdin.read()
@@ -1249,6 +1260,22 @@ def build_parser() -> argparse.ArgumentParser:
         "provenance untouched.",
     )
     p_extend.set_defaults(func=cmd_extend)
+
+    p_append = sub.add_parser(
+        "append",
+        help="Append a section to an existing page (body on stdin).",
+        parents=[root_parent],
+    )
+    p_append.add_argument("slug")
+    p_append.add_argument(
+        "--provenance",
+        action="append",
+        default=None,
+        help="ADD source pointers (duplicates ignored). Unlike `extend`, "
+        "this keeps the page's existing citations — an appended section "
+        "usually draws on sources the earlier sections already cite.",
+    )
+    p_append.set_defaults(func=cmd_append)
 
     p_log = sub.add_parser(
         "log", help="Append a log entry (content on stdin).", parents=[root_parent]

@@ -164,7 +164,7 @@ def _resolve_model(model: Any | None, store: WikiStore | None = None) -> Any:
     )
 
 
-_APPROVAL_GATED_TOOLS = frozenset({"write_page", "extend_page"})
+_APPROVAL_GATED_TOOLS = frozenset({"write_page", "extend_page", "append_page"})
 
 # How many times PydanticAI retries a tool call that failed schema
 # validation. PydanticAI's default is 1, which means a single missing-arg
@@ -215,7 +215,8 @@ def build_agent(
     omit — useful for tests that don't want the steering noise.
 
     When ``store.config.outmem.approval.required_for_writes`` is
-    ``True``, the ``write_page`` and ``extend_page`` tools are added to
+    ``True``, the ``write_page``, ``extend_page``, and ``append_page``
+    tools are added to
     a :class:`pydantic_ai.toolsets.FunctionToolset` with
     ``requires_approval=True`` so the agent's run yields a
     :class:`pydantic_ai.tools.DeferredToolRequests` instead of

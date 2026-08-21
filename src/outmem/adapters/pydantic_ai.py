@@ -907,6 +907,57 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             _log_error("extend_page", exc)
             return f"(extend_page failed: {exc} — use `write_page` for new pages)"
 
+    def append_page(
+        slug: str, body: str, provenance: list[str | dict[str, Any]] | None = None
+    ) -> str:
+        """Add a section to the END of an existing page, keeping what's there.
+
+        REQUIRES BOTH slug and body in a single call. Produces one commit
+        (``append: <slug>``) and returns the new HEAD SHA.
+
+        **Use this to write a long page in pieces.** One tool call has a
+        limited output budget; a page that does not comfortably fit in
+        one is written as ``write_page`` (structure plus the first
+        section) followed by one ``append_page`` per remaining section.
+        Never shorten a page to make it fit and never mark the cut with
+        an ellipsis — append the rest instead.
+
+        The difference from ``extend_page``: this ADDS to the body,
+        ``extend_page`` REPLACES it. Only pass content you want appended
+        — do not restate the text already on the page, or it appears
+        twice. ``body`` is separated from the existing text by a blank
+        line, so pass a section, not a join.
+
+        ``provenance`` here ADDS pointers (duplicates are ignored), so a
+        section drawn from a new source can cite it without restating
+        the page's existing citations.
+
+        Example:
+            write_page(slug="clinical:sepsis", title="Sepsis",
+                       body="## Erreger\\n\\n…")
+            append_page(slug="clinical:sepsis",
+                        body="## Diagnostik\\n\\n…")
+            append_page(slug="clinical:sepsis",
+                        body="## Therapie\\n\\n…",
+                        provenance=["sources/leitlinie/a1b2c3/document.md"])
+
+        Args:
+            slug: Existing page slug.
+            body: The section to append. Complete — never an excerpt.
+            provenance: Optional additional source pointers.
+        """
+        _log_call("append_page", slug=slug, body=body)
+        try:
+            return store.append_page(slug, body=body, provenance=provenance)
+        except WritebackError:
+            raise
+        except SlugError as exc:
+            _log_error("append_page", exc)
+            return f"(invalid slug {slug!r})"
+        except OutmemError as exc:
+            _log_error("append_page", exc)
+            return f"(append_page failed: {exc} — use `write_page` for new pages)"
+
     def append_log(topic: str, content: str) -> str:
         """Append an entry to ``log/<today>.md`` and commit.
 
@@ -985,7 +1036,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             return f"(record_ingestion failed: {exc})"
         return f"(recorded ingestion against {rel_path})"
 
-    return [write_page, extend_page, append_log, record_ingestion]
+    return [write_page, extend_page, append_page, append_log, record_ingestion]
 
 
 def wiki_tools(store: WikiStore) -> list[WikiTool]:
@@ -997,8 +1048,8 @@ def wiki_tools(store: WikiStore) -> list[WikiTool]:
     ``page_history``), the EXPANSION helper (``topic_evolution``), source
     inspection (``list_sources`` / ``read_source`` / ``find_similar`` when
     the semantic index is available), and the four writeback paths
-    (``write_page`` / ``extend_page`` / ``append_log`` /
-    ``record_ingestion``).
+    (``write_page`` / ``extend_page`` / ``append_page`` /
+    ``append_log`` / ``record_ingestion``).
 
     Each call is a closure over ``store`` so consumers don't need to plumb
     a RunContext deps type — just pass ``tools=wiki_tools(store)`` and the
@@ -1015,7 +1066,7 @@ def wiki_read_tools(store: WikiStore) -> list[WikiTool]:
     """Return the read-only subset of the PydanticAI tool palette.
 
     Drops every commit-producing tool (``write_page``, ``extend_page``,
-    ``append_log``, ``record_ingestion``). The survivors are pure
+    ``append_page``, ``append_log``, ``record_ingestion``). The survivors are pure
     retrieval / inspection paths: ``search_wiki``, ``grep_wiki``,
     ``read_page``, ``list_pages``, ``find_backlinks``, ``page_history``,
     ``topic_evolution``, ``list_sources``, ``read_source``, and
