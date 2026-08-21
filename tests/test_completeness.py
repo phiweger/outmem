@@ -116,6 +116,80 @@ class TestQuotationIsNotFlagged:
         assert _markers("<!-- reviewed 2026-08 -->\nText.\n") == []
 
 
+class TestScannerEdges:
+    """Regressions from the review pass. Each of these either hid a real
+    cut or manufactured a false one — and a false positive is the
+    expensive kind, since the write guard turns it into a refusal."""
+
+    def test_indented_code_is_not_scanned(self) -> None:
+        """CommonMark's other code block. `[...]` is a Python Ellipsis, a
+        YAML placeholder, a shell glob — refusing those would make pages
+        documenting snippets unwritable."""
+        body = "Beispiel:\n\n    items = [...]\n\nWeiter im Text.\n"
+        assert _markers(body) == []
+
+    def test_indented_list_continuation_is_still_scanned(self) -> None:
+        """A nested list item is indented the same way as code but is
+        ordinary prose — skipping it would hide real cuts."""
+        assert len(find_elision_markers("- Punkt\n    - Unterpunkt […]\n")) == 1
+
+    def test_prose_between_two_code_spans(self) -> None:
+        """A closing backtick run must not open a second span, or the
+        text between two snippets is swallowed as code."""
+        assert len(find_elision_markers("`a` <!-- truncated --> `b`\n")) == 1
+
+    def test_unterminated_fence_does_not_disable_the_scan(self) -> None:
+        """An unpaired ``` — quoted from a source, or never closed —
+        used to exempt every following line from every check, silently."""
+        assert len(find_elision_markers("```\ncode\n\nDann Text. […]\n")) == 1
+
+    def test_mismatched_fence_markers_do_not_pair(self) -> None:
+        assert len(find_elision_markers("```\ncode\n~~~\n\nText. […]\n")) == 1
+
+    def test_multi_line_html_comment(self) -> None:
+        """The comment is matched over the whole text, so a cut announced
+        across two lines is still caught."""
+        found = find_elision_markers("Text.\n<!--\n  truncated here\n-->\nMehr.\n")
+        assert len(found) == 1
+        assert found[0].line == 2
+
+    def test_german_closing_guillemet(self) -> None:
+        """German chevron style is »Zitat« — it CLOSES with U+00AB, so a
+        truncated quotation in that style ends `[…]«`."""
+        body = "Die Leitlinie sagt: »Die kalkulierte Therapie […]«\n"
+        assert len(find_elision_markers(body)) == 1
+
+    def test_french_closing_guillemet(self) -> None:
+        body = "Le texte dit : «La thérapie […]»\n"
+        assert len(find_elision_markers(body)) == 1
+
+    def test_search_preview_ellipsis_is_not_a_cut(self) -> None:
+        """search_wiki/find_similar previews end with a bare `…` by
+        design. Inline at the end of an excerpt is not a page stopping
+        early, and flagging it would fire on nearly every tool result."""
+        assert _markers("pricing-formula: The pricing formula is cost-plus…") == []
+
+
+class TestOutmemDoesNotTeachWhatItRefuses:
+    """Self-consistency. The tool docstrings ARE the model's instructions,
+    so an example body that the guard rejects teaches the model to write
+    a call that will be handed straight back."""
+
+    def test_no_tool_example_body_is_refused(self) -> None:
+        import re
+        from pathlib import Path
+
+        import outmem.adapters.pydantic_ai as adapter
+
+        source = Path(adapter.__file__).read_text(encoding="utf-8")
+        offenders = []
+        for match in re.finditer(r'body="((?:[^"\\]|\\.)*)"', source):
+            body = match.group(1).encode().decode("unicode_escape")
+            if find_elision_markers(body):
+                offenders.append(body)
+        assert offenders == []
+
+
 class TestToolSentinel:
     """outmem's own marker for content it withheld from a tool result."""
 

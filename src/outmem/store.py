@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from outmem.sources import KeyCandidate, RegistryAudit, RekeyResult, StaleCitation
 
 from outmem.backlinks import BacklinkCache
+from outmem.completeness import find_elision_markers
 from outmem.config import (
     CONFIG_FILENAME,
     DEFAULT_AGENT_EMAIL,
@@ -2039,8 +2040,6 @@ def _reject_incomplete_body(body: str, *, tool: str) -> None:
     a model under budget pressure must not have one, or the guard
     becomes a checkbox it learns to tick.
     """
-    from outmem.completeness import find_elision_markers
-
     found = find_elision_markers(body)
     if not found:
         return
@@ -2051,6 +2050,8 @@ def _reject_incomplete_body(body: str, *, tool: str) -> None:
         f"text, since nothing downstream can tell a shortened page from a "
         f"finished one. Write the full content; if it does not fit in one "
         f"call, send what fits now and add the rest with `append_page`. "
+        f"If the ellipsis is part of a quotation and the text is already "
+        f"complete, send the same body again unchanged. "
         f"Offending: {'; '.join(lines)}",
         markers=lines,
     )
@@ -2071,12 +2072,25 @@ def _merge_provenance(
     from outmem.lint import provenance_ref
 
     merged = list(existing)
-    seen = {ref for entry in merged if (ref := provenance_ref(entry)) is not None}
+    at: dict[str, int] = {}
+    for index, entry in enumerate(merged):
+        ref = provenance_ref(entry)
+        if ref is not None:
+            at.setdefault(ref, index)
     for entry in additions:
         ref = provenance_ref(entry)
-        if ref is not None and ref in seen:
+        if ref is None:
+            merged.append(entry)
             continue
-        if ref is not None:
-            seen.add(ref)
+        if ref in at:
+            # Same source, re-cited. Replace rather than skip: the new
+            # entry may carry an updated sha256 or label, and dropping it
+            # would leave the page citing a superseded version that
+            # `outmem stale` then reports forever — with no way to fix it
+            # through append_page.
+            if entry != merged[at[ref]]:
+                merged[at[ref]] = entry
+            continue
+        at[ref] = len(merged)
         merged.append(entry)
     return merged

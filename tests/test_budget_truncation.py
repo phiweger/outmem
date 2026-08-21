@@ -104,6 +104,67 @@ class TestDetection:
     def test_a_result_without_messages_is_safe(self) -> None:
         assert _budget_truncated_writes(object()) == ()
 
+    def test_a_call_the_retry_budget_recovered_is_not_flagged(self) -> None:
+        """The LOUD half of budget pressure: a response cut mid-tool-call
+        arrives with arguments missing, schema validation fires, and the
+        retry rewrites it. That is already handled — flagging it would
+        fire on the most common production failure and teach everyone to
+        ignore the warning."""
+        from pydantic_ai.messages import ModelRequest, RetryPromptPart
+
+        call = ToolCallPart(
+            tool_name="write_page", args={"slug": "a:b"}, tool_call_id="call-1"
+        )
+        run = _Run(
+            [
+                ModelResponse(parts=[call], finish_reason="length"),
+                ModelRequest(
+                    parts=[
+                        RetryPromptPart(
+                            content="body: Field required",
+                            tool_name="write_page",
+                            tool_call_id="call-1",
+                        )
+                    ]
+                ),
+            ]
+        )
+        assert _budget_truncated_writes(run) == ()
+
+    def test_a_different_call_is_still_flagged(self) -> None:
+        """One recovered call must not suppress a genuinely suspect one."""
+        from pydantic_ai.messages import ModelRequest, RetryPromptPart
+
+        run = _Run(
+            [
+                ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            tool_name="write_page",
+                            args={"slug": "a:b"},
+                            tool_call_id="call-1",
+                        ),
+                        ToolCallPart(
+                            tool_name="write_page",
+                            args={"slug": "c:d"},
+                            tool_call_id="call-2",
+                        ),
+                    ],
+                    finish_reason="length",
+                ),
+                ModelRequest(
+                    parts=[
+                        RetryPromptPart(
+                            content="body: Field required",
+                            tool_name="write_page",
+                            tool_call_id="call-1",
+                        )
+                    ]
+                ),
+            ]
+        )
+        assert _budget_truncated_writes(run) == ("write_page(c:d)",)
+
 
 class TestEndToEnd:
     """Through a real agent run, so the wiring is covered rather than the

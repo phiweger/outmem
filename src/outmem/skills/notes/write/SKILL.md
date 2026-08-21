@@ -15,7 +15,7 @@ commit. Without it, agentic search is an expensive way to re-derive
 the same answer on every query. The wiki is *your* compounding
 artifact; maintain it.
 
-## Three writeback paths
+## Four writeback paths
 
 Tool calls below show the primary API (PydanticAI tools attached to
 the agent). The equivalent CLI is at the bottom of each section for
@@ -83,7 +83,30 @@ Equivalent CLI:
 outmem extend <slug> <<< "<complete replacement body>"
 ```
 
-### C. Log entry — when nothing rose to a wiki page
+### C. Add a section — when a page is too long to write in one call
+
+```python
+append_page(
+    slug="clinical:sepsis",
+    body="## Diagnostik\n\nBlutkulturen vor Therapiebeginn.\n",
+)
+```
+
+Adds to the end of the body, keeping what is already there. Pass only
+the new section — do not restate the existing text, or it appears
+twice. Equivalent CLI: `outmem append <slug> <<< "<section>"`.
+
+**This is how you write a long page.** One tool call has a limited
+output budget, so a page that does not comfortably fit in one is
+written as `write_page` (structure + first section) and then one
+`append_page` per remaining section. Never shorten a page to make it
+fit, and never mark a cut with an ellipsis: outmem refuses a body that
+ends at one and makes you write it again. A page that stops early is
+indistinguishable from a finished one to every other check, which is
+exactly why the write path is strict about it.
+
+
+### D. Log entry — when nothing rose to a wiki page
 
 ```python
 append_log(
@@ -112,30 +135,10 @@ outmem log <topic> <<< "- <one-line observation>"
 
 - Synthesis of multiple sources into one statement → **new wiki page**.
 - Correction or refinement of an existing page → **extend**.
+- More material for a page that already covers the topic, or the next
+  section of a page too long for one call → **append**.
 - Observed contradiction, decision, "TODO" item, or open question → **log**.
 - Search that turned up nothing actionable → **log** (one line).
-
-### C. Add a section — when a page is too long to write in one call
-
-```python
-append_page(
-    slug="clinical:sepsis",
-    body="## Diagnostik\n\nBlutkulturen vor Therapiebeginn.\n",
-)
-```
-
-Adds to the end of the body, keeping what is already there. Pass only
-the new section — do not restate the existing text, or it appears
-twice. Equivalent CLI: `outmem append <slug> <<< "<section>"`.
-
-**This is how you write a long page.** One tool call has a limited
-output budget, so a page that does not comfortably fit in one is
-written as `write_page` (structure + first section) and then one
-`append_page` per remaining section. Never shorten a page to make it
-fit, and never mark a cut with an ellipsis: outmem refuses a body that
-ends at one and makes you write it again. A page that stops early is
-indistinguishable from a finished one to every other check, which is
-exactly why the write path is strict about it.
 
 ## Common mistakes
 

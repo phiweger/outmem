@@ -52,7 +52,7 @@ invariant and only ever *asked* for completeness.
 ### Fixed
 
 - **outmem no longer emits the elision vocabulary it refuses.** Four
-  places announced withheld content with a bracketed marker — the
+  places announced *withheld content* with a bracketed marker — the
   `read_source` cap (which lands in the writing agent's context at
   exactly the moment it is reading source material), the `grep_wiki`
   cap, the rerank gate's splice (literally `[…]`, the banned string),
@@ -60,6 +60,15 @@ invariant and only ever *asked* for completeness.
   out-of-band sentinel, `⟪ outmem: … ⟫`, chosen so the ban and the
   notice can never collide; a test pins that every note outmem emits
   survives its own detector.
+
+**The write guard yields rather than deadlocking.** The detector is a
+fallible heuristic — which is why lint reports it at WARNING — so making
+it a hard block risked the opposite failure: a false positive on a
+legitimate quotation, the model re-sending the same correct body, and
+the turn dying with zero commits once the retry budget ran out. A second
+*identical* submission is therefore accepted and left for lint to
+report, and the refusal message says so. One retry to fix a real
+truncation; no way for one misread quotation to cost a whole turn.
 
 The detector keys on **position, not vocabulary**: a marker counts as a
 cut only when nothing but closing punctuation follows it on its line.

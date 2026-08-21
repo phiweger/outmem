@@ -23,6 +23,7 @@ sections give concrete valid values.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from collections.abc import Callable
@@ -40,6 +41,11 @@ from outmem.exceptions import (
 )
 from outmem.skills import bundled_registry
 from outmem.store import WikiStore
+
+
+def _body_key(tool: str, slug: str, body: str) -> str:
+    """Identity of one write attempt, for the retry-once-then-yield rule."""
+    return f"{tool}\x00{slug}\x00{hashlib.sha256(body.encode()).hexdigest()}"
 
 
 def _retry_incomplete(exc: IncompleteBodyError) -> NoReturn:
@@ -786,6 +792,16 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
     so a read-only store will surface the refusal as an
     :class:`OutmemError` propagated back through the tool's return path.
     """
+    # Bodies this palette has already handed back once. A second
+    # identical submission means the model is insisting the text is
+    # right — overwhelmingly a quotation the positional heuristic
+    # misread — so it is let through and left for `outmem lint` to
+    # report at WARNING. The alternative is worse than the defect: the
+    # guard is a fallible heuristic, and without a yield the model
+    # re-sends the same correct body until the retry budget is gone and
+    # the whole turn dies with zero commits.
+    insisted: set[str] = set()
+
 
     def write_page(
         slug: str,
@@ -832,7 +848,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             write_page(
                 slug="abx:amikacin:iv-dosing",
                 title="Amikacin IV — Dosing",
-                body="...",
+                body="IV penicillin G 18-24 MU/day.",
                 provenance=[{
                     "path": "sources/9b3d0d4e1a35/document.md",
                     "sha256": "9b3d0d4e1a35...",
@@ -869,6 +885,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 body=body,
                 provenance=list(provenance) if provenance else None,
                 tags=list(tags) if tags else None,
+                allow_elision=_body_key("write_page", slug, body) in insisted,
             )
         except WritebackError:
             raise  # propagate; the service surfaces this to the caller
@@ -877,6 +894,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             # as advisory text. A shortened body is recoverable only while
             # the source is still in context, which is now — ModelRetry
             # spends one of the existing retries to get the full text.
+            insisted.add(_body_key("write_page", slug, body))
             _log_error("write_page", exc)
             _retry_incomplete(exc)
         except SlugError as exc:
@@ -927,7 +945,9 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         """
         _log_call("extend_page", slug=slug, body=body)
         try:
-            return store.extend_page(slug, body=body, provenance=provenance)
+            return store.extend_page(slug, body=body, provenance=provenance,
+                allow_elision=_body_key("extend_page", slug, body) in insisted,
+            )
         except WritebackError:
             raise
         except IncompleteBodyError as exc:
@@ -935,6 +955,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             # as advisory text. A shortened body is recoverable only while
             # the source is still in context, which is now — ModelRetry
             # spends one of the existing retries to get the full text.
+            insisted.add(_body_key("extend_page", slug, body))
             _log_error("extend_page", exc)
             _retry_incomplete(exc)
         except SlugError as exc:
@@ -971,11 +992,11 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
 
         Example:
             write_page(slug="clinical:sepsis", title="Sepsis",
-                       body="## Erreger\\n\\n…")
+                       body="## Erreger\\n\\nGramnegative Erreger dominieren.")
             append_page(slug="clinical:sepsis",
-                        body="## Diagnostik\\n\\n…")
+                        body="## Diagnostik\\n\\nBlutkulturen vor Therapie.")
             append_page(slug="clinical:sepsis",
-                        body="## Therapie\\n\\n…",
+                        body="## Therapie\\n\\nTherapie binnen 1h.",
                         provenance=["sources/leitlinie/a1b2c3/document.md"])
 
         Args:
@@ -985,7 +1006,9 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         """
         _log_call("append_page", slug=slug, body=body)
         try:
-            return store.append_page(slug, body=body, provenance=provenance)
+            return store.append_page(slug, body=body, provenance=provenance,
+                allow_elision=_body_key("append_page", slug, body) in insisted,
+            )
         except WritebackError:
             raise
         except IncompleteBodyError as exc:
@@ -993,6 +1016,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             # as advisory text. A shortened body is recoverable only while
             # the source is still in context, which is now — ModelRetry
             # spends one of the existing retries to get the full text.
+            insisted.add(_body_key("append_page", slug, body))
             _log_error("append_page", exc)
             _retry_incomplete(exc)
         except SlugError as exc:

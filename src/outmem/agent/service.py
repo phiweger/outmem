@@ -358,13 +358,30 @@ def _budget_truncated_writes(run_result: Any) -> tuple[str, ...]:
     ``pydantic_ai`` and outmem supports older ones, where the signal is
     simply unavailable and no page is flagged.
     """
+    messages = list(getattr(run_result, "all_messages", lambda: [])())
+
+    # Calls that never ran: a response cut MID-tool-call arrives with
+    # arguments missing, schema validation fires, and the retry budget
+    # rewrites it. That is the loud half of budget pressure and it is
+    # already handled — flagging it here would fire on the most common
+    # failure in production and train everyone to ignore the warning.
+    retried: set[str] = set()
+    for message in messages:
+        for part in getattr(message, "parts", ()):
+            if type(part).__name__ == "RetryPromptPart":
+                call_id = getattr(part, "tool_call_id", None)
+                if call_id:
+                    retried.add(call_id)
+
     suspect: list[str] = []
-    for message in getattr(run_result, "all_messages", lambda: [])():
+    for message in messages:
         if getattr(message, "finish_reason", None) != "length":
             continue
         for part in getattr(message, "parts", ()):
             name = getattr(part, "tool_name", None)
             if name not in _CONTENT_WRITE_TOOLS:
+                continue
+            if getattr(part, "tool_call_id", None) in retried:
                 continue
             args = getattr(part, "args", None)
             if callable(getattr(part, "args_as_dict", None)):

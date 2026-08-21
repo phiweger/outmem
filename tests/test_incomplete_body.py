@@ -123,6 +123,61 @@ class TestToolRaisesModelRetry:
             self._tool(store, name)(body=TRUNCATED, **kwargs)
         assert "append_page" in str(caught.value)
 
+    def test_insisting_on_the_same_body_is_let_through(
+        self, store: WikiStore
+    ) -> None:
+        """The guard is a fallible heuristic. Without a yield, a false
+        positive costs the WHOLE turn: the model re-sends the same correct
+        body until the retry budget is gone and the run dies with zero
+        commits. A second identical submission is accepted and left for
+        lint to report at WARNING."""
+        from pydantic_ai import ModelRetry
+
+        tool = self._tool(store, "write_page")
+        kwargs = {"slug": "clinical:neu", "title": "Neu", "body": TRUNCATED}
+        with pytest.raises(ModelRetry):
+            tool(**kwargs)
+        sha = tool(**kwargs)  # same body again → accepted
+        assert isinstance(sha, str)
+        assert "[…]" in store.read("clinical:neu").body
+
+    def test_the_yield_is_per_body_not_per_tool(self, store: WikiStore) -> None:
+        """Insisting on one body must not pre-authorise a different one —
+        otherwise one false positive disables the guard for the turn."""
+        from pydantic_ai import ModelRetry
+
+        tool = self._tool(store, "write_page")
+        with pytest.raises(ModelRetry):
+            tool(slug="clinical:a", title="A", body=TRUNCATED)
+        tool(slug="clinical:a", title="A", body=TRUNCATED)
+        with pytest.raises(ModelRetry):
+            tool(slug="clinical:b", title="B", body="Anderer Text. […]\n")
+
+    def test_a_yielded_page_is_still_reported_by_lint(
+        self, store: WikiStore
+    ) -> None:
+        """The bounded-damage half of the bargain: the write goes through,
+        and the page is visible as `truncated-page` rather than silent."""
+        from pydantic_ai import ModelRetry
+
+        from outmem.lint import lint_wiki
+
+        tool = self._tool(store, "write_page")
+        kwargs = {"slug": "clinical:neu", "title": "Neu", "body": TRUNCATED}
+        with pytest.raises(ModelRetry):
+            tool(**kwargs)
+        tool(**kwargs)
+        report = lint_wiki(store.wiki_path, log_dir=store.log_path)
+        assert [f for f in report.findings if f.kind == "truncated-page"]
+
+    def test_message_offers_the_honest_escape(self, store: WikiStore) -> None:
+        """A truncating model adds content; a model holding a correct
+        quotation re-sends it. The message has to name that second path,
+        or the model keeps 'fixing' text that was never broken."""
+        with pytest.raises(IncompleteBodyError) as caught:
+            store.write_page("clinical:neu", title="Neu", body=TRUNCATED)
+        assert "same body again unchanged" in str(caught.value)
+
     def test_other_failures_still_return_strings(self, store: WikiStore) -> None:
         """Only the incomplete-body case is retryable; a bad slug is the
         model's mistake to read and correct, not to re-attempt blindly."""

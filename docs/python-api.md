@@ -525,8 +525,8 @@ search_index()                            # orient on an unfamiliar wiki
             └─ write_page / extend_page / append_page / append_log
 ```
 
-The tools — fourteen, plus `find_similar` when the semantic index is
-built (fifteen):
+The tools — fifteen, plus `find_similar` when the semantic index is
+built (sixteen):
 
 | Tool | Required args | Purpose |
 |------|---------------|---------|

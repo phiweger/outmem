@@ -80,6 +80,7 @@ from pathlib import Path
 
 from outmem._sqlite import connect as _sqlite_connect
 from outmem._time import format_iso_z, parse_iso_z, utc_now
+from outmem.completeness import tool_note
 from outmem.exceptions import OutmemError
 
 SOURCES_DIR = "sources"
@@ -1058,8 +1059,6 @@ def read_source_text(
         # reading source material to compact into a page, so the marker
         # outmem emits here is a marker it teaches — and page bodies
         # ending in an elision are refused (see outmem.completeness).
-        from outmem.completeness import tool_note
-
         note = tool_note(
             f"source truncated — {max_chars} of {len(text)} chars shown "
             f"(sources.max_chars)"

@@ -445,7 +445,7 @@ concerns):
 
 - Mandatory writeback enforcement
 - Pull-before / push-after / record-run lifecycle
-- HITL approval gate around `write_page` / `extend_page`
+- HITL approval gate around `write_page` / `extend_page` / `append_page`
 - Default `max_tokens=16384` and Anthropic prompt caching
 
 If you want those too, the all-in-one is `outmem.agent.ask_sync(store, query=…)`.
@@ -507,7 +507,7 @@ never leaks across the boundary.
 What `read_only=True` guarantees:
 
 - Every commit-producing entry point on `WikiStore` (`write_page`,
-  `extend_page`, `append_log`, `add_source`, `record_ingestion`,
+  `extend_page`, `append_page`, `append_log`, `add_source`, `record_ingestion`,
   `rebuild_index`, `import_vault`) raises `OutmemError` via a single
   guard in `_commit_paths`. `pull()` is also refused (rebase mutates
   the working tree). `push()` stays unguarded — nothing local to push.

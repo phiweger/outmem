@@ -971,7 +971,7 @@ def _slugs_from_commits(subjects: tuple[str, ...]) -> list[str]:
     """
     slugs: list[str] = []
     for subj in subjects:
-        for prefix in ("compact: ", "extend: "):
+        for prefix in ("compact: ", "extend: ", "append: "):
             if subj.startswith(prefix):
                 slug = subj[len(prefix) :].strip()
                 if slug and slug not in slugs:

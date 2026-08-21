@@ -160,7 +160,8 @@ class ApprovalSettings:
     """Human-in-the-loop gates around agent writes.
 
     When ``required_for_writes`` is ``True``, the agent's
-    ``write_page`` / ``extend_page`` tool calls are deferred and surfaced
+    ``write_page`` / ``extend_page`` / ``append_page`` tool calls are
+    deferred and surfaced
     to a :class:`outmem.agent.approval.Reviewer` (typically a CLI prompt)
     before the underlying git commit lands. The agent's other tools
     (``append_log``, ``read_*``, ``search_*``) are unaffected.
@@ -741,8 +742,9 @@ def starter_yaml(
         f"  top_k: {DEFAULT_SEMANTIC_TOP_K}\n"
         "\n"
         "# Human-in-the-loop approval for agent writes. When on, every\n"
-        "# `write_page` / `extend_page` is shown to a reviewer (CLI\n"
-        "# prompt by default) and only commits after explicit approval.\n"
+        "# `write_page` / `extend_page` / `append_page` is shown to a\n"
+        "# reviewer (CLI prompt by default) and only commits after\n"
+        "# explicit approval.\n"
         "# `append_log` and read tools are not gated.\n"
         "approval:\n"
         f"  required_for_writes: {str(DEFAULT_APPROVAL_REQUIRED_FOR_WRITES).lower()}\n"
@@ -813,6 +815,7 @@ Examples:
 ## What goes where
 
 <!-- Optional. Guide the agent's choice between write_page, extend_page,
+     append_page,
 and append_log. Examples:
 - "Single-source observations go to the log; compact into a page only
   after a second source confirms."
