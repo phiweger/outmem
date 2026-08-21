@@ -157,6 +157,7 @@ def lint_wiki(
     _check_wikilinks(pages, pinned, report)
     _check_dead_slug_mentions(pages, pinned, report)
     _check_page_completeness(pages, report)
+    _check_declared_omissions(pages, report)
     _check_provenance(
         pages,
         sources_dir=sources_dir,
@@ -199,6 +200,9 @@ class _LoadedPage:
     # be reported in file coordinates — the number is only useful if it
     # matches what an editor and `grep_wiki` show for the same page.
     body_line_offset: int = 0
+    # `omitted:` entries — content the author says the page deliberately
+    # leaves out. Round-trips through `extra`, so it needs no schema.
+    omitted: tuple[str, ...] = ()
 
 
 def _load_pages(
@@ -279,8 +283,58 @@ def _load_pages(
             generated=generated,
             aliases=tuple(frontmatter.aliases),
             body_line_offset=len(raw.splitlines()) - len(body.splitlines()),
+            omitted=_declared_omissions(frontmatter.extra.get("omitted")),
         )
     return pages
+
+
+def _declared_omissions(value: Any) -> tuple[str, ...]:
+    """Normalise an ``omitted:`` frontmatter value to a tuple of notes.
+
+    Lenient about shape (a bare string is one note) because the field
+    round-trips through ``extra`` and has no schema to enforce — the
+    point is to surface what is there, not to reject how it was typed.
+    """
+    if isinstance(value, str):
+        return (value.strip(),) if value.strip() else ()
+    if isinstance(value, list):
+        return tuple(str(v).strip() for v in value if str(v).strip())
+    return ()
+
+
+def _check_declared_omissions(
+    pages: dict[str, _LoadedPage], report: LintReport
+) -> None:
+    """Report every ``omitted:`` note as an open item.
+
+    ``omitted:`` gives a deliberate scoping decision somewhere to live —
+    "treatment is on another page", "the PCR protocol details stay in the
+    source" — which is genuinely useful, and it is also the obvious place
+    for budget-driven truncation to migrate to once the elision marker is
+    refused. Reporting it is what keeps those apart: a declared gap is
+    still a gap, so it costs a warning, and a page cannot be made clean by
+    announcing what it left out.
+
+    That is why there is no ``omitted`` tool argument. The convention is
+    for a human curating scope, not a channel a model can use to make a
+    short page legal.
+    """
+    for page in sorted(pages.values(), key=lambda p: p.slug):
+        for note in page.omitted:
+            report.findings.append(
+                LintFinding(
+                    kind="declared-omission",
+                    severity=Severity.WARNING,
+                    path=page.rel_path,
+                    message=(
+                        f"page declares omitted content: {note!r}. Deliberate "
+                        "scoping is fine — this is reported so the gap stays "
+                        "visible, not because it is wrong. Fill it, link the "
+                        "page that covers it, or drop the note once it no "
+                        "longer describes the page."
+                    ),
+                )
+            )
 
 
 def _check_page_completeness(

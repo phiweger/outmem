@@ -614,3 +614,55 @@ def test_tool_output_pasted_into_a_page_is_flagged(tmp_path: Path) -> None:
     found = [f for f in report.findings if f.kind == "tool-output-in-page"]
     assert len(found) == 1
     assert found[0].severity == Severity.WARNING
+
+
+def test_declared_omission_is_reported(tmp_path: Path) -> None:
+    """`omitted:` is where deliberate scoping lives — and the obvious
+    place for budget truncation to migrate once the marker is refused.
+    Reporting it is what keeps those apart: a declared gap is still a gap."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page(
+        "clinical:sepsis",
+        title="Sepsis",
+        body="## Erreger\n\nText.\n",
+        extra={"omitted": ["Vaccination schedules — covered on vaccination:schedule"]},
+    )
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path)
+    found = [f for f in report.findings if f.kind == "declared-omission"]
+    assert len(found) == 1
+    assert found[0].severity == Severity.WARNING
+    assert "Vaccination schedules" in found[0].message
+
+
+def test_declared_omission_accepts_a_bare_string(tmp_path: Path) -> None:
+    """The field round-trips through `extra` and has no schema, so lint is
+    lenient about shape — the point is to surface it, not police typing."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page(
+        "clinical:sepsis",
+        title="Sepsis",
+        body="Text.\n",
+        extra={"omitted": "PCR protocol details stay in the source"},
+    )
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path)
+    assert len([f for f in report.findings if f.kind == "declared-omission"]) == 1
+
+
+def test_no_omitted_field_is_quiet(tmp_path: Path) -> None:
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("clinical:sepsis", title="Sepsis", body="Text.\n")
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path)
+    assert [f for f in report.findings if f.kind == "declared-omission"] == []
+
+
+def test_omitted_is_not_a_tool_argument(tmp_path: Path) -> None:
+    """Deliberately absent from the model-facing API: the convention is
+    for a human curating scope, not a channel a model can use to make a
+    short page legal."""
+    import inspect
+
+    from outmem.adapters.pydantic_ai import wiki_tools
+
+    store = WikiStore.init(tmp_path / "w")
+    for tool in wiki_tools(store):
+        assert "omitted" not in inspect.signature(tool).parameters, tool.__name__
