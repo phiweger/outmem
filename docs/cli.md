@@ -57,6 +57,14 @@ outmem extend pricing-formula <<< "Revised: cost-plus 40%."
 # --provenance replaces the page's source pointers (repeat for several);
 # omit it and they are left untouched. See "Staleness" below.
 outmem extend pricing-formula --provenance sources/deck/a1b2c3d4e5f6/q2.md <<< "…"
+
+outmem append pricing-formula <<< "## Volume tiers
+
+Above 10k units the rate is renegotiated."
+# ADDS a section, keeping what's there (extend REPLACES the body).
+# --provenance here ADDS pointers, deduped — an appended section often
+# draws on a source the page already cites.
+
 outmem log pricing <<< "- saw a contradiction between deck and msa."
 outmem pull
 outmem push

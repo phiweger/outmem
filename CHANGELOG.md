@@ -3,6 +3,71 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## Unreleased
+
+**A page is now checked for being all there.** Reported from the same
+~1200-page clinical wiki: a turn's output budget binds, and the model
+does not necessarily fail — it emits a schema-valid `write_page` whose
+body stops early and marks the cut with an ellipsis. Provenance,
+hashes, links, and the index are all correct, so nothing downstream can
+tell that page from a finished one. 181 such cuts across 75 pages, ~226k
+characters, undetected for months, with the missing content sitting in
+registered sources the whole time. outmem enforced every *structural*
+invariant and only ever *asked* for completeness.
+
+### Added
+
+- **`append_page`** — add a section to an existing page, keeping what is
+  there. The counterpart `extend_page` never had: `extend_page`
+  *replaces* the body, so building a page in sections meant re-emitting
+  everything written so far on every call, and the last call still had
+  to hold the whole page in one turn — the very budget pressure that
+  causes truncation. Appending removes it. Provenance here is additive
+  (deduped by source path) so a section drawn from a new source can cite
+  it without restating the page's earlier citations. Available as a
+  tool, on `WikiStore`, and as `outmem append`.
+- **Write paths refuse a body that stops early.** `write_page`,
+  `extend_page`, and `append_page` raise `IncompleteBodyError` when the
+  body ends at an elision marker, and the tools turn that into a
+  `ModelRetry` naming `append_page` as the place to put the overflow —
+  the first use of `ModelRetry` in outmem, and the only error handed
+  *back* to the model rather than returned as advisory text after the
+  call already committed. Banning the marker is only safe because the
+  message names the alternative. `allow_elision=True` overrides on the
+  store, deliberately not on the tools: a human writing an unusual page
+  needs a way through, a model under budget pressure must not have one.
+- **Three lint kinds that read the body as content**, for corpora that
+  already have the damage: `truncated-page` (with a file line number and
+  the offending line quoted), `tool-output-in-page` (an outmem
+  withheld-content marker copied into a page), and `declared-omission`
+  (an `omitted:` frontmatter note — deliberate scoping is fine, and is
+  reported so a declared gap cannot be used to make a short page look
+  finished). `omitted:` needs no schema; unknown frontmatter keys already
+  round-trip. There is deliberately no `omitted` tool argument.
+- **`AskResult.budget_truncated_writes`** and an unconditional CLI
+  warning when a model turn ended because it ran out of output room
+  while calling a write tool. This is the case the model did *not* mark,
+  the only one that survives without its cooperation.
+
+### Fixed
+
+- **outmem no longer emits the elision vocabulary it refuses.** Four
+  places announced withheld content with a bracketed marker — the
+  `read_source` cap (which lands in the writing agent's context at
+  exactly the moment it is reading source material), the `grep_wiki`
+  cap, the rerank gate's splice (literally `[…]`, the banned string),
+  and the optimizer's `read_page` diagnostic. All four now use one
+  out-of-band sentinel, `⟪ outmem: … ⟫`, chosen so the ban and the
+  notice can never collide; a test pins that every note outmem emits
+  survives its own detector.
+
+The detector keys on **position, not vocabulary**: a marker counts as a
+cut only when nothing but closing punctuation follows it on its line.
+`"die Therapie [...] wird empfohlen"` is the standard way to shorten a
+quotation and is not flagged, nor is anything in a blockquote, in code,
+or used as link display text — those are the false positives that get a
+completeness check switched off.
+
 ## 0.14.0
 
 ### Changed

@@ -105,6 +105,17 @@ sha = store.write_page(
 sha = store.extend_page("pricing-formula", body="Revised: cost-plus 40%.\n")
 # Commits "extend: pricing-formula".
 
+# Add a section, keeping what's already there. This is how a page too
+# long for one model turn gets written — write_page for the structure,
+# then one append_page per section, so no single call has to hold the
+# whole page. `provenance` here ADDS pointers (deduped) rather than
+# replacing them.
+sha = store.append_page(
+    "pricing-formula",
+    body="## Volume tiers\n\nAbove 10k units the rate is renegotiated.\n",
+)
+# Commits "append: pricing-formula".
+
 # Log entry — for findings that don't yet rise to a wiki page.
 sha = store.append_log(
     topic="pricing-inconsistency",
@@ -235,6 +246,13 @@ Both return the loader's `failures` alongside the result, per the shared loader
 contract: a page whose frontmatter will not parse is a page the check could not
 run on, and reporting a clean wiki while silently skipping it is the failure
 this contract exists to prevent. `outmem stale` exits 2 when there are any.
+
+All three write paths refuse a body that ends at an elision marker
+(`IncompleteBodyError`) — a page that stops early is indistinguishable
+from a finished one to every other check, so the refusal is the only
+place it can be caught cheaply. Pass `allow_elision=True` to override;
+the agent-facing tools deliberately do not expose it. See
+[growing-the-wiki.md](growing-the-wiki.md#2b-completeness--pages-that-stop-early).
 
 `extend_page(provenance=…)` **replaces** the page's source pointers; omit it and
 they are untouched. Without it there is no way to update the field, so a page
@@ -504,7 +522,7 @@ search_index()                            # orient on an unfamiliar wiki
    └─ search_wiki(question="…")           # then ask the question
       └─ read_page(slug, peek=True)       # outline: which part to read
          └─ read_page(slug)               # full read on the winner
-            └─ write_page / extend_page / append_log  # close the loop
+            └─ write_page / extend_page / append_page / append_log
 ```
 
 The tools — fourteen, plus `find_similar` when the semantic index is
@@ -524,6 +542,7 @@ built (fifteen):
 | `read_source(rel_path)` | 1 | Full text of a registered source |
 | `write_page(slug, title, body, provenance, tags)` | **3** | New page → commit `compact: <slug>` |
 | `extend_page(slug, body)` | **2** | Replace body → commit `extend: <slug>` |
+| `append_page(slug, body, provenance)` | **2** | Add a section → commit `append: <slug>` |
 | `append_log(topic, content)` | **2** | Append entry → commit `log: <topic>` |
 | `record_ingestion(rel_path, prompt, pages_touched)` | 1 | Note a source as ingested |
 | `find_similar(text, top_k, exclude_slug)` | 1 | Vector search — only when the index is built |

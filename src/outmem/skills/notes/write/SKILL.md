@@ -70,9 +70,9 @@ extend_page(
 ```
 
 **Required in every call: `slug` AND `body`.** Body is a complete
-replacement of the page's body section — there is no partial-edit
-primitive at v0.1. To keep the old content, paste it into your
-replacement before the new material.
+replacement of the page's body section. To keep the old content, paste
+it into your replacement before the new material — or use
+`append_page`, which adds to the body instead of replacing it.
 
 Frontmatter (title, provenance, tags, created) is preserved;
 `updated` is bumped. Commit message becomes `extend: <slug>`.
@@ -115,6 +115,28 @@ outmem log <topic> <<< "- <one-line observation>"
 - Observed contradiction, decision, "TODO" item, or open question → **log**.
 - Search that turned up nothing actionable → **log** (one line).
 
+### C. Add a section — when a page is too long to write in one call
+
+```python
+append_page(
+    slug="clinical:sepsis",
+    body="## Diagnostik\n\nBlutkulturen vor Therapiebeginn.\n",
+)
+```
+
+Adds to the end of the body, keeping what is already there. Pass only
+the new section — do not restate the existing text, or it appears
+twice. Equivalent CLI: `outmem append <slug> <<< "<section>"`.
+
+**This is how you write a long page.** One tool call has a limited
+output budget, so a page that does not comfortably fit in one is
+written as `write_page` (structure + first section) and then one
+`append_page` per remaining section. Never shorten a page to make it
+fit, and never mark a cut with an ellipsis: outmem refuses a body that
+ends at one and makes you write it again. A page that stops early is
+indistinguishable from a finished one to every other check, which is
+exactly why the write path is strict about it.
+
 ## Common mistakes
 
 - **Forgetting `body=` on `write_page` or `extend_page`.** Body is a
@@ -122,7 +144,11 @@ outmem log <topic> <<< "- <one-line observation>"
   with the complete page text. The schema will reject the call without
   it.
 - **Treating `extend_page` as a partial edit.** It replaces the whole
-  body; copy any content you want to keep into the new body.
+  body; copy any content you want to keep into the new body, or use
+  `append_page` to add without replacing.
+- **Shortening a page to fit the call.** Use `append_page` for the
+  rest. An ellipsis or a "truncated"/"continues" note is refused —
+  outmem hands the call back and asks for the complete text.
 - **Adding speculation to wiki pages.** If the source doesn't support
   the claim, route the observation to `append_log` instead.
 

@@ -61,6 +61,48 @@ outmem lint
 Treat the broken-wikilink list as a sibling backlog to the log
 entries.
 
+## 2b. Completeness — pages that stop early
+
+Every check above is structural: it asks whether the wiki's *metadata*
+is consistent. One check reads the body as content, because a page can
+be a fraction of what its own source says while every structural
+invariant around it is perfect.
+
+The failure is quiet and specific. When a turn's output budget binds,
+a model does not necessarily fail — it can emit a schema-valid
+`write_page` whose body stops early and marks the cut with an ellipsis.
+Provenance, hashes, links, and the index all stay correct, so nothing
+downstream can tell that page from a finished one. One wiki carried 181
+such cuts across 75 pages for months; the missing content was in
+registered sources the whole time.
+
+Three lint kinds cover it:
+
+- **`truncated-page`** (warning) — the body ends at an elision marker.
+  Reported with a file line number and the offending line quoted. Fix
+  by restoring the content from the page's sources and appending it.
+- **`tool-output-in-page`** (warning) — an `⟪ outmem: … ⟫` marker was
+  copied into a page. That marker means outmem itself withheld content
+  from a tool result (an oversized source, a spliced search excerpt),
+  so the page is built on material it never actually saw.
+- **`declared-omission`** (warning) — the page's frontmatter carries an
+  `omitted:` note. Deliberate scoping is fine; it is reported so the
+  gap stays visible rather than becoming a way to make a short page
+  look finished.
+
+New cuts are prevented rather than reported: `write_page`,
+`extend_page`, and `append_page` refuse a body that ends at an elision
+marker, and the agent is told to use `append_page` for the rest instead
+of shortening. A quotation that continues past its ellipsis
+(`"die Therapie [...] wird empfohlen"`) is not affected — the check
+keys on a marker that *ends* its line, and skips blockquotes, code, and
+link text.
+
+If a turn ends because it ran out of output room while writing a page,
+`outmem ask` warns and names the page even when nothing was marked —
+that is the case the model did not flag itself. Verify those pages
+against their sources.
+
 ## 3. Ask the agent to summarise the gaps
 
 The cleanest signal is just to ask. The agent reads the log itself
