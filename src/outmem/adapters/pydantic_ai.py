@@ -29,6 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn
 
+from outmem.completeness import tool_note
 from outmem.config import ANTHROPIC_CACHE_WITH_TOOLS
 from outmem.exceptions import (
     FrontmatterError,
@@ -146,7 +147,9 @@ def _format_hits(result: Any, scope: str, context: int = 0) -> str:
         lines.append(f"{leading}{separator}{hit.line_number}{separator}{hit.text}")
         previous = hit
     if result.truncated:
-        lines.append("(truncated — narrow the pattern)")
+        lines.append(
+            tool_note("results truncated at the output cap — narrow the pattern")
+        )
     return "\n".join(lines)
 
 
@@ -567,8 +570,11 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
 
         Use during ingestion to actually look at the material before
         extracting facts into wiki pages. The output is capped at the
-        configured ``sources.max_chars`` (default 200k chars) — if
-        the file is larger, the tail is truncated with a marker.
+        configured ``sources.max_chars`` (default 200k chars). If the
+        file is larger you get the head plus an ``\u27ea outmem: … \u27eb``
+        note saying so — treat that as "there is more here I have not
+        seen", never as the whole document, and never copy the note into
+        a page.
 
         Works for both source trees. Local-only sources
         (``sources-local/…``) are as readable as any other; what differs

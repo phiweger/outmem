@@ -139,7 +139,7 @@ slug plus an excerpt built fresh from disk (never from index chunks):
 [slug: clinical:breakpoints]
 Breakpoints — clinical, eucast          ← the page's title and tags
 …page opening…                          ← what the page IS
-[…]                                     ← splice: middle omitted
+⟪ outmem: excerpt spliced — middle omitted ⟫   ← the omitted middle
 [section: Diagnostik > Blutkulturen]    ← heading path of the window
 …the passage around the query terms…    ← why it matched
 ```

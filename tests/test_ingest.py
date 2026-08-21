@@ -8,6 +8,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from outmem.completeness import TOOL_SENTINEL_OPEN
 from outmem.exceptions import OutmemError
 from outmem.sources import (
     REGISTRY_FILENAME,
@@ -144,8 +145,9 @@ def test_source_max_chars_from_config(tmp_path: Path) -> None:
     src.write_text("a" * 200, encoding="utf-8")
     entry = store.add_source(src)
     out = store.read_source(entry.rel_path)
-    # Cap of 50 → ~50 chars plus the "[truncated …]" footer.
+    # Cap of 50 → ~50 chars plus the out-of-band truncation note.
     assert "truncated" in out
+    assert TOOL_SENTINEL_OPEN in out
     assert len(out) < 200
 
 

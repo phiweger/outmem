@@ -19,6 +19,7 @@ from outmem.adapters.pydantic_ai import (
     wiki_read_tools,
     wiki_tools,
 )
+from outmem.completeness import TOOL_SENTINEL_OPEN
 from outmem.store import WikiStore
 
 # ---------------------------------------------------------------------------
@@ -559,7 +560,8 @@ class TestGrepWikiContext:
         out = _by_name(wiki_tools(store), "grep_wiki")(
             pattern="NACHWEIS", context=5
         )
-        assert "(truncated — narrow the pattern)" in out
+        assert TOOL_SENTINEL_OPEN in out
+        assert "narrow the pattern" in out
 
 
 # ---------------------------------------------------------------------------

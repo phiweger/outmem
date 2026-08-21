@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from outmem._store.semantic import frontmatter_header
+from outmem.completeness import tool_note
 from outmem.config import (
     ANTHROPIC_CACHE_WITH_TOOLS,
     DEFAULT_OPTIMIZE_CONCURRENCY,
@@ -466,7 +467,9 @@ def optimize_retrieval(
         header = frontmatter_header(page.frontmatter)
         body = page.body[:2000]
         if len(page.body) > 2000:
-            body += f"\n… (+{len(page.body) - 2000} more chars not shown)"
+            body += "\n" + tool_note(
+                f"page truncated — {len(page.body) - 2000} more chars not shown"
+            )
         return f"{header}\n{body}" if header else body
 
     agent_kwargs: dict[str, Any] = {"model_settings": _MODEL_SETTINGS}

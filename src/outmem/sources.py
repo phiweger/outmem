@@ -1053,7 +1053,18 @@ def read_source_text(
         raise OutmemError(f"no such source: {rel_path}")
     text = path.read_text(encoding="utf-8", errors="replace")
     if len(text) > max_chars:
-        return text[:max_chars] + f"\n\n[truncated — file is {len(text)} chars, cap {max_chars}]"
+        # An out-of-band sentinel, NOT a bracketed ellipsis. This lands
+        # directly in the writing agent's context at the moment it is
+        # reading source material to compact into a page, so the marker
+        # outmem emits here is a marker it teaches — and page bodies
+        # ending in an elision are refused (see outmem.completeness).
+        from outmem.completeness import tool_note
+
+        note = tool_note(
+            f"source truncated — {max_chars} of {len(text)} chars shown "
+            f"(sources.max_chars)"
+        )
+        return f"{text[:max_chars]}\n\n{note}"
     return text
 
 

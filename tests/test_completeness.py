@@ -132,3 +132,25 @@ class TestToolSentinel:
 
     def test_clean_page_has_no_sentinels(self) -> None:
         assert find_tool_sentinels("## Diagnostik\n\nText.\n") == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "source truncated — 200000 of 512345 chars shown (sources.max_chars)",
+            "results truncated at the output cap — narrow the pattern",
+            "excerpt spliced — middle omitted",
+            "page truncated — 7331 more chars not shown",
+        ],
+    )
+    def test_every_note_outmem_emits_survives_its_own_detector(
+        self, text: str
+    ) -> None:
+        """The round trip that keeps the two halves honest. These are the
+        real notes from read_source, grep_wiki, the rerank gate, and the
+        optimizer's read_page. If any of them read as an elision, outmem
+        would be emitting into model context the exact pattern it refuses
+        in page bodies — and a page quoting a tool result would be
+        unwritable."""
+        note = tool_note(text)
+        assert find_elision_markers(note) == []
+        assert find_elision_markers(f"Ein Absatz.\n\n{note}\n\nNoch einer.\n") == []

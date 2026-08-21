@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from outmem._store.semantic import frontmatter_header
+from outmem.completeness import tool_note
 from outmem.config import (
     ANTHROPIC_CACHE_ONESHOT,
     DEFAULT_OPTIMIZE_MAX_CANDIDATES,
@@ -411,7 +412,11 @@ class RerankRetriever:
 # densest query-term cluster (why it matched). 40/60 keeps enough head
 # for identity while the window stays wide enough for a full passage.
 _GATE_HEAD_FRACTION = 0.4
-_GATE_SPLICE = "[…]"
+# The splice marker is outmem's out-of-band sentinel, not a bracketed
+# ellipsis. A gate excerpt is assembled from page bodies and handed to a
+# model; emitting the exact marker that page bodies are refused for would
+# have outmem teaching the pattern it rejects.
+_GATE_SPLICE = tool_note("excerpt spliced — middle omitted")
 # How far a window start may back off to the previous line boundary, and
 # how much lead-in it gives before the cluster's first match, so the term
 # arrives mid-sentence-with-context rather than at char 0 of the window.

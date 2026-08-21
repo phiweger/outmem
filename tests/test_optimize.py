@@ -17,6 +17,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from outmem.completeness import TOOL_SENTINEL_OPEN
 from outmem.exceptions import OutmemError
 from outmem.frontmatter import WikiFrontmatter
 from outmem.optimize import (
@@ -476,7 +477,7 @@ class TestGateExcerptWindow:
         )
         assert "Meropenem MIC over 8" in excerpt          # evidence visible
         assert "General preamble" in excerpt              # head still present
-        assert "[…]" in excerpt                           # splice is marked
+        assert TOOL_SENTINEL_OPEN in excerpt                           # splice is marked
 
     def test_window_carries_its_heading_path(self) -> None:
         excerpt = _gate_excerpt(
@@ -489,13 +490,13 @@ class TestGateExcerptWindow:
             _page(self._long_body()), "unrelated query words", context_chars=2000
         )
         assert excerpt.splitlines()[0] == "Breakpoints"   # header line
-        assert "[…]" not in excerpt
+        assert TOOL_SENTINEL_OPEN not in excerpt
         assert "Meropenem" not in excerpt
 
     def test_match_in_the_head_needs_no_splice(self) -> None:
         body = "Meropenem dosing is covered here.\n" + self._filler
         excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
-        assert "[…]" not in excerpt
+        assert TOOL_SENTINEL_OPEN not in excerpt
         assert "Meropenem dosing" in excerpt
 
     def test_match_in_the_final_chars_of_a_barely_long_page(self) -> None:
@@ -514,7 +515,7 @@ class TestGateExcerptWindow:
         body = self._filler[:2900] + "Meropenem MIC over 8 is resistant."
         excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
         assert "Meropenem MIC over 8" in excerpt
-        assert "[…]" in excerpt
+        assert TOOL_SENTINEL_OPEN in excerpt
 
     def test_fenced_code_comments_are_not_section_labels(self) -> None:
         """A '# comment' inside a fenced block before the window must not
@@ -543,19 +544,19 @@ class TestGateExcerptWindow:
         )
         excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
         assert "Meropenem MIC over 8" in excerpt
-        assert "[…]" not in excerpt
+        assert TOOL_SENTINEL_OPEN not in excerpt
 
     def test_short_page_is_shown_whole(self) -> None:
         body = "Short page.\nMeropenem note at the end."
         excerpt = _gate_excerpt(_page(body), "meropenem", context_chars=2000)
         assert body in excerpt
-        assert "[…]" not in excerpt
+        assert TOOL_SENTINEL_OPEN not in excerpt
 
     def test_stopword_only_query_keeps_the_head(self) -> None:
         excerpt = _gate_excerpt(
             _page(self._long_body()), "the and of", context_chars=2000
         )
-        assert "[…]" not in excerpt
+        assert TOOL_SENTINEL_OPEN not in excerpt
 
     def test_budget_is_respected(self) -> None:
         # The splice may overhang by the marker + heading line, not more.
@@ -586,7 +587,7 @@ class TestGateExcerptWindow:
             _page(body), "Wie häufig sind Blutkulturen negativ?", context_chars=2000
         )
         assert "häufig negativ" in excerpt
-        assert "[…]" in excerpt
+        assert TOOL_SENTINEL_OPEN in excerpt
 
     def test_end_to_end_gate_sees_deep_evidence(self, store: WikiStore) -> None:
         """Through the real retriever: bm25 shortlists the page on its deep
