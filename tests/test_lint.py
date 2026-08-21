@@ -548,3 +548,64 @@ class TestLocalSourceContainment:
             if f.kind == "stale-provenance"
         ]
         assert stale == []
+
+
+# --- page completeness ------------------------------------------------------
+
+
+def test_truncated_page_is_warning(tmp_path: Path) -> None:
+    """The defect that motivated the check: a page whose body stops early
+    while every structural invariant around it is correct."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page(
+        "clinical:erreger",
+        title="Erreger",
+        body="## Diagnostik\n\nDie PCR ist Methode der Wahl. […]\n",
+    )
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path)
+    found = [f for f in report.findings if f.kind == "truncated-page"]
+    assert len(found) == 1
+    assert found[0].severity == Severity.WARNING
+    # Line number is in FILE coordinates — a body-relative number would
+    # not match what an editor or `grep_wiki` shows for the same page.
+    line = int(found[0].path.rsplit(":", 1)[1])
+    text = (store.pages_path / "clinical" / "erreger.md").read_text(encoding="utf-8")
+    assert "[…]" in text.splitlines()[line - 1]
+
+
+def test_quotation_ellipsis_is_not_flagged(tmp_path: Path) -> None:
+    """The false positive that would get this check switched off on any
+    wiki that quotes guidelines verbatim."""
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page(
+        "clinical:leitlinie",
+        title="Leitlinie",
+        body='Die Leitlinie sagt: "die Therapie [...] wird empfohlen".\n',
+    )
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path)
+    assert [f for f in report.findings if f.kind == "truncated-page"] == []
+
+
+def test_generated_index_is_never_flagged_as_truncated(tmp_path: Path) -> None:
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page("alpha", title="A", body="Text.\n")
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path)
+    paths = {f.path for f in report.findings if f.kind == "truncated-page"}
+    assert not any("index.md" in p for p in paths)
+
+
+def test_tool_output_pasted_into_a_page_is_flagged(tmp_path: Path) -> None:
+    """outmem's own withheld-content marker in a page body means the page
+    was built on material outmem declined to show."""
+    from outmem.completeness import tool_note
+
+    store = WikiStore.init(tmp_path / "w")
+    store.write_page(
+        "clinical:quelle",
+        title="Quelle",
+        body=f"Ein Absatz.\n\n{tool_note('source truncated at 200000 chars')}\n",
+    )
+    report = lint_wiki(store.wiki_path, log_dir=store.log_path)
+    found = [f for f in report.findings if f.kind == "tool-output-in-page"]
+    assert len(found) == 1
+    assert found[0].severity == Severity.WARNING

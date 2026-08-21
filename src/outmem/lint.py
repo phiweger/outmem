@@ -40,6 +40,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from outmem.completeness import find_elision_markers, find_tool_sentinels
 from outmem.exceptions import OutmemError
 from outmem.frontmatter import ProvenanceEntry, parse_wiki_page
 from outmem.git_ops import tracked_paths_under
@@ -155,6 +156,7 @@ def lint_wiki(
     pinned = _source_pinned_aliases(sources_dir, _alias_map(pages))
     _check_wikilinks(pages, pinned, report)
     _check_dead_slug_mentions(pages, pinned, report)
+    _check_page_completeness(pages, report)
     _check_provenance(
         pages,
         sources_dir=sources_dir,
@@ -193,6 +195,10 @@ class _LoadedPage:
     outbound_links: tuple[str, ...]
     generated: bool
     aliases: tuple[str, ...] = ()
+    # Lines the frontmatter occupies, so a body-relative line number can
+    # be reported in file coordinates — the number is only useful if it
+    # matches what an editor and `grep_wiki` show for the same page.
+    body_line_offset: int = 0
 
 
 def _load_pages(
@@ -208,9 +214,8 @@ def _load_pages(
             # ``read_page`` self-heals isn't a CI-failing ERROR here while
             # the rest of outmem serves it happily. The repair is reported
             # below at WARNING instead — you still want to persist it.
-            frontmatter, body, repaired = load_page_text(
-                path.read_text(encoding="utf-8")
-            )
+            raw = path.read_text(encoding="utf-8")
+            frontmatter, body, repaired = load_page_text(raw)
         except Exception as exc:
             report.findings.append(
                 LintFinding(
@@ -273,8 +278,60 @@ def _load_pages(
             outbound_links=links,
             generated=generated,
             aliases=tuple(frontmatter.aliases),
+            body_line_offset=len(raw.splitlines()) - len(body.splitlines()),
         )
     return pages
+
+
+def _check_page_completeness(
+    pages: dict[str, _LoadedPage], report: LintReport
+) -> None:
+    """Flag pages that stop early, and tool output copied into a page.
+
+    The only check outmem has that reads the body *as content*. It exists
+    because a budget-truncated page is otherwise indistinguishable from a
+    complete one: its provenance, hashes, links, and index entry are all
+    correct, and those are what every other check inspects.
+
+    WARNING rather than ERROR deliberately. The signal is positional and
+    therefore fallible, and a false positive that turns CI red is how a
+    completeness check gets switched off — which costs more than the
+    occasional missed cut.
+    """
+    for page in sorted(pages.values(), key=lambda p: p.slug):
+        if page.generated:
+            continue  # wiki/index.md is machine-written, not authored
+        for elision in find_elision_markers(page.body):
+            report.findings.append(
+                LintFinding(
+                    kind="truncated-page",
+                    severity=Severity.WARNING,
+                    path=f"{page.rel_path}:{elision.line + page.body_line_offset}",
+                    message=(
+                        f"page appears to stop early — {elision.marker!r} ends "
+                        f"the line {elision.text!r}. If content is missing, "
+                        f"restore it from the page's sources (`outmem sources "
+                        f"list`) and append it with `extend_page`/`append_page`; "
+                        f"if the ellipsis is part of a quotation, keep prose "
+                        f"after it or move it into a blockquote."
+                    ),
+                )
+            )
+        for sentinel in find_tool_sentinels(page.body):
+            report.findings.append(
+                LintFinding(
+                    kind="tool-output-in-page",
+                    severity=Severity.WARNING,
+                    path=f"{page.rel_path}:{sentinel.line + page.body_line_offset}",
+                    message=(
+                        "an outmem tool-output marker was copied into the page "
+                        f"({sentinel.text!r}) — that marker means outmem itself "
+                        "withheld content from a tool result, so the page is "
+                        "built on material it never actually saw. Re-read the "
+                        "source in full and rewrite the passage."
+                    ),
+                )
+            )
 
 
 # A slug-shaped token: two or more ``:``-joined segments, matching the slug
