@@ -3,7 +3,7 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
-## Unreleased
+## 0.15.0
 
 **A page is now checked for being all there.** Reported from the same
 ~1200-page clinical wiki: a turn's output budget binds, and the model
@@ -33,9 +33,10 @@ invariant and only ever *asked* for completeness.
   the first use of `ModelRetry` in outmem, and the only error handed
   *back* to the model rather than returned as advisory text after the
   call already committed. Banning the marker is only safe because the
-  message names the alternative. `allow_elision=True` overrides on the
-  store, deliberately not on the tools: a human writing an unusual page
-  needs a way through, a model under budget pressure must not have one.
+  message names the alternative. A tool-output marker
+  (`⟪ outmem: … ⟫`) copied into a body is refused the same way — that
+  page would be built on material outmem itself declined to show. See
+  the escape-hatch note below.
 - **Three lint kinds that read the body as content**, for corpora that
   already have the damage: `truncated-page` (with a file line number and
   the offending line quoted), `tool-output-in-page` (an outmem
@@ -61,23 +62,30 @@ invariant and only ever *asked* for completeness.
   notice can never collide; a test pins that every note outmem emits
   survives its own detector.
 
-**Page writes are serialised.** `write_page`, `extend_page`,
-`append_page`, `append_log`, and `rename_page` each read the current
-state, rewrite files, regenerate the index, and commit — and PydanticAI
-runs a response's tool calls concurrently. Since the guidance is now
-explicitly "one `append_page` per section", parallel appends to one page
-are the ordinary path: unguarded, four of them lost sections outright
-and raised `cannot lock ref 'HEAD'` and half-read-file
-`FrontmatterError`. A per-store re-entrant lock spans read-through-commit.
+- **Page writes are serialised.** `write_page`, `extend_page`,
+  `append_page`, `append_log`, and `rename_page` each read the current
+  state, rewrite files, regenerate the index, and commit — and
+  PydanticAI runs a response's tool calls concurrently. Since the
+  guidance is now explicitly "one `append_page` per section", parallel
+  appends to one page are the ordinary path: unguarded, four of them
+  lost sections outright and raised `cannot lock ref 'HEAD'` and
+  half-read-file `FrontmatterError`. A per-store re-entrant lock now
+  spans read-through-commit.
 
-**Every caller has an escape from the elision guard.** It is a
-positional heuristic and therefore fallible, so `--allow-elision` (CLI),
-`allow_elision=True` (API), and a body a human reviewer edited under the
-HITL approval gate all pass — alongside the model re-sending a body
-unchanged. Allowances are keyed by the body text, not the slug: an
-adjudication is about the words. The page is still reported as
-`truncated-page`; the bargain is bounded damage and a visible record,
-not silence.
+### Notes on two design decisions
+
+**Every caller has an escape from the elision guard, but not the same
+one.** A human overrides in one step (`--allow-elision`,
+`allow_elision=True`, or a reviewer edit under the HITL approval gate).
+A model has no argument at all — its only route is to submit the
+identical body again after being handed the refusal. A flag a model
+could set becomes a checkbox it learns to tick; re-sending unchanged
+costs a round trip and distinguishes "this text is right" from "I ran
+out of room", since a truncating model adds content rather than
+repeating itself. Allowances are keyed by the body text, not the slug:
+an adjudication is about the words. Either way the page is still
+reported as `truncated-page` — the bargain is bounded damage and a
+visible record, not silence.
 
 **The write guard yields rather than deadlocking.** The detector is a
 fallible heuristic — which is why lint reports it at WARNING — so making
