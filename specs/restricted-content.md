@@ -32,7 +32,7 @@ filenames, or evidence of its existence, through any tool call.
   semantic index (see §7.3). The file is therefore as sensitive as the
   most restricted item in it.
 - **Inference.** An open page compiled from restricted sources may
-  disclose them by implication. §5.3 makes such a page restricted by
+  disclose them by implication. §3.4 makes such a page restricted by
   default, but a human deciding to publish a summary is an editorial
   judgment no mechanism here checks.
 - **Anything a cleared user chooses to repeat** outside the system.
@@ -85,8 +85,53 @@ application before the run and **immutable for its duration**.
 bound at view construction. A mode the model could change would let it
 read under one mode and write under another, which defeats §3.2.
 
-`S = ∅` is the default and reproduces today's behaviour exactly: read
-open content, write open content.
+**`S` defaults to `∅`, and restricted content is opt-in.** A session
+that does not name a compartment retrieves open content only, exactly
+as outmem behaves today: no restricted item is fetched, so none can
+influence the answer or the writes. A caller opts in by naming the
+compartment it intends to work in.
+
+There is deliberately **no automatic escalation** — no mechanism by
+which retrieving a restricted item widens `S`, and no session taint.
+Two taint designs were considered and rejected:
+
+- *Taint to read-only* — the first restricted item retrieved makes the
+  session read-only. Safe, but it hard-fails the turn (`ask()` raises
+  `WritebackError` on zero commits — `specs/spec.md` §9) and does so
+  nondeterministically, depending on whether the retriever happened to
+  surface a restricted page the user never asked about.
+- *Taint to the write target* — writes are forced into the union of
+  labels read. Also safe, but one incidentally-retrieved page
+  permanently over-classifies an unrelated note, and content drifts
+  into compartments where it does not belong.
+
+Both over-react to the same accident. The precise signal — whether
+restricted content was actually *used* — is a model judgment, which
+§1.3 forbids relying on. So the trigger is removed rather than
+refined: **content that is never retrieved cannot taint anything.**
+
+### 2.4 Grants and mode are different things
+
+**Grants are entitlement; mode is scope.** A user either holds `hr` or
+does not. Within what they hold, mode says which compartment this
+particular session is working in.
+
+The hiding requirement (§1) is a property of **grants**, not of mode.
+For a user who does not hold `hr`, HR content must be undetectable.
+For a user who *does* hold `hr` but is running in mode `∅`, telling
+them that matches exist elsewhere discloses nothing they are not
+already entitled to see.
+
+Retrieval SHOULD therefore return, alongside open results, a
+**count-only, grant-gated hint**: `4 more results in hr`. It MUST name only labels
+the user holds, MUST NOT include titles, slugs, excerpts, or anything
+else derived from the matched items, and MUST be absent entirely for a
+user without the grant.
+
+This is what makes the opt-in default workable. Without it, a cleared
+user asking about parental leave gets nothing and never learns to
+switch compartment; with it, discoverability is preserved for exactly
+the people entitled to it.
 
 ## 3. Rules
 
@@ -100,6 +145,13 @@ enforcement.
 Open content (`labels = ∅`) is visible in every mode, since `∅ ⊆ S`
 for all `S`. Open-by-default is not a special case; it falls out of
 the subset relation.
+
+Note the consequence: mode `{hr}` sees open **and** HR content, not HR
+alone. Restricting the session to HR-only would be stricter than
+necessary — the unsafe direction is read-HR-then-write-open, whereas
+reading open while writing to HR is a write *up*. An HR-only session
+would also leave the agent composing HR pages with no access to the
+company glossary.
 
 ### 3.2 Write
 
@@ -120,7 +172,7 @@ Consequences worth stating:
 - To write a page labelled `{hr, legal}` you must run in mode
   `{hr, legal}`.
 - Fact-laundering is blocked by the same rule: citing an HR source in
-  mode `∅` makes the page's computed labels `{hr}` (§5.3), which is
+  mode `∅` makes the page's computed labels `{hr}` (§3.4), which is
   `≠ ∅`, so the write is refused. No separate mechanism is needed.
 
 **A new item's labels default to `S`.** Without this, writing an HR
@@ -321,6 +373,14 @@ and sources are indexed normally and filtered at query time, so
 cleared users retain full semantic recall. The consequence is §1.2:
 the DB file is as sensitive as its most restricted item.
 
+**Compartment hints** (§2.4) are computed from the same over-fetch: a
+count of items that matched the query but fall outside `S`. The count
+MUST be broken down per label and filtered to labels the user holds —
+a user holding `hr` but not `legal` sees the HR count and no
+indication that anything in `legal` matched at all. An aggregate
+"N more results" across all compartments would leak the existence of
+compartments the user does not hold.
+
 Timing differences from over-fetch are a theoretical oracle and are
 out of scope.
 
@@ -359,7 +419,7 @@ namespaces that contain restricted content.
 ### 8.2 The log
 
 `append_log` writes to open `log/<date>.md`. In mode `S` that is a
-write-down, and mandatory writeback (spec §9) actively pushes the
+write-down, and mandatory writeback (`specs/spec.md` §9) actively pushes the
 agent there when nothing else was warranted. Logs MUST therefore be
 partitioned per mode: `log/<label-set>/<date>.md`.
 
@@ -452,3 +512,12 @@ session by hand, which is outside any mechanism here.
 **Bounded existence oracles.** Slug-collision refusals (§8.1) and
 retrieval timing (§7.3) leak a small amount. Both are documented
 rather than eliminated.
+
+**Availability, not confidentiality.** The opt-in default (§2.3) means
+a cleared user who never switches compartment will not see content
+they were entitled to. This is a deliberate trade: the alternative —
+retrieving restricted content by default — reintroduces the taint
+problem the default exists to remove. The grant-gated hint (§2.4) is
+the mitigation, and the reason it is specified SHOULD rather than
+MAY: an opt-in default without a hint is a wiki whose restricted half
+is unfindable even by the people it was restricted *to*.
