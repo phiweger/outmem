@@ -550,6 +550,41 @@ class TestEveryPublicMethodIsClassified:
             source = inspect.getsource(getattr(WikiStore, name))
             assert "_require_operator(" in source, name
 
+    def test_no_content_members_really_return_no_content(
+        self, hr_view: WikiStore, store: WikiStore
+    ) -> None:
+        """The other half of the same claim, and the one that was easier
+        to leave as an assertion nobody checked. Each member is called on
+        a view over a wiki that HAS restricted content, and its result
+        must not contain any of it.
+
+        Members needing arguments, doing git I/O, or mutating state are
+        skipped by name — with the skip list kept short and explicit, so
+        adding a member to `_NO_CONTENT` to dodge this check is a
+        visible act rather than a quiet one.
+        """
+        secret = "Twelve weeks of severance"
+        store.extend_page("hr:severance", body=f"{secret} at full pay.\n")
+
+        # Constructors, git I/O, and state mutation — nothing here reads
+        # a page, and calling them would touch a remote or a marker file.
+        skip = {
+            "init", "open", "close", "pull", "push", "record_run",
+            "as_viewer", "allow_elision_body", "is_page_path",
+        }
+        called = 0
+        for name in sorted(_NO_CONTENT - skip):
+            member = getattr(type(hr_view), name, None)
+            value = (
+                getattr(hr_view, name)
+                if isinstance(member, property)
+                else getattr(hr_view, name)()
+            )
+            called += 1
+            assert secret not in repr(value), name
+            assert "hr:severance" not in repr(value), name
+        assert called >= 8, "the skip list has swallowed the check"
+
 
 class TestGrantsVersusMode:
     def test_a_grant_alone_shows_nothing(self, store: WikiStore) -> None:
