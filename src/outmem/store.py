@@ -1383,7 +1383,7 @@ class WikiStore:
                     "Cannot edit the reserved 'index' slug — `wiki/index.md` "
                     "is auto-maintained by outmem on every page write."
                 )
-            self._check_write(slug, new=False, body=body)
+            self._check_write(slug, new=False, body=body, provenance=provenance)
             if not allow_elision:
                 _reject_incomplete_body(
                 body, tool="extend_page", allowed=self._elision_allowed
@@ -1461,7 +1461,13 @@ class WikiStore:
                     "append_page: body is empty — nothing to append. Pass the "
                     "section text, or use `extend_page` to replace the body."
                 )
-            self._check_write(slug, new=False, body=body)
+            self._check_write(
+                slug,
+                new=False,
+                body=body,
+                provenance=provenance,
+                provenance_additive=True,
+            )
             if not allow_elision:
                 _reject_incomplete_body(
                 body, tool="append_page", allowed=self._elision_allowed
@@ -2248,6 +2254,7 @@ class WikiStore:
         body: str | None = None,
         provenance: Sequence[ProvenanceEntry] | None = None,
         declared: Iterable[str] | None = None,
+        provenance_additive: bool = False,
     ) -> frozenset[str]:
         """§3.2 — decide whether this view may write ``slug``, and with
         which labels. Returns the labels the item must carry.
@@ -2290,19 +2297,83 @@ class WikiStore:
             # is restricted when it is not.
             labels = mode | self.restrictions.labels_for_slug(slug)
             labels |= normalise_labels(declared)
-            for entry in provenance or ():
-                from outmem.lint import provenance_ref
-
-                ref = provenance_ref(entry)
-                if ref is not None:
-                    labels |= index.for_source(ref)
+            labels |= self._inherited(provenance, index)
+            if labels != mode:
+                raise RestrictionError(_write_refusal(mode, labels, new=True))
         else:
             labels = index.for_page(slug)
-        if labels != mode:
-            raise RestrictionError(_write_refusal(mode, labels, new=new))
+            if labels != mode:
+                raise RestrictionError(_write_refusal(mode, labels, new=False))
+            # An edit may also change what the page WILL be labelled,
+            # because `provenance` is part of the write and a page
+            # inherits its sources' labels. Both directions matter and
+            # both are refused here rather than left to compute after
+            # the commit:
+            #
+            # Adding a restricted citation to an open page relabels it,
+            # which lets an open session it should not — it silently
+            # removes the page from the open corpus, and the writer can
+            # no longer read what they just wrote.
+            #
+            # Dropping the citation a page's label was inherited FROM
+            # declassifies it, through a tool that looks like an
+            # ordinary edit. `restrict_page` is the verb for changing
+            # what an item is; these two only change what it says.
+            after = self._labels_after_edit(
+                slug, provenance, index, additive=provenance_additive
+            )
+            if after != mode:
+                raise RestrictionError(
+                    _write_refusal(mode, after, new=False)
+                    + " (the citation change would relabel the page; use "
+                    "`restrict_page` to change what an item is.)"
+                )
         if body is not None:
             self._check_closure(body, labels, index)
         return labels
+
+    def _inherited(
+        self, provenance: Sequence[ProvenanceEntry] | None, index: LabelIndex
+    ) -> frozenset[str]:
+        """Labels a page picks up from the sources in ``provenance``."""
+        from outmem.lint import provenance_ref
+
+        labels: frozenset[str] = frozenset()
+        for entry in provenance or ():
+            ref = provenance_ref(entry)
+            if ref is not None:
+                labels |= index.for_source(ref)
+        return labels
+
+    def _labels_after_edit(
+        self,
+        slug: str,
+        provenance: Sequence[ProvenanceEntry] | None,
+        index: LabelIndex,
+        *,
+        additive: bool,
+    ) -> frozenset[str]:
+        """What ``slug`` would be labelled once this edit lands.
+
+        Only reached for a page the caller may already write, so reading
+        it here discloses nothing. ``provenance=None`` means "leave the
+        citations alone", which is the common case and cannot change
+        anything.
+
+        ``additive`` distinguishes the two write shapes: ``append_page``
+        merges into the existing citations and so can only ever add
+        labels, while ``extend_page`` replaces them and can drop one.
+        Treating append as a replacement would refuse an ordinary
+        section that re-cites one source out of several.
+        """
+        if provenance is None:
+            return index.for_page(slug)
+        if additive:
+            return index.for_page(slug) | self._inherited(provenance, index)
+        page = self.read(slug)
+        labels = self.restrictions.resolve(frozenset(page.frontmatter.restricted))
+        labels |= self.restrictions.labels_for_slug(slug)
+        return labels | self._inherited(provenance, index)
 
     def _check_closure(
         self, body: str, labels: frozenset[str], index: LabelIndex

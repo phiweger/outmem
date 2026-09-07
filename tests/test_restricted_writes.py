@@ -199,6 +199,79 @@ class TestInheritanceBlocksFactLaundering:
         assert view.read("hr:derived")
 
 
+class TestCitationsCannotRelabelThroughAnEdit:
+    """`provenance` is part of a write, and a page inherits its sources'
+    labels — so an ordinary-looking edit can change what an item *is*.
+    Both directions are refused; `restrict_page` is the verb for that."""
+
+    @pytest.fixture
+    def memo(self, store: WikiStore, tmp_path: Path) -> str:
+        doc = tmp_path / "memo.md"
+        doc.write_text("Confidential.\n")
+        return store.add_source(doc, restricted=["hr"]).citation_path
+
+    def test_extend_cannot_attach_a_restricted_source_to_an_open_page(
+        self, open_writer: WikiStore, memo: str
+    ) -> None:
+        """It relabels the page: an open session silently removes a page
+        from the open corpus, and cannot read back what it just wrote."""
+        with pytest.raises(RestrictionError, match="relabel"):
+            open_writer.extend_page(
+                "glossary", body="A fact.\n", provenance=[memo]
+            )
+
+    def test_append_cannot_either(
+        self, open_writer: WikiStore, memo: str
+    ) -> None:
+        with pytest.raises(RestrictionError, match="relabel"):
+            open_writer.append_page(
+                "glossary", body="## More\n\nA fact.\n", provenance=[memo]
+            )
+
+    def test_nothing_is_written_when_refused(
+        self, store: WikiStore, open_writer: WikiStore, memo: str
+    ) -> None:
+        head = store.head()
+        with pytest.raises(RestrictionError):
+            open_writer.extend_page("glossary", body="x\n", provenance=[memo])
+        assert store.head() == head
+        assert store.read("glossary").frontmatter.provenance == []
+
+    def test_dropping_the_citation_a_label_came_from_is_refused(
+        self, store: WikiStore, memo: str
+    ) -> None:
+        """Declassification through a tool that looks like an ordinary
+        edit. The page's only label is inherited, so replacing the
+        citations with none would publish it."""
+        store.write_page("legacy", title="L", body="x\n", provenance=[memo])
+        assert "legacy" not in store.as_viewer().list_slugs()
+        view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        with pytest.raises(RestrictionError):
+            view.extend_page("legacy", body="y\n", provenance=[])
+        assert "legacy" not in store.as_viewer().list_slugs()
+
+    def test_an_explicit_label_survives_a_citation_change(
+        self, store: WikiStore, memo: str
+    ) -> None:
+        """A page written in a mode carries the label explicitly, so
+        re-citing is an ordinary edit rather than a relabelling."""
+        view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        view.write_page("hr:d", title="D", body="x\n", provenance=[memo])
+        view.extend_page("hr:d", body="y\n", provenance=[])
+        assert store.read("hr:d").frontmatter.restricted == ["hr"]
+
+    def test_re_citing_within_the_compartment_still_works(
+        self, store: WikiStore, memo: str
+    ) -> None:
+        """The check must not refuse the ordinary path: a section that
+        cites one source out of several."""
+        view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        view.write_page("hr:d", title="D", body="x\n", provenance=[memo])
+        view.append_page("hr:d", body="## More\n\ny\n", provenance=[memo])
+        view.extend_page("hr:d", body="z\n")  # provenance untouched
+        assert "z" in view.read("hr:d").body
+
+
 class TestClosure:
     def test_a_link_to_a_more_restricted_page_is_refused(
         self, open_writer: WikiStore
