@@ -642,3 +642,124 @@ class TestSemanticOverFetch:
         # Bounded, not zero: the loop must notice the index is exhausted
         # rather than widening to the ceiling on every such query.
         assert calls["n"] <= 2
+
+
+class TestTheErrorPathIsRedactedToo:
+    """The argument path withheld the body and the very next line gave it
+    back. `IncompleteBodyError` quotes the lines it refused — by design,
+    because that is what makes it actionable to the model — so on a
+    labelled wiki a refusal carried page text to every handler."""
+
+    def _records(self, caplog: pytest.LogCaptureFixture) -> list[str]:
+        return [r.getMessage() for r in caplog.records]
+
+    def test_a_refused_body_is_not_quoted_into_the_log(
+        self, store: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from pydantic_ai import ModelRetry
+
+        tool = next(t for t in wiki_tools(store) if t.__name__ == "write_page")
+        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
+            with pytest.raises(ModelRetry):
+                tool(
+                    slug="hr:x",
+                    title="T",
+                    body="Alice's severance is TWELVE-WEEK-PAYOUT. […]\n",
+                )
+        blob = " ".join(self._records(caplog)) + str(
+            [getattr(r, "tool_error", "") for r in caplog.records]
+        )
+        assert "TWELVE-WEEK-PAYOUT" not in blob
+        assert "IncompleteBodyError" in blob  # the type still shows
+
+    def test_an_unlabelled_wiki_keeps_the_readable_message(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A wiki with nothing to protect keeps the trace it had — the
+        structured payload is what eval recorders read."""
+        from pydantic_ai import ModelRetry
+
+        plain = WikiStore.init(tmp_path / "plain")
+        tool = next(t for t in wiki_tools(plain) if t.__name__ == "write_page")
+        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
+            with pytest.raises(ModelRetry):
+                tool(slug="x", title="T", body="Body text. […]\n")
+        assert "elision marker" in " ".join(self._records(caplog))
+
+    def test_item_names_passed_as_arguments_are_masked(
+        self, store: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """`pages_touched` is a list of slugs. It was classified as a
+        query because it arrives as an argument to one, which is not the
+        same thing as being one."""
+        tool = next(
+            t for t in wiki_tools(store) if t.__name__ == "record_ingestion"
+        )
+        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
+            tool(
+                rel_path="hr/abc/plan.md",
+                prompt="p",
+                pages_touched=["hr:alice-severance"],
+            )
+        blob = " ".join(self._records(caplog)) + str(
+            [getattr(r, "tool_call", "") for r in caplog.records]
+        )
+        assert "alice-severance" not in blob
+
+    def test_an_unlabelled_wiki_logs_them(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plain = WikiStore.init(tmp_path / "plain")
+        tool = next(
+            t for t in wiki_tools(plain) if t.__name__ == "record_ingestion"
+        )
+        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
+            tool(rel_path="abc/plan.md", prompt="p", pages_touched=["notes:x"])
+        assert "notes:x" in " ".join(self._records(caplog))
+
+
+class TestReadPageAgreesWithGrepOnLineNumbers:
+    """Re-rendering every page from parsed frontmatter changed its
+    HEIGHT on any hand-edited wiki, so the outline's line numbers — which
+    exist to match what `grep_wiki` and the user's editor report —
+    silently drifted, and YAML comments vanished from what the model was
+    shown."""
+
+    @pytest.fixture
+    def hand_edited(self, tmp_path: Path) -> WikiStore:
+        plain = WikiStore.init(tmp_path / "plain")
+        (plain.pages_path).mkdir(parents=True, exist_ok=True)
+        (plain.pages_path / "p.md").write_text(
+            "---\ntitle: P\nslug: p\ntags: [alpha, beta, gamma]   # hand written\n"
+            "---\n\n## First\n\nOne.\n\n## Second\n\nTwo.\n"
+        )
+        plain.rebuild_index()
+        return plain
+
+    def test_the_outline_matches_grep(self, hand_edited: WikiStore) -> None:
+        tool = next(
+            t for t in wiki_read_tools(hand_edited) if t.__name__ == "read_page"
+        )
+        outline = tool(slug="p", peek=True)
+        line = next(x for x in outline.splitlines() if "Second" in x)
+        grep = hand_edited.search("## Second", scope="wiki").hits[0].line_number
+        assert f"L{grep}" in line, (line, grep)
+
+    def test_the_file_is_served_as_written(self, hand_edited: WikiStore) -> None:
+        tool = next(
+            t for t in wiki_read_tools(hand_edited) if t.__name__ == "read_page"
+        )
+        assert "# hand written" in tool(slug="p")
+        assert "tags: [alpha, beta, gamma]" in tool(slug="p")
+
+    def test_the_index_slug_is_still_rendered_per_viewer(
+        self, store: WikiStore
+    ) -> None:
+        """The one page that must NOT come from disk."""
+        tool = next(
+            t
+            for t in wiki_read_tools(store.as_viewer())
+            if t.__name__ == "read_page"
+        )
+        assert "hr:parental-leave" not in tool(slug="index")
+        assert "benefits:cycling" in tool(slug="index")

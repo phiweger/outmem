@@ -1013,3 +1013,133 @@ class TestAPageTheIndexHasNotClassifiedIsDenied:
         """`wiki/index.md` exists and is deliberately absent from the page
         map, so the rule has to exempt it or the catalogue disappears."""
         assert store.as_viewer().read("index")
+
+
+class TestSourceSpellingsAreResolvedNotMatched:
+    """A guard that matches strings can always be out-normalised.
+
+    `sources/../../wiki/sources/<rel>` walks straight back into the tree
+    and reaches a real file under a spelling the registry has never held.
+    The reader resolves against the filesystem, so the guard has to as
+    well — anything else is two functions disagreeing about what a path
+    means, with the disagreement decided in the caller's favour.
+    """
+
+    @pytest.fixture
+    def entry(self, store: WikiStore, tmp_path: Path):  # type: ignore[no-untyped-def]
+        doc = tmp_path / "severance-plan-2026.md"
+        doc.write_text("TOPSECRET-TWELVE-WEEKS\n")
+        return store.add_source(doc, into_subdir="hr", restricted=["hr"])
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "{rel}",
+            "sources/{rel}",
+            "wiki/sources/{rel}",
+            "sources/./{rel}",
+            "sources//{rel}",
+            "./sources/{rel}",
+            "sources/../sources/{rel}",
+            "sources/../../wiki/sources/{rel}",
+            "wiki/sources/../../wiki/sources/{rel}",
+            "sources-local/../sources/{rel}",
+        ],
+    )
+    def test_no_spelling_reaches_the_bytes(
+        self, store: WikiStore, entry, shape: str
+    ) -> None:
+        view = store.as_viewer()
+        key = shape.format(rel=entry.rel_path)
+        with pytest.raises(OutmemError, match="no such source"):
+            view.read_source(key)
+        assert view.get_source(key) is None
+
+    def test_nor_does_an_absolute_path(self, store: WikiStore, entry) -> None:
+        view = store.as_viewer()
+        absolute = str((store.sources_path / entry.rel_path).resolve())
+        with pytest.raises(OutmemError, match="no such source"):
+            view.read_source(absolute)
+
+    def test_a_path_escaping_the_tree_is_refused(
+        self, store: WikiStore, entry
+    ) -> None:
+        view = store.as_viewer(mode={"hr"}, grants=Grants.reader("hr"))
+        with pytest.raises(OutmemError):
+            view.read_source("../../../etc/passwd")
+
+    def test_the_cleared_mode_reads_it_by_any_spelling(
+        self, store: WikiStore, entry
+    ) -> None:
+        view = store.as_viewer(mode={"hr"}, grants=Grants.reader("hr"))
+        for shape in ("{rel}", "sources/./{rel}", "sources/../sources/{rel}"):
+            key = shape.format(rel=entry.rel_path)
+            assert "TOPSECRET" in view.read_source(key), key
+
+    def test_a_page_citing_an_escaping_spelling_still_inherits(
+        self, store: WikiStore, entry
+    ) -> None:
+        """Otherwise the page stays open while printing the restricted
+        source's filename in its own provenance."""
+        store.write_page(
+            "derived",
+            title="D",
+            body="A fact.\n",
+            provenance=[f"sources/../../wiki/sources/{entry.rel_path}"],
+        )
+        assert "derived" not in store.as_viewer().list_slugs()
+
+
+class TestAWriteRefusalDoesNotNameTheCompartment:
+    """A refusal that says "restricted to [hr]" is a slug probe with a
+    label report attached — worse than the read oracle it mirrors,
+    because it hands over the compartment as well as the existence."""
+
+    def test_a_hidden_page_refuses_a_write_as_absent(
+        self, store: WikiStore
+    ) -> None:
+        view = store.as_viewer(grants=Grants.writer("hr"))
+        with pytest.raises(OutmemError) as hidden:
+            view.extend_page("hr:severance", body="x\n")
+        with pytest.raises(OutmemError) as absent:
+            view.extend_page("hr:no-such-page", body="x\n")
+        assert not isinstance(hidden.value, RestrictionError)
+        assert str(hidden.value).replace("severance", "no-such-page") == str(
+            absent.value
+        )
+
+    def test_a_visible_mismatch_still_explains_itself(
+        self, store: WikiStore
+    ) -> None:
+        """The informative refusal survives where it is safe: the writer
+        can see the target, so nothing is disclosed by saying why."""
+        view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        with pytest.raises(RestrictionError, match="Writing down"):
+            view.extend_page("glossary", body="x\n")
+
+
+class TestSteeringSubjectsForSourceRestrictions:
+    def test_a_restricted_sources_filename_stays_out_of_the_open_prompt(
+        self, store: WikiStore, tmp_path: Path
+    ) -> None:
+        """`restrict:` alone is resolved as a slug, so a source path under
+        it missed the page map and rode into every open system prompt."""
+        import dataclasses
+
+        doc = tmp_path / "alice-severance-agreement.md"
+        doc.write_text("Confidential.\n")
+        entry = store.add_source(doc)
+        store.restrict_source(entry.rel_path, labels=["hr"])
+        store.config.agent_identity = dataclasses.replace(
+            store.config.agent_identity, email="human@host"
+        )
+
+        open_subjects = [c.subject for c in store.as_viewer().steering()]
+        hr_subjects = [
+            c.subject
+            for c in store.as_viewer(
+                mode={"hr"}, grants=Grants.reader("hr")
+            ).steering()
+        ]
+        assert not any("alice-severance" in s for s in open_subjects)
+        assert any("alice-severance" in s for s in hr_subjects)
