@@ -3,7 +3,7 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
-## Unreleased
+## 0.16.0
 
 **Restricted content.** Some wikis hold material only part of an
 organisation may see. outmem now gates that deterministically, at the

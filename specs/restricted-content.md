@@ -1,6 +1,18 @@
 # Restricted content — access control for a served outmem wiki
 
-Status: draft spec. Not implemented.
+Status: **implemented** in 0.16.0. This file is the design record —
+what was decided and why, including the alternatives that were rejected.
+For how to *use* the feature, see
+[`docs/restricted-content.md`](../docs/restricted-content.md).
+
+Two things landed differently from the text below, both discovered
+while building it and both stricter than specified. `restrict_page`
+refuses to remove a label that a path rule or an inherited source label
+would immediately reapply, rather than committing a no-op that reads as
+success. And `read_page` renders from the page object the store returns
+rather than re-reading the file, because re-reading served the stored
+`wiki/index.md` — the one file that lists every slug — past the
+per-viewer render in §7.1.
 
 ## 1. Scope
 
