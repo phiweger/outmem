@@ -545,6 +545,9 @@ agent = Agent(
 - [`docs/sources.md`](docs/sources.md) — the two source trees, what
   `--local` is for, and the guarantees around material you may read
   but not redistribute.
+- [`docs/restricted-content.md`](docs/restricted-content.md) — access
+  control for a served wiki: restriction labels, grants and session
+  mode, and why nothing in the enforcement path depends on a model.
 - [`docs/python-api.md`](docs/python-api.md) — `WikiStore` + the
   PydanticAI adapter + the standalone agent runtime.
 - [`docs/growing-the-wiki.md`](docs/growing-the-wiki.md) — reading

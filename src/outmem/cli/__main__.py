@@ -548,6 +548,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         sources_local_dir=store.sources_local_path,
         repo_root=store.root,
         indexed_paths=_indexed_paths_or_none(store),
+        restricted=store.restrictions,
     )
     sys.stdout.write(format_report(report))
     if report.has_errors:
@@ -941,6 +942,26 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     )
 
     _configure_tool_logging(quiet=args.quiet)
+
+    # A restricted source must drive a restricted session. Handing the
+    # bare store to the agent would let it compile an open page from
+    # restricted material — the exact write-down the mode exists to
+    # prevent, reached through the command that created the material.
+    # The operator running `outmem ingest` holds the document, so the
+    # grants are theirs by construction.
+    if entry.restricted:
+        from outmem.restricted import Grants
+
+        labels = sorted(entry.restricted)
+        store = store.as_viewer(
+            mode=entry.restricted,
+            grants=Grants(
+                read=entry.restricted,
+                write=entry.restricted,
+                declassify=frozenset(),
+            ),
+        )
+        _status(f"agent session scoped to: {', '.join(labels)}")
 
     try:
         reviewer = require_interactive_reviewer(
