@@ -515,11 +515,33 @@ class TestLabelIndexCaching:
         monkeypatch.setattr(
             labels_mod, "build", lambda *a, **k: pytest.fail("index was built")
         )
+        # Every public reader, not a sample of them: the claim is about
+        # the whole surface, and `unreadable()` was calling `_labels()`
+        # unconditionally while the docs promised it did not.
         plain.list_slugs()
         plain.read("p")
         plain.search("Text")
+        plain.search("Text", scope="all")
         plain.exists("p")
+        plain.unreadable()
+        plain.index_tree()
+        plain.index_tree(titles=True)
+        plain.resolve_slug("p")
+        plain.backlinks("p")
+        plain.list_sources()
+        plain.get_source("nope")
+        plain.source_citations()
+        plain.source_refs()
+        plain.provenance_annotations()
+        plain.provenance_findings()
+        plain.read_agents_md()
+        plain.steering()
+        plain.compartment_hint()
+        plain.corpus_token()
         plain.write_page("q", title="Q", body="More.\n")
+        plain.extend_page("q", body="Edited.\n")
+        plain.append_page("q", body="## More\n\nText.\n")
+        plain.append_log(topic="t", content="Note.\n")
 
 
 class TestEveryPublicMethodIsClassified:
