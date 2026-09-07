@@ -108,6 +108,7 @@ from outmem.restricted import (
     Grants,
     LabelError,
     RestrictedSettings,
+    mode_dirname,
     mode_from_dirname,
     normalise_labels,
     visible,
@@ -318,6 +319,32 @@ def _config_from_yaml(
 _OVERFETCH_FACTOR = 4
 _OVERFETCH_CEILING = 200
 
+def _write_refusal(
+    mode: frozenset[str], labels: frozenset[str], *, new: bool
+) -> str:
+    """The message for a refused write.
+
+    Says which way the mismatch runs, because the two directions call
+    for opposite fixes and "denied" leaves the caller guessing. Names
+    only labels — never the item, and never anything about what else
+    lives in the compartment.
+    """
+    shown_mode = ", ".join(sorted(mode)) or "open"
+    shown_labels = ", ".join(sorted(labels)) or "open"
+    if not labels <= mode:
+        return (
+            f"refusing to write: the target is restricted to [{shown_labels}] "
+            f"but this session is scoped to [{shown_mode}]. Start a session in "
+            "that compartment."
+        )
+    return (
+        f"refusing to write: this session is scoped to [{shown_mode}] and the "
+        f"{'new page would be' if new else 'target is'} [{shown_labels}]. "
+        "Writing down from a restricted session into less restricted content "
+        "is not allowed; work in an open session for open content."
+    )
+
+
 _VISIBILITY_ENFORCED = frozenset({
     "backlinks",
     "compartment_hint",
@@ -347,6 +374,7 @@ restricted item absent from its result.
 
 _WRITE_ENFORCED = frozenset({
     "append_log",
+    "restrict_page",
     "append_page",
     "extend_page",
     "record_ingestion",
@@ -1088,6 +1116,15 @@ class WikiStore:
                     f"silently retarget every [[{slug}]] link. Remove the alias from "
                     f"{owner!r} first, or choose another slug."
                 )
+            extra_fields = dict(extra or {})
+            declared = extra_fields.pop("restricted", None)
+            labels = self._check_write(
+                slug,
+                new=True,
+                body=body,
+                provenance=provenance,
+                declared=declared,
+            )
             now = utc_now()
             frontmatter = WikiFrontmatter(
                 title=title,
@@ -1096,7 +1133,10 @@ class WikiStore:
                 created=(created or now).replace(microsecond=0),
                 updated=now,
                 tags=list(tags or []),
-                extra=dict(extra or {}),
+                restricted=sorted(labels)
+                if self.enforces_visibility
+                else sorted(normalise_labels(declared)),
+                extra=extra_fields,
             )
             if not allow_elision:
                 _reject_incomplete_body(
@@ -1147,6 +1187,7 @@ class WikiStore:
                 raise OutmemError(f"Cannot rename {old_slug!r} to itself.")
             if INDEX_SLUG in (old_slug, new_slug):
                 raise OutmemError("The reserved 'index' slug cannot be renamed.")
+            self._check_rename(old_slug, new_slug)
             old_path = self._page_path(old_slug)
             if not old_path.exists():
                 raise OutmemError(f"No such wiki page: {old_slug}")
@@ -1342,6 +1383,7 @@ class WikiStore:
                     "Cannot edit the reserved 'index' slug — `wiki/index.md` "
                     "is auto-maintained by outmem on every page write."
                 )
+            self._check_write(slug, new=False, body=body)
             if not allow_elision:
                 _reject_incomplete_body(
                 body, tool="extend_page", allowed=self._elision_allowed
@@ -1419,6 +1461,7 @@ class WikiStore:
                     "append_page: body is empty — nothing to append. Pass the "
                     "section text, or use `extend_page` to replace the body."
                 )
+            self._check_write(slug, new=False, body=body)
             if not allow_elision:
                 _reject_incomplete_body(
                 body, tool="append_page", allowed=self._elision_allowed
@@ -1481,13 +1524,30 @@ class WikiStore:
         The file is created if missing. ``content`` is appended as-is;
         callers compose their own structure (timestamp, session ID, etc.).
         Commit message defaults to ``log: <topic>``.
+
+        A restricted session writes to ``log/<label-set>/<date>.md``
+        instead. The log is otherwise an open file, and mandatory
+        writeback actively pushes an agent there when nothing else was
+        warranted — so in mode ``S`` the default path is a write-down of
+        whatever the session was just reading, reached by the one tool
+        the runtime insists on calling. The open mode is unpartitioned,
+        so a wiki with no restrictions has no new directory level and
+        nothing to migrate.
         """
         with self._write_lock:
             if not topic.strip():
                 raise OutmemError("append_log: topic must be non-empty.")
+            if self._mode is not None and not self._grants.may_write(self._mode):
+                raise RestrictionError(
+                    "this session may not write: no write grant for "
+                    + (", ".join(sorted(self._mode - self._grants.write)) or "open content")
+                    + "."
+                )
             ts = ensure_utc(when) if when else utc_now()
             log_date = ts.date()
-            log_file = self.log_path / f"{_format_log_filename(log_date)}.md"
+            partition = mode_dirname(self._mode or ())
+            log_dir = self.log_path / partition if partition else self.log_path
+            log_file = log_dir / f"{_format_log_filename(log_date)}.md"
             log_file.parent.mkdir(parents=True, exist_ok=True)
 
             existed = log_file.exists()
@@ -1497,8 +1557,11 @@ class WikiStore:
                 existing = f"# {log_date.isoformat()}\n\n"
             log_file.write_text(existing + prefix + content.rstrip() + "\n", encoding="utf-8")
 
+            rel = f"{self.config.log_dir}/{log_file.name}"
+            if partition:
+                rel = f"{self.config.log_dir}/{partition}/{log_file.name}"
             return self._commit_paths(
-                [f"{self.config.log_dir}/{log_file.name}"],
+                [rel],
                 subject=commit_subject or f"log: {topic}",
             )
 
@@ -1958,7 +2021,27 @@ class WikiStore:
 
         Called after the agent has finished writing pages from a
         source. ``commit=True`` lands an ``ingest: <rel-path>`` commit.
+
+        The only source-touching write in any tool palette, and its
+        ``prompt`` is agent-written free text stored in the registry —
+        so it is held to the same rule as a page write: the source's
+        labels must equal the session's mode. Recording an open
+        ingestion against a restricted source would put session text
+        where an open reader can find it.
         """
+        if self._mode is not None:
+            labels = self._labels().for_source(rel_path)
+            if labels != self._mode:
+                raise RestrictionError(
+                    _write_refusal(self._mode, labels, new=False)
+                )
+            if not self._grants.may_write(self._mode):
+                raise RestrictionError(
+                    "this session may not write: no write grant for "
+                    + (", ".join(sorted(self._mode - self._grants.write))
+                       or "open content")
+                    + "."
+                )
         return _sources.record_ingestion(
             self,
             rel_path,
@@ -2156,6 +2239,207 @@ class WikiStore:
             if self._repo_path_visible(prefix + hit.path, index)
         )
         return dataclasses.replace(result, hits=kept)
+
+    def _check_write(
+        self,
+        slug: str,
+        *,
+        new: bool,
+        body: str | None = None,
+        provenance: Sequence[ProvenanceEntry] | None = None,
+        declared: Iterable[str] | None = None,
+    ) -> frozenset[str]:
+        """§3.2 — decide whether this view may write ``slug``, and with
+        which labels. Returns the labels the item must carry.
+
+        The rule is ``labels(item) == mode``, equality rather than
+        containment, forced from both directions. ``labels ⊆ mode``
+        because you must be able to see what you are modifying;
+        ``labels ⊇ mode`` because you must not carry facts out of a more
+        restricted context into a less restricted item. Together they
+        mean an agent in mode ``S`` can only ever write items labelled
+        exactly ``S``, which confines the damage of anything it read to
+        the compartment it read from — structurally, not by trust.
+
+        A new item defaults to the mode's labels. Without that, writing
+        an HR page in mode ``{hr}`` that happened to cite only open
+        sources would compute ``∅ ≠ {hr}`` and be refused unless
+        somebody remembered an explicit label. Defaulting to the mode is
+        fail-safe: it is always the *more* restricted option, and it can
+        only be narrowed by the privileged operation.
+
+        Returns the empty set on a bare store, where nothing is enforced.
+        """
+        if self._mode is None:
+            return frozenset()
+        mode = self._mode
+        if not self._grants.may_write(mode):
+            missing = ", ".join(sorted(mode - self._grants.write)) or "open content"
+            raise RestrictionError(
+                f"this session may not write: no write grant for {missing}."
+            )
+        index = self._labels()
+        if new:
+            # Everything that would end up on the item: the mode it is
+            # being written from, the labels its name attracts, whatever
+            # its sources carry, and anything the caller declared. The
+            # equality test below then covers all four at once — a
+            # declared label the mode does not cover is refused with the
+            # same message as any other mismatch, rather than being
+            # quietly dropped and leaving the caller believing the page
+            # is restricted when it is not.
+            labels = mode | self.restrictions.labels_for_slug(slug)
+            labels |= normalise_labels(declared)
+            for entry in provenance or ():
+                from outmem.lint import provenance_ref
+
+                ref = provenance_ref(entry)
+                if ref is not None:
+                    labels |= index.for_source(ref)
+        else:
+            labels = index.for_page(slug)
+        if labels != mode:
+            raise RestrictionError(_write_refusal(mode, labels, new=new))
+        if body is not None:
+            self._check_closure(body, labels, index)
+        return labels
+
+    def _check_closure(
+        self, body: str, labels: frozenset[str], index: LabelIndex
+    ) -> None:
+        """§3.3 — refuse a body that links to something more restricted.
+
+        Filtering the page list achieves nothing if an open page's body
+        contains ``[[hr:severance-policy]]``: ``read_page`` on the open
+        page hands over the slug. Because the write rule has already
+        forced ``labels == mode``, this reduces to "you may only link to
+        what you can see" — a link target whose labels are not a subset
+        of the writer's mode is refused.
+
+        A link to a slug that does not exist resolves to no labels and
+        passes. A dangling link discloses nothing that is there.
+        """
+        from outmem.slug import extract_wikilinks
+
+        for link in extract_wikilinks(body):
+            target = index.for_page(link.slug)
+            if not target <= labels:
+                # Deliberately generic. Naming the target would confirm
+                # a hidden page exists — a bounded oracle either way (the
+                # writer learns "something blocks this link"), so the
+                # message gives up as little as it can while still
+                # telling them which link to remove.
+                raise RestrictionError(
+                    f"refusing to write: the link [[{link.slug}]] points outside "
+                    "this session's scope. Remove it, or work in a session that "
+                    "covers it."
+                )
+
+    def _check_rename(self, old_slug: str, new_slug: str) -> None:
+        """Refuse a rename that would change a page's effective labels.
+
+        Under path rules, ``hr:x -> notes:x`` is declassification
+        through an innocuous-looking tool: the page keeps its content,
+        loses its label, and nothing about the call says so. Widening is
+        allowed to anyone who may write both ends; *narrowing* needs the
+        ``declassify`` grant, which appears in no model-facing palette.
+
+        The ordinary write rule runs first, so a view can only rename a
+        page it may write at all.
+        """
+        if self._mode is None:
+            return
+        self._check_write(old_slug, new=False)
+        before = self._labels().for_page(old_slug)
+        # Path rules that applied to the old name and not to the new one
+        # are the whole point, so recompute from the labels the page
+        # carries independently of its name, plus the NEW name's rules.
+        explicit = before - self.restrictions.labels_for_slug(old_slug)
+        after = explicit | self.restrictions.labels_for_slug(new_slug)
+        removed = before - after
+        if removed and not self._grants.may_declassify(removed):
+            raise RestrictionError(
+                f"refusing to rename: the new name drops the restriction "
+                f"label(s) [{', '.join(sorted(removed))}]. Removing a label is "
+                "declassification and needs a declassify grant."
+            )
+
+    def restrict_page(
+        self,
+        slug: str,
+        *,
+        labels: Iterable[str],
+        cascade: bool = False,
+        commit_subject: str | None = None,
+    ) -> str:
+        """Set a page's explicit restriction labels. The operational verb.
+
+        Restricting is a **graph** operation, not a field edit. A page
+        that visible pages already link to cannot simply become
+        restricted: the inbound link would still name it in a body its
+        readers can see, which is the closure invariant (§3.3) and the
+        thing that makes hiding real. So inbound references from items
+        that would become non-conforming are reported, and the call is
+        refused until they are resolved — or ``cascade=True`` applies
+        the same labels to the referrers.
+
+        Widening needs only the ability to write the page. *Removing* a
+        label needs the ``declassify`` grant, and this method is never
+        exposed through a tool palette.
+        """
+        with self._write_lock:
+            slug = self.resolve_slug(slug)
+            if slug == INDEX_SLUG:
+                raise OutmemError("The reserved 'index' slug cannot be restricted.")
+            wanted = normalise_labels(labels)
+            self.restrictions.check_declared(wanted)
+            index = self._labels()
+            current = index.for_page(slug)
+            removed = current - wanted
+            # The bare store is the server-side operator; there is no
+            # mode and no grant to check against, and gating it would
+            # block the very tooling that has to fix a mislabelled page.
+            if self._mode is not None and removed and not self._grants.may_declassify(removed):
+                raise RestrictionError(
+                    f"refusing to remove restriction label(s) "
+                    f"[{', '.join(sorted(removed))}] from {slug!r}: "
+                    "declassification needs a declassify grant."
+                )
+            targets = [slug]
+            if wanted - current:
+                inbound = [
+                    referrer
+                    for referrer in self.backlinks_cache.referrers(
+                        slug, head_or_none(self.root)
+                    )
+                    if not (wanted <= index.for_page(referrer))
+                ]
+                if inbound and not cascade:
+                    raise RestrictionError(
+                        f"refusing to restrict {slug!r}: it is linked from "
+                        f"{', '.join(sorted(inbound))}, which would still name "
+                        "it in a body their readers can see. Resolve those "
+                        "links, or pass cascade=True to restrict them too."
+                    )
+                targets += sorted(inbound) if cascade else []
+            paths: list[str] = []
+            for target in targets:
+                page = self.read(target)
+                merged = sorted(
+                    wanted if target == slug else wanted | index.for_page(target)
+                )
+                page.frontmatter.restricted = merged
+                touch_updated(page.frontmatter)
+                page.path.write_text(
+                    serialize_wiki_page(page.frontmatter, page.body), encoding="utf-8"
+                )
+                paths.append(self._page_relpath(target))
+            self._regenerate_index()
+            self._label_cache.invalidate()
+            return self._commit_paths(
+                [*paths, f"{self.config.wiki_dir}/{INDEX_FILENAME}"],
+                subject=commit_subject or f"restrict: {slug}",
+            )
 
     def _require_operator(self, what: str) -> None:
         """Refuse a path that a served request has no business calling.

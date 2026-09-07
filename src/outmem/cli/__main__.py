@@ -569,6 +569,27 @@ def cmd_rename(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_restrict(args: argparse.Namespace) -> int:
+    """`outmem restrict <slug> --label hr` — the operational verb.
+
+    Runs against the bare store, which is right: restricting is an
+    operator action taken from the server, and the whole point is to
+    touch pages the compartment's own users may not yet be able to see.
+    """
+    store = _open_store(args)
+    try:
+        sha = store.restrict_page(
+            args.slug, labels=args.label or [], cascade=args.cascade
+        )
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 1
+    labels = ", ".join(sorted(args.label or [])) or "(none — now open)"
+    _status(f"{args.slug} restricted to: {labels}")
+    print(sha)
+    return 0
+
+
 def cmd_stale(args: argparse.Namespace) -> int:
     store = _open_store(args)
     # Always ask for everything and filter here: the count of suppressed
@@ -1372,6 +1393,31 @@ def build_parser() -> argparse.ArgumentParser:
         "alias, but stay pointed at the old name).",
     )
     p_rename.set_defaults(func=cmd_rename)
+
+    p_restrict = sub.add_parser(
+        "restrict",
+        help="Set a page's restriction labels (and check inbound links).",
+        parents=[root_parent],
+    )
+    p_restrict.add_argument("slug")
+    p_restrict.add_argument(
+        "--label",
+        action="append",
+        default=None,
+        metavar="LABEL",
+        help="Restriction label; repeat for several. Must be declared under "
+        "`restricted.labels` in config.yaml. Passing none makes the page "
+        "open again, which is declassification.",
+    )
+    p_restrict.add_argument(
+        "--cascade",
+        action="store_true",
+        help="Also restrict pages that link to this one. Without it, an "
+        "inbound link from a page that would stay visible refuses the "
+        "call — that link would still name the page in a body its readers "
+        "can see.",
+    )
+    p_restrict.set_defaults(func=cmd_restrict)
 
     p_sources = sub.add_parser(
         "sources",
