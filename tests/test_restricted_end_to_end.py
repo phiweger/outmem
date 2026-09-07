@@ -360,7 +360,7 @@ class TestTheOperatorRetainsFullControl:
         """The failure this refusal replaces is the bad one: the caller
         asked to declassify, got a success and a commit, and nothing
         changed because the path rule reapplied the label."""
-        with pytest.raises(RestrictionError, match="restricted.paths"):
+        with pytest.raises(RestrictionError, match=r"restricted\.paths"):
             company.restrict_page("hr:severance", labels=[])
 
     def test_nor_by_ignoring_an_inherited_source_label(
