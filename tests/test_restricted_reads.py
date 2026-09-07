@@ -823,3 +823,69 @@ class TestSteeringDoesNotCarryLogTopics:
                 mode={"hr"}, grants=Grants.reader("hr")
             ).steering()
         )
+
+
+class TestTheIndexTokenCoversWritesThatMakeNoCommit:
+    """HEAD is not enough on its own.
+
+    Source labels live in `.sources.db`, and two writes to it produce no
+    commit: an ingest into the untracked local tree, and re-ingesting
+    identical bytes with `--restricted`, which is the documented way to
+    correct a mislabelled source. HEAD does not move, so a process that
+    is not the writer kept serving a source it no longer may.
+
+    That is the deployment the design assumes — several workers against
+    one repository — so the token carries the registries' fingerprints
+    alongside HEAD, and a changed fingerprint drops the registry handle
+    too. `SourceRegistry` is an in-memory snapshot taken at load, so
+    rebuilding the index from the handle already held would have read
+    back the very value the fingerprint said not to trust.
+    """
+
+    def test_another_process_sees_a_local_ingest_restriction(
+        self, store: WikiStore, tmp_path: Path
+    ) -> None:
+        other = WikiStore.open(store.root)
+        doc = tmp_path / "handbook.md"
+        doc.write_text("LOCAL SECRET handbook.\n")
+
+        entry = other.add_source(doc, into_subdir="policy", local=True)
+        view = store.as_viewer()
+        assert entry.citation_path in [e.citation_path for e in view.list_sources()]
+
+        head_before = store.head()
+        other.add_source(doc, into_subdir="policy", local=True, restricted=["hr"])
+        assert store.head() == head_before, "the premise is that no commit lands"
+
+        assert entry.citation_path not in [
+            e.citation_path for e in view.list_sources()
+        ]
+        with pytest.raises(OutmemError):
+            view.read_source(entry.citation_path)
+
+    def test_the_writers_own_view_sees_it_immediately(
+        self, store: WikiStore, tmp_path: Path
+    ) -> None:
+        doc = tmp_path / "memo.md"
+        doc.write_text("SECRET memo.\n")
+        entry = store.add_source(doc, restricted=["hr"], commit=False)
+        assert store.as_viewer().list_sources() == []
+        assert entry.restricted == frozenset({"hr"})
+
+    def test_derived_caches_are_keyed_on_the_same_token(
+        self, store: WikiStore
+    ) -> None:
+        """Anything holding a snapshot of page bodies has to move when
+        the labels do — a BM25 net built before a restriction would keep
+        answering from the text it had."""
+        assert store.corpus_token() is not None
+        before = store.corpus_token()
+        store.write_page("later", title="L", body="Text.\n")
+        assert store.corpus_token() != before
+
+    def test_a_wiki_with_no_labels_gets_no_token(self, tmp_path: Path) -> None:
+        """`None` means "nothing to re-derive", so callers skip a `git
+        rev-parse` per query rather than paying for a feature that is
+        not switched on."""
+        plain = WikiStore.init(tmp_path / "plain")
+        assert plain.corpus_token() is None

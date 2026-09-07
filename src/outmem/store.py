@@ -425,6 +425,7 @@ reaching.
 _NO_CONTENT = frozenset({
     "allow_elision_body",
     "as_viewer",
+    "corpus_token",
     "close",
     "contributors",
     "enforces_visibility",
@@ -2298,8 +2299,27 @@ class WikiStore:
         return self._grants
 
     def _labels(self) -> LabelIndex:
-        """The resolved label index, rebuilt when HEAD has moved."""
+        """The resolved label index, rebuilt when the corpus has moved."""
         return self._label_cache.get(self)
+
+    def corpus_token(self) -> tuple[object, ...] | None:
+        """What a cache of derived content must be keyed on, or ``None``.
+
+        ``None`` for a wiki that declares no labels: nothing downstream
+        needs re-deriving for access control, and a caller that skips
+        the key skips a ``git rev-parse`` per call.
+
+        Otherwise HEAD plus the source registries' fingerprints — the
+        same pair the label index uses. HEAD alone is not enough,
+        because an ingest into the untracked local tree, and a re-ingest
+        that only sets labels, both write the registry and commit
+        nothing.
+        """
+        if not self.restrictions.enabled:
+            return None
+        from outmem._store.labels import registry_stamp
+
+        return (self.head(), registry_stamp(self))
 
     def _can_see(self, labels: Iterable[str]) -> bool:
         """§3.1 — ``labels ⊆ mode``. Always true on the bare store."""

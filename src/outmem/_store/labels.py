@@ -45,17 +45,30 @@ class LabelIndex:
     """Resolved labels for everything in the wiki, as of one commit."""
 
     head: str | None
-    """The HEAD sha this index was built from — its validity token.
+    """The HEAD sha this index was built from. Half of its validity token.
 
-    Every outmem write produces a commit, so a moved HEAD is exactly the
-    invalidation signal. Without it a multi-worker deployment can serve
-    a stale index after another worker restricts something, which is the
-    one caching bug in this feature that fails *open*.
+    Almost every outmem write produces a commit, so a moved HEAD is
+    usually the invalidation signal — but see :attr:`registries` for the
+    writes that produce none.
 
     ``None`` means the repo had no commits when this was built, so there
     is no token and the index must not be cached. That state is rare (a
     wiki with nothing committed) and rebuilding is merely slower, where
     caching against a token that cannot change would be wrong.
+    """
+
+    registries: tuple[tuple[int, int], ...] = ()
+    """``(mtime_ns, size)`` per source registry — the other half.
+
+    Source labels live in ``.sources.db``, and two writes to it produce
+    no commit: an ingest into the untracked local tree, and re-ingesting
+    identical bytes with ``--restricted`` (which is the documented way
+    to correct a mislabelled source). HEAD does not move, so a process
+    that is not the writer would keep serving a source it no longer may.
+
+    Invalidating in-process covers the writer. This covers everyone
+    else, which is the deployment the design assumes — several workers
+    against one repository — and it is two ``stat`` calls.
     """
 
     pages: dict[str, frozenset[str]] = field(default_factory=dict)
@@ -126,6 +139,21 @@ class LabelIndex:
 EMPTY = LabelIndex(head="")
 
 
+def registry_stamp(store: WikiStore) -> tuple[tuple[int, int], ...]:
+    """A cheap fingerprint of the source registries, for the token."""
+    from outmem.sources import REGISTRY_FILENAME
+
+    out: list[tuple[int, int]] = []
+    for directory in (store.sources_path, store.sources_local_path):
+        try:
+            stat = (directory / REGISTRY_FILENAME).stat()
+        except OSError:
+            out.append((0, 0))
+        else:
+            out.append((stat.st_mtime_ns, stat.st_size))
+    return tuple(out)
+
+
 def build(store: WikiStore, head: str | None = None) -> LabelIndex:
     """Walk the wiki and resolve every item's labels.
 
@@ -137,6 +165,7 @@ def build(store: WikiStore, head: str | None = None) -> LabelIndex:
     sources = _source_labels(store, settings)
     index = LabelIndex(
         head=head,
+        registries=registry_stamp(store),
         sources=sources,
         settings=settings,
         wiki_dir=store.config.wiki_dir,
@@ -264,30 +293,45 @@ class LabelCache:
         # enforcement point tests `_mode is None` first, so a wiki with
         # no access control never reaches this method at all.
         head = store.head()
+        stamp = registry_stamp(store)
         if head is None:
             # No commit to key on. Rebuilding every time is correct and
             # merely slow; caching against a token that never changes
             # would be wrong.
             return build(store, None)
         cached = self._index
-        if cached is not None and cached.head == head:
+        if cached is not None and (cached.head, cached.registries) == (head, stamp):
             return cached
         with self._lock:
             # Re-check: another thread may have rebuilt it while we waited.
             cached = self._index
-            if cached is not None and cached.head == head:
+            if cached is not None and (cached.head, cached.registries) == (
+                head,
+                stamp,
+            ):
                 return cached
+            if cached is not None and cached.registries != stamp:
+                # A registry changed under us, and `SourceRegistry` is an
+                # in-memory snapshot taken at load. Rebuilding the index
+                # from the handle we already hold would read the labels
+                # this process saw last time, which is the stale value
+                # the stamp just told us not to trust. Drop the handles
+                # so `build` re-reads. Existing references stay valid;
+                # they are merely old.
+                store._source_registry = None
+                store._source_registry_local = None
             built = build(store, head)
             self._index = built
             return built
 
     def invalidate(self) -> None:
-        """Drop the cached index.
+        """Drop the cached index for this process.
 
-        HEAD alone is not always enough: ``restricted`` lives in the
-        source registry, and a registry write that is not committed (a
-        local-tree ingest) moves no HEAD. Write paths that change labels
-        call this directly.
+        The registry stamp in the token already catches an uncommitted
+        registry write from *another* process. This is the same-process
+        shortcut: it takes effect immediately rather than on the next
+        differing stat, which matters when a write and the read that
+        must see it happen in the same call.
         """
         with self._lock:
             self._index = None

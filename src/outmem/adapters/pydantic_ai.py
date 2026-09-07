@@ -804,7 +804,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
     # difference between O(turns·N) and O(N) page reads. Keyed by strategy
     # so a mid-session config.yaml retrieval save (which updates
     # store.config) transparently rebuilds.
-    _retriever_cache: dict[tuple[str, str | None], Any] = {}
+    _retriever_cache: dict[tuple[str, tuple[object, ...] | None], Any] = {}
     _retriever_lock = threading.Lock()
 
     def search_wiki(question: str, k: int = 5) -> str:
@@ -856,19 +856,20 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             # (and orphan one retriever). retrieve() runs outside the lock —
             # only the cache miss is serialized.
             #
-            # Keyed on HEAD as well as strategy, but ONLY where labels
-            # are in play. BM25 snapshots every page body at
-            # construction, so a retriever built before a page was
-            # restricted would keep answering from the text it had — a
-            # cache that fails open. HEAD moves on every outmem write,
-            # which is exactly the invalidation signal.
+            # Keyed on the corpus state as well as the strategy, but
+            # ONLY where labels are in play. BM25 snapshots every page
+            # body at construction, so a retriever built before a page
+            # was restricted would keep answering from the text it had —
+            # a cache that fails open. `corpus_token` is what moves when
+            # anything the labels depend on does, including the registry
+            # writes that produce no commit.
             #
-            # A wiki that declares no labels keeps the old key and the
-            # old lifetime: `store.head()` is a `git rev-parse`
-            # subprocess on every search, and rebuilding BM25 on every
-            # commit is O(corpus). Neither is a cost that users of a
-            # feature they have not switched on should pay.
-            token = store.head() if store.restrictions.enabled else None
+            # A wiki that declares no labels gets `None` and keeps the
+            # old key and the old lifetime: the token costs a `git
+            # rev-parse` per search, and rebuilding BM25 on every commit
+            # is O(corpus). Neither is a cost that users of a feature
+            # they have not switched on should pay.
+            token = store.corpus_token()
             cache_key = (effective, token)
             with _retriever_lock:
                 retriever = _retriever_cache.get(cache_key)
