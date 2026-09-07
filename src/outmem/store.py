@@ -2396,6 +2396,37 @@ class WikiStore:
             index = self._labels()
             current = index.for_page(slug)
             removed = current - wanted
+            # A path rule is a safety net that frontmatter cannot
+            # override, so labels it supplies cannot be removed here.
+            # Silently keeping them would be the worst outcome: the
+            # caller asked to declassify, got a success and a commit,
+            # and nothing changed.
+            pinned = removed & self.restrictions.labels_for_slug(slug)
+            if pinned:
+                raise RestrictionError(
+                    f"cannot remove [{', '.join(sorted(pinned))}] from {slug!r}: "
+                    "a `restricted.paths` rule in config.yaml applies it to this "
+                    "slug, and a path rule outranks frontmatter. Rename the page "
+                    "out of that namespace, or change the rule."
+                )
+            # Same for a source: inheritance is computed, not stored, so
+            # dropping the frontmatter label would leave the page
+            # restricted anyway and the call a no-op.
+            inherited: frozenset[str] = frozenset()
+            for entry in self.read(slug).frontmatter.provenance:
+                from outmem.lint import provenance_ref
+
+                ref = provenance_ref(entry)
+                if ref is not None:
+                    inherited |= index.for_source(ref)
+            blocked = removed & inherited
+            if blocked:
+                raise RestrictionError(
+                    f"cannot remove [{', '.join(sorted(blocked))}] from {slug!r}: "
+                    "the page cites a source carrying that label, and a page "
+                    "inherits its sources' labels. Declassify the source first, "
+                    "or drop the citation."
+                )
             # The bare store is the server-side operator; there is no
             # mode and no grant to check against, and gating it would
             # block the very tooling that has to fix a mislabelled page.

@@ -38,6 +38,7 @@ from outmem.exceptions import (
     SlugError,
     WritebackError,
 )
+from outmem.frontmatter import serialize_wiki_page
 from outmem.skills import bundled_registry
 from outmem.store import WikiStore
 
@@ -429,7 +430,14 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 f"(no such wiki page: {slug!r} — try `list_pages` to see "
                 "what exists, or `grep_wiki` with scope='sources' for source material)"
             )
-        raw = page.path.read_text(encoding="utf-8")
+        # Rendered from the page the store handed back, NOT re-read from
+        # disk. Going behind the store means serving whatever the file
+        # says, and the file is not always what this caller should get:
+        # the `index` slug is rendered live per viewer (the stored
+        # wiki/index.md catalogues every page in the wiki, including the
+        # ones hidden from the reader), and a self-healed page's disk
+        # text is the broken version the store just repaired in memory.
+        raw = serialize_wiki_page(page.frontmatter, page.body)
         # Frontmatter is stripped from `page.body`, so outline line
         # numbers need its height added back to match what `grep_wiki`
         # reports for the same page.
