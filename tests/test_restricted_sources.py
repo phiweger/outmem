@@ -306,3 +306,80 @@ class TestCli:
              "--restricted", "legal", "--register-only", "--root", str(root)]
         )
         assert WikiStore.open(root).list_sources()[0].restricted == {"hr", "legal"}
+
+
+class TestRestrictSourceVerb:
+    """The source counterpart to `outmem restrict`, and the one with more
+    reach: pages inherit their sources' labels, so one edit here
+    restricts or releases a whole downstream."""
+
+    def test_it_labels_a_registered_source(self, tmp_path: Path) -> None:
+        store = _wiki(tmp_path, ["hr"])
+        entry = store.add_source(_doc(tmp_path, "a.md"))
+        store.restrict_source(entry.rel_path, labels=["hr"])
+        assert store.get_source(entry.rel_path).restricted == frozenset({"hr"})
+
+    def test_pages_compiled_from_it_follow(self, tmp_path: Path) -> None:
+        store = _wiki(tmp_path, ["hr"])
+        entry = store.add_source(_doc(tmp_path, "a.md"))
+        store.write_page(
+            "derived", title="D", body="A fact.\n", provenance=[entry.citation_path]
+        )
+        assert "derived" in store.as_viewer().list_slugs()
+        store.restrict_source(entry.rel_path, labels=["hr"])
+        assert "derived" not in store.as_viewer().list_slugs()
+
+    def test_the_operator_can_declassify(self, tmp_path: Path) -> None:
+        store = _wiki(tmp_path, ["hr"])
+        entry = store.add_source(_doc(tmp_path, "a.md"), restricted=["hr"])
+        store.restrict_source(entry.rel_path, labels=[])
+        assert store.get_source(entry.rel_path).restricted == frozenset()
+
+    def test_a_path_rule_cannot_be_undone_this_way(self, tmp_path: Path) -> None:
+        """Reporting success while the rule silently reapplies the label
+        is the worst of the three possible outcomes."""
+        store = _wiki(tmp_path, ["hr"], sources={"hr/*": ["hr"]})
+        entry = store.add_source(_doc(tmp_path, "a.md"), into_subdir="hr")
+        with pytest.raises(OutmemError, match=r"restricted\.sources"):
+            store.restrict_source(entry.rel_path, labels=[])
+
+    def test_a_no_op_produces_no_commit(self, tmp_path: Path) -> None:
+        """Asking git to commit an unchanged file prints "nothing added
+        to commit", which reads like a failure for what is a no-op."""
+        store = _wiki(tmp_path, ["hr"])
+        entry = store.add_source(_doc(tmp_path, "a.md"), restricted=["hr"])
+        head = store.head()
+        store.restrict_source(entry.rel_path, labels=["hr"])
+        assert store.head() == head
+
+    def test_it_is_refused_to_a_view(self, tmp_path: Path) -> None:
+        from outmem.restricted import Grants
+
+        store = _wiki(tmp_path, ["hr"])
+        entry = store.add_source(_doc(tmp_path, "a.md"))
+        view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        with pytest.raises(OutmemError, match="operator-only"):
+            view.restrict_source(entry.rel_path, labels=["hr"])
+
+    def test_an_undeclared_label_is_refused(self, tmp_path: Path) -> None:
+        store = _wiki(tmp_path, ["hr"])
+        entry = store.add_source(_doc(tmp_path, "a.md"))
+        with pytest.raises(LabelError, match="unknown restriction"):
+            store.restrict_source(entry.rel_path, labels=["board"])
+
+    def test_the_cli_verb_works_and_reports(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        store = _wiki(tmp_path, ["hr"])
+        entry = store.add_source(_doc(tmp_path, "a.md"))
+        root = store.root
+        store.close()
+        rc = main(
+            ["sources", "restrict", entry.rel_path, "--label", "hr",
+             "--root", str(root)]
+        )
+        assert rc == 0
+        assert "restricted to: hr" in capsys.readouterr().out
+        assert WikiStore.open(root).list_sources()[0].restricted == {"hr"}

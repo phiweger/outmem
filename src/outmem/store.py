@@ -2577,9 +2577,28 @@ class WikiStore:
             raise OutmemError(f"no such source: {rel_path}")
         tree, key = found
         registry = _sources.get_registry(self, tree)
+        before = registry.entries[key].restricted if key in registry.entries else None
+        # A `restricted.sources` rule outranks the column, so a label it
+        # supplies cannot be removed here. Reporting success while the
+        # rule silently reapplies it is the worst of the three possible
+        # outcomes — the same refusal `restrict_page` makes.
+        pinned = (before or frozenset()) - wanted
+        pinned &= self.restrictions.labels_for_source(key)
+        if pinned:
+            raise RestrictionError(
+                f"cannot remove [{', '.join(sorted(pinned))}] from {key!r}: a "
+                "`restricted.sources` rule in config.yaml applies it to this "
+                "path, and a path rule outranks the registry. Move the source "
+                "out of that directory, or change the rule."
+            )
         entry = registry.set_restricted(key, wanted, allow_narrowing=True)
         self._label_cache.invalidate()
-        if commit and tree.tracked:
+        # Nothing to commit when the labels did not move — and asking git
+        # to commit an unchanged file surfaces its "nothing added to
+        # commit" message, which reads like a failure for what is in
+        # fact a no-op. Note the labels may still be non-empty: a path
+        # rule can supply what the caller asked to remove.
+        if commit and tree.tracked and before != entry.restricted:
             self._commit_paths(
                 [tree.repo_registry_relpath], subject=f"restrict: {key}"
             )
