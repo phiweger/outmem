@@ -659,13 +659,15 @@ class TestTheErrorPathIsRedactedToo:
         from pydantic_ai import ModelRetry
 
         tool = next(t for t in wiki_tools(store) if t.__name__ == "write_page")
-        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
-            with pytest.raises(ModelRetry):
-                tool(
-                    slug="hr:x",
-                    title="T",
-                    body="Alice's severance is TWELVE-WEEK-PAYOUT. […]\n",
-                )
+        with (
+            caplog.at_level(logging.INFO, logger="outmem.agent.tool"),
+            pytest.raises(ModelRetry),
+        ):
+            tool(
+                slug="hr:x",
+                title="T",
+                body="Alice's severance is TWELVE-WEEK-PAYOUT. […]\n",
+            )
         blob = " ".join(self._records(caplog)) + str(
             [getattr(r, "tool_error", "") for r in caplog.records]
         )
@@ -681,9 +683,11 @@ class TestTheErrorPathIsRedactedToo:
 
         plain = WikiStore.init(tmp_path / "plain")
         tool = next(t for t in wiki_tools(plain) if t.__name__ == "write_page")
-        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
-            with pytest.raises(ModelRetry):
-                tool(slug="x", title="T", body="Body text. […]\n")
+        with (
+            caplog.at_level(logging.INFO, logger="outmem.agent.tool"),
+            pytest.raises(ModelRetry),
+        ):
+            tool(slug="x", title="T", body="Body text. […]\n")
         assert "elision marker" in " ".join(self._records(caplog))
 
     def test_item_names_passed_as_arguments_are_masked(
