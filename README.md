@@ -499,7 +499,7 @@ result = my_assistant.run_sync("What's our pricing policy?")
 agent with the read-only tool palette (search / read / list / backlinks
 / history / evolution / sources) plus a tight "cite by `[[slug]]`,
 explicitly say so if the wiki has nothing on the topic" system prompt
-and the same `max_tokens=16384` + Anthropic prompt-caching settings as
+and the same `max_tokens=20480` + Anthropic prompt-caching settings as
 the full `outmem ask` runtime. The outer agent gets a black-box
 `consult_wiki(question) -> str` tool — outmem-internal vocabulary
 never leaks across the boundary.
@@ -533,6 +533,56 @@ agent = Agent(
     system_prompt="You answer from the wiki only. Cite [[slugs]].",
 )
 ```
+
+---
+
+## Restricted content — serving one wiki to people with different access
+
+Some wikis hold material only part of the organisation may see. outmem
+gates that **deterministically**, at the store layer, before anything
+becomes prompt text — nothing in the enforcement path depends on a model
+behaving correctly.
+
+Content is open by default; a wiki that declares no labels is unaffected.
+
+```yaml
+# config.yaml
+restricted:
+  labels: [hr, legal]      # the declared vocabulary
+  paths: {"hr:*": [hr]}    # safety net: anything under hr: is restricted
+  sources: {"hr/*": [hr]}  # ...and anything ingested into hr/
+```
+
+```bash
+# Label a document at the moment you are holding it. Every page ever
+# compiled from it inherits the label.
+outmem ingest severance-plan.md --into hr --restricted hr
+```
+
+```python
+from outmem.restricted import Grants
+from outmem.adapters.pydantic_ai import wiki_read_tools
+
+store = WikiStore.open("/srv/wiki")                     # operator, unfiltered
+view  = store.as_viewer(                                # per request
+    mode={"hr"},                                        # this session's scope
+    grants=Grants.reader("hr"),                         # what the user may see
+)
+tools = wiki_read_tools(view)                           # the model never sees `store`
+```
+
+An item is visible when its labels are a subset of the session's mode,
+so open-by-default falls out of the subset relation rather than being a
+special case. A write requires labels *equal* to the mode, which
+confines whatever a session read to the compartment it read from. A
+hidden page answers exactly as a nonexistent one does — a
+distinguishable error would be an existence oracle.
+
+Assumes outmem runs server-side against a repository users cannot clone.
+The threat boundary, what is explicitly *not* protected, and a rollout
+order whose first four steps are safe to run while still serving the
+unrestricted store are in
+[`docs/restricted-content.md`](docs/restricted-content.md).
 
 ---
 
