@@ -119,6 +119,23 @@ class LabelIndex:
                 return found
         return frozenset()
 
+    def knows_source(self, key: str) -> bool:
+        """Whether any spelling of ``key`` is in this index.
+
+        Distinct from :meth:`for_source` returning the empty set, which
+        is also what an unknown key gives — and the caller needs to tell
+        "this source is open" from "this index has never heard of it".
+        """
+        return any(c in self.sources for c in self._source_keys(key))
+
+    def source_keys(self, key: str) -> list[str]:
+        """``key`` reduced toward the bare registry ``rel_path``.
+
+        Public because the store needs the same normalisation to look a
+        candidate up on disk.
+        """
+        return self._source_keys(key)
+
     def _source_keys(self, key: str) -> list[str]:
         """``key`` reduced toward the bare registry ``rel_path``."""
         cleaned = posixpath.normpath(key.replace("\\", "/")).lstrip("/")

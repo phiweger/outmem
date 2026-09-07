@@ -383,3 +383,83 @@ class TestRestrictSourceVerb:
         assert rc == 0
         assert "restricted to: hr" in capsys.readouterr().out
         assert WikiStore.open(root).list_sources()[0].restricted == {"hr"}
+
+
+class TestASourceTheIndexHasNotClassifiedIsDenied:
+    """The mirror of the page race, on the ingest path.
+
+    `add_source` copies the file into the tree and registers it
+    afterwards, and the registry row is where a source's labels live. In
+    between there is a file on disk with no row, so an unknown key that
+    names a real file means the index predates it, not that the source
+    is open.
+    """
+
+    def test_an_unregistered_file_in_the_tree_is_hidden(
+        self, tmp_path: Path
+    ) -> None:
+        store = _wiki(tmp_path, ["hr"])
+        store.write_page("p", title="P", body="Text.\n")
+        view = store.as_viewer()
+        view.list_sources()  # warm the index
+
+        # Reproduce the window: bytes in the tree, no registry row.
+        stray = store.sources_path / "abcdef123456"
+        stray.mkdir(parents=True, exist_ok=True)
+        (stray / "memo.md").write_text("SECRETSTRAY confidential.\n")
+
+        assert not view.search("SECRETSTRAY", scope="sources").hits
+        assert not view.search("SECRETSTRAY", scope="all").hits
+        with pytest.raises(OutmemError, match="no such source"):
+            view.read_source("abcdef123456/memo.md")
+
+    def test_the_operator_still_sees_it(self, tmp_path: Path) -> None:
+        """Which is what makes it recoverable — `outmem sources gc`
+        reports exactly this state."""
+        store = _wiki(tmp_path, ["hr"])
+        store.write_page("p", title="P", body="Text.\n")
+        stray = store.sources_path / "abcdef123456"
+        stray.mkdir(parents=True, exist_ok=True)
+        (stray / "memo.md").write_text("SECRETSTRAY confidential.\n")
+        assert store.search("SECRETSTRAY", scope="sources").hits
+
+    def test_a_key_naming_no_file_is_not_denied(self, tmp_path: Path) -> None:
+        """The other branch: an unknown key that names nothing is simply
+        absent, and denying it would say something about a path that
+        holds no content."""
+        store = _wiki(tmp_path, ["hr"])
+        view = store.as_viewer()
+        assert view._source_visible("nothing/at/all.md")
+
+    def test_a_registered_open_source_is_still_visible(
+        self, tmp_path: Path
+    ) -> None:
+        store = _wiki(tmp_path, ["hr"])
+        entry = store.add_source(_doc(tmp_path, "public.md", "OPENDOC.\n"))
+        view = store.as_viewer()
+        assert [e.rel_path for e in view.list_sources()] == [entry.rel_path]
+        assert "OPENDOC" in view.read_source(entry.rel_path)
+
+
+class TestConcurrentIngestsDoNotRaceOnGit:
+    def test_every_ingest_lands(self, tmp_path: Path) -> None:
+        """The registry was already safe across processes — SQLite
+        serialises the writers — but the git half was not: two ingests
+        interleaving between `git add` and `git commit` raced on the
+        index and one of them died. This was the only commit-producing
+        path outside the write lock.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        store = _wiki(tmp_path, ["hr"])
+        store.write_page("p", title="P", body="Text.\n")
+
+        def ingest(n: int) -> str:
+            doc = _doc(tmp_path, f"memo{n}.md", f"Body {n}.\n")
+            return store.add_source(doc, restricted=["hr"]).rel_path
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            paths = list(pool.map(ingest, range(6)))
+
+        assert len(set(paths)) == 6
+        assert len(store.list_sources()) == 6

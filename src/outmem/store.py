@@ -1758,17 +1758,24 @@ class WikiStore:
         rules are unioned in. Orthogonal to ``local``, which is about
         redistribution rights rather than secrecy.
         """
-        self._require_operator('registering a source')
-        return _sources.add_source(
-            self,
-            source,
-            into_subdir=into_subdir,
-            rename=rename,
-            as_key=as_key,
-            local=local,
-            commit=commit,
-            restricted=restricted,
-        )
+        self._require_operator("registering a source")
+        # Under the same lock as every other commit-producing path. The
+        # registry itself is already safe across processes — SQLite
+        # serialises the writers — but the git half was not: two ingests
+        # interleaving between `git add` and `git commit` race on the
+        # index, and one of them dies. This was the only write path
+        # outside the lock.
+        with self._write_lock:
+            return _sources.add_source(
+                self,
+                source,
+                into_subdir=into_subdir,
+                rename=rename,
+                as_key=as_key,
+                local=local,
+                commit=commit,
+                restricted=restricted,
+            )
 
     def source_citations(
         self, *, local: bool | None = None
@@ -2355,7 +2362,28 @@ class WikiStore:
         if self._mode is None:
             return True
         idx = index if index is not None else self._labels()
+        if not idx.knows_source(key) and self._source_file_exists(key, idx):
+            # The mirror of the page race. `add_source` copies the file
+            # into the tree and registers it afterwards, so between the
+            # two there is a file on disk with no registry row — and a
+            # row is where its labels live. An unknown key that names a
+            # real file means the index predates it, not that it is open.
+            return False
         return self._can_see(idx.for_source(key))
+
+    def _source_file_exists(self, key: str, index: LabelIndex) -> bool:
+        """Whether ``key``, in any spelling, names a file in either tree."""
+        for candidate in index.source_keys(key):
+            for tree in (self.sources_path, self.sources_local_path):
+                path = tree / candidate
+                try:
+                    if path.is_file() and path.resolve().is_relative_to(
+                        tree.resolve()
+                    ):
+                        return True
+                except OSError:
+                    continue
+        return False
 
     def _repo_path_visible(self, rel_path: str, index: LabelIndex) -> bool:
         """Visibility for a repo-relative path — the form ripgrep hits and
@@ -2380,7 +2408,10 @@ class WikiStore:
         for tree in (SOURCES_DIR, SOURCES_LOCAL_DIR):
             prefix = f"{self.config.wiki_dir}/{tree}/"
             if rel_path.startswith(prefix):
-                return self._can_see(index.for_source(f"{tree}/{rel_path[len(prefix):]}"))
+                # Through `_source_visible` for the same reason the page
+                # branch goes through `_page_visible`: one predicate
+                # reached two ways is one predicate too many.
+                return self._source_visible(f"{tree}/{rel_path[len(prefix):]}", index)
         log_prefix = f"{self.config.log_dir}/"
         if rel_path.startswith(log_prefix):
             parts = rel_path[len(log_prefix) :].split("/")
