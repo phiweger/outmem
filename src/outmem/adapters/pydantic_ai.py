@@ -128,21 +128,26 @@ def _log_error(name: str, exc: Exception) -> None:
 log = logging.getLogger(__name__)
 
 
-def _compartment_note(store: WikiStore, question: str) -> str:
+def _compartment_note(store: WikiStore) -> str:
     """Render the grant-gated compartment hint, or "" when there is none.
 
-    Counts only, per label, and only for labels the viewer holds. This
-    is what makes the opt-in default workable: a cleared user asking
-    about parental leave from an open session would otherwise get
-    nothing and never learn to switch compartment.
+    Shown only on an empty result, which is both the case the hint
+    exists for and the only trigger that is safe. Attaching it to every
+    search would be noise; attaching it based on anything the *question*
+    matched would make it a content oracle, since the model writes the
+    question. The counts themselves are corpus properties, identical for
+    every query — see :meth:`WikiStore.compartment_hint`.
     """
-    counts = store.compartment_hint(question)
+    counts = store.compartment_hint()
     if not counts:
         return ""
-    parts = ", ".join(f"{n} in {label}" for label, n in sorted(counts.items()))
+    parts = ", ".join(
+        f"{label} ({n} page{'' if n == 1 else 's'})"
+        for label, n in sorted(counts.items())
+    )
     return (
-        f"\n(also matched, outside this session's scope: {parts}. "
-        "Ask the user to start a session in that compartment.)"
+        f"\n(this session is scoped to open content; you also have access to: "
+        f"{parts}. Ask the user to start a session in that compartment.)"
     )
 
 
@@ -764,12 +769,20 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             # (and orphan one retriever). retrieve() runs outside the lock —
             # only the cache miss is serialized.
             #
-            # Keyed on HEAD as well as strategy. BM25 snapshots every
-            # page body at construction, so a retriever built before a
-            # page was restricted would keep answering from the text it
-            # had — a cache that fails open. HEAD moves on every outmem
-            # write, which is exactly the invalidation signal.
-            cache_key = (effective, store.head())
+            # Keyed on HEAD as well as strategy, but ONLY where labels
+            # are in play. BM25 snapshots every page body at
+            # construction, so a retriever built before a page was
+            # restricted would keep answering from the text it had — a
+            # cache that fails open. HEAD moves on every outmem write,
+            # which is exactly the invalidation signal.
+            #
+            # A wiki that declares no labels keeps the old key and the
+            # old lifetime: `store.head()` is a `git rev-parse`
+            # subprocess on every search, and rebuilding BM25 on every
+            # commit is O(corpus). Neither is a cost that users of a
+            # feature they have not switched on should pay.
+            token = store.head() if store.restrictions.enabled else None
+            cache_key = (effective, token)
             with _retriever_lock:
                 retriever = _retriever_cache.get(cache_key)
                 if retriever is None:
@@ -777,7 +790,10 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                     if effective != configured:
                         settings = replace(settings, strategy=effective)
                     retriever = build_retriever_from_settings(store, settings)
-                    _retriever_cache.clear()  # one generation at a time
+                    if token is not None:
+                        # One generation at a time — the superseded
+                        # snapshots are exactly the stale ones.
+                        _retriever_cache.clear()
                     _retriever_cache[cache_key] = retriever
             result = retriever.retrieve(question, k=k)
         except (OutmemError, ImportError) as exc:
@@ -792,7 +808,6 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         # with the retriever's own per-query diagnostic — the agent sees
         # both reasons it wasn't run with the configured pipeline.
         notes = [n for n in (fallback_note, result.note) if n]
-        hint = _compartment_note(store, question)
         if not result.slugs:
             # Carry diagnostics onto the no-match path too, so the agent
             # learns *why* it got nothing. The compartment hint matters
@@ -801,19 +816,29 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             suffix = f" ({'; '.join(notes)})" if notes else ""
             return (
                 "(no pages matched — try rephrasing or `grep_wiki` "
-                f"for literal keyword matches){suffix}{hint}"
+                f"for literal keyword matches){suffix}{_compartment_note(store)}"
             )
         lines: list[str] = []
         for slug in result.slugs:
             try:
                 body = store.read(slug).body.replace("\n", " ").strip()
             except OutmemError:
-                body = ""
+                # The store refused it. Emitting the row anyway with an
+                # empty preview is fail-open by construction: any
+                # retriever that surfaces a hidden slug — a stale index,
+                # a cache built before the page was restricted — turns
+                # into a disclosure of the slug itself. Drop the row.
+                continue
             preview = body[:200] + ("…" if len(body) > 200 else "")
             lines.append(f"  - [[{slug}]] {preview}")
+        if not lines:
+            return (
+                "(no pages matched — try rephrasing or `grep_wiki` "
+                f"for literal keyword matches){_compartment_note(store)}"
+            )
         if notes:
             lines.append(f"(diagnostics: {'; '.join(notes)})")
-        return "\n".join(lines) + hint
+        return "\n".join(lines)
 
     tools: list[WikiTool] = [
         search_wiki,

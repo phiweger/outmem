@@ -109,7 +109,6 @@ from outmem.restricted import (
     LabelError,
     RestrictedSettings,
     mode_dirname,
-    mode_from_dirname,
     normalise_labels,
     visible,
 )
@@ -345,6 +344,14 @@ def _write_refusal(
     )
 
 
+# Commit-subject grammar, as produced by the `_commit_paths` call sites.
+# `steering` recovers the item a commit is about from its subject, so
+# these have to stay in step with what gets committed; a verb missing
+# here falls through to "shown", and the pathspec narrowing in
+# `_steering_paths` is what covers the ones whose subject names no item.
+_SLUG_SUBJECT_VERBS = frozenset({"compact", "extend", "append", "rename", "restrict"})
+_SOURCE_SUBJECT_VERBS = frozenset({"source", "ingest"})
+
 _VISIBILITY_ENFORCED = frozenset({
     "backlinks",
     "compartment_hint",
@@ -374,17 +381,17 @@ restricted item absent from its result.
 
 _WRITE_ENFORCED = frozenset({
     "append_log",
-    "restrict_page",
     "append_page",
     "extend_page",
     "record_ingestion",
-    "rename_page",
     "write_page",
 })
 """Produces a commit — subject to the write rule (§3.2) and closure."""
 
 _OPERATOR_ONLY = frozenset({
     "add_source",
+    "rename_page",
+    "restrict_page",
     "assign_document_keys",
     "commit_registry",
     "ensure_sources_local",
@@ -437,8 +444,71 @@ _NO_CONTENT = frozenset({
 """Returns no item content, identity, or existence. Nothing to filter."""
 
 
+@dataclass
+class _LazyResources:
+    """The store's lazily-opened, reassignable slots, in one place.
+
+    Shared by reference across every view (see
+    :meth:`WikiStore.as_viewer`). Not a cache in the invalidation sense
+    — these are handles, and a view holding its own copy of one is both
+    a resource leak and, for the registries, a correctness bug.
+    """
+
+    source_registry: SourceRegistry | None = None
+    source_registry_local: SourceRegistry | None = None
+    """Separate handle: each source tree carries its own registry, so the
+    tracked one never records a local source's filename, hash, or origin
+    path."""
+    vector_store: VectorStore | None = None
+    contributors: Contributors | None = None
+    alias_map: dict[str, str] | None = None
+
+
 class WikiStore:
     """Filesystem-backed wiki — the unit downstream code interacts with."""
+
+    # Property pairs over `_lazy`, so every existing `store._x` /
+    # `store._x = y` call site keeps working while the value itself
+    # lives on the shared object.
+    @property
+    def _source_registry(self) -> SourceRegistry | None:
+        return self._lazy.source_registry
+
+    @_source_registry.setter
+    def _source_registry(self, value: SourceRegistry | None) -> None:
+        self._lazy.source_registry = value
+
+    @property
+    def _source_registry_local(self) -> SourceRegistry | None:
+        return self._lazy.source_registry_local
+
+    @_source_registry_local.setter
+    def _source_registry_local(self, value: SourceRegistry | None) -> None:
+        self._lazy.source_registry_local = value
+
+    @property
+    def _vector_store(self) -> VectorStore | None:
+        return self._lazy.vector_store
+
+    @_vector_store.setter
+    def _vector_store(self, value: VectorStore | None) -> None:
+        self._lazy.vector_store = value
+
+    @property
+    def _contributors(self) -> Contributors | None:
+        return self._lazy.contributors
+
+    @_contributors.setter
+    def _contributors(self, value: Contributors | None) -> None:
+        self._lazy.contributors = value
+
+    @property
+    def _alias_map(self) -> dict[str, str] | None:
+        return self._lazy.alias_map
+
+    @_alias_map.setter
+    def _alias_map(self, value: dict[str, str] | None) -> None:
+        self._lazy.alias_map = value
 
     def __init__(self, config: WikiStoreConfig) -> None:
         self.config = config
@@ -461,18 +531,22 @@ class WikiStore:
             pages_dir=self.pages_path,
             read_only=config.read_only,
         )
-        self._contributors: Contributors | None = None
         # Slugs already warned-about by read()'s frontmatter self-heal, so
         # repeated reads of one broken page log once, not per read.
         self._healed_slugs: set[str] = set()
-        # Lazily-opened resources holding sqlite connections.
-        self._vector_store: VectorStore | None = None
-        self._source_registry: SourceRegistry | None = None
-        # Separate handle: each source tree carries its own registry, so
-        # the tracked one never records a local source's filename, hash,
-        # or origin path.
-        self._source_registry_local: SourceRegistry | None = None
-        self._alias_map: dict[str, str] | None = None
+        # Every lazily-opened resource lives behind one shared object.
+        #
+        # `as_viewer` is a shallow copy, which gives the view its own
+        # `__dict__` — so a slot the view later *assigns* diverges from
+        # the store's, and both then hold their own SQLite connections.
+        # For the source registries that is fail-open: a source
+        # registered after the view first touched sources is absent from
+        # the view's snapshot, so the label index never sees it and
+        # `for_source` reads it as unlabelled. Holding the mutable slots
+        # in one object means the copy shares the reference and every
+        # view sees the same registry, the same vector store, and the
+        # same connections.
+        self._lazy = _LazyResources()
         # Guards lazy VectorStore open — the optimize tool queries
         # concurrently across a thread pool, so the check-then-open must be
         # atomic or 8 threads each build an embedder + orphan 7 connections.
@@ -1032,9 +1106,9 @@ class WikiStore:
         if since is None:
             marker = self.state.last_run()
             since = marker.timestamp if marker else default_window
-        paths = [self.config.wiki_dir]
-        if include_log:
-            paths.append(self.config.log_dir)
+        paths = self._steering_paths(include_log=include_log)
+        if not paths:
+            return []
         commits = log_since(
             self.root,
             since=since,
@@ -1057,18 +1131,55 @@ class WikiStore:
         """
         verb, sep, rest = subject.partition(": ")
         if not sep:
+            # Not outmem's grammar at all — a human's own commit message.
+            # It names no item this mechanism can resolve, and lint's
+            # `restricted-slug-mentioned` check is what covers prose.
             return True
         target = rest.strip()
-        if verb in ("compact", "extend", "append", "rename", "restrict"):
+        if verb in _SLUG_SUBJECT_VERBS:
             # `rename: old -> new` names two slugs; either being hidden
             # hides the commit.
             return all(
                 self._can_see(index.for_page(part.strip()))
                 for part in target.replace("->", " ").split()
             )
-        if verb in ("source", "ingest"):
+        if verb in _SOURCE_SUBJECT_VERBS:
             return self._can_see(index.for_source(target))
+        # Everything else — `log:`, `fix:`, `import:`, `index:` — carries
+        # free text somebody wrote rather than a name this can resolve.
+        # Those are handled by narrowing what git walks (see
+        # `_steering_paths`) rather than by parsing the subject, because
+        # a subject cannot be trusted to say which item it is about.
         return True
+
+    def _steering_paths(self, *, include_log: bool) -> list[str]:
+        """Which trees ``steering`` lets git walk for this viewer.
+
+        Page and source commits are filtered afterwards by subject,
+        because their subjects name the item. Log commits cannot be: the
+        rest of a `log:` subject is a topic somebody typed, so
+        `log: severance cap` written in a restricted session would
+        otherwise reach the system prompt of every open one. Narrow the
+        pathspec instead — a partition the viewer cannot see is simply
+        not walked, so no subject from it exists to filter.
+        """
+        paths = [self.config.wiki_dir]
+        if not include_log:
+            return paths
+        if not self.enforces_visibility:
+            paths.append(self.config.log_dir)
+            return paths
+        # The open partition is `log/<date>.md`, one level down; the
+        # restricted ones are `log/<label-set>/<date>.md`.
+        paths.extend(
+            str(path.relative_to(self.root).as_posix())
+            for path in sorted(self.log_path.glob("*.md"))
+        )
+        for directory in sorted(p for p in self.log_path.glob("*") if p.is_dir()):
+            labels = self.restrictions.mode_from_log_dirname(directory.name)
+            if labels is not None and self._can_see(labels):
+                paths.append(str(directory.relative_to(self.root).as_posix()))
+        return paths
 
     # ------------------------------------------------------------------
     # Write
@@ -1111,6 +1222,17 @@ class WikiStore:
                 # resolution file-first, silently retargeting every [[slug]] in
                 # the corpus from `owner` to this new stub. Lint would report it
                 # afterwards, by which point the links have changed meaning.
+                if not self._page_visible(owner):
+                    # Naming the owner would hand a hidden slug to
+                    # whoever guessed this one, and `rename_page` leaves
+                    # an alias behind on every move — so guessing an old
+                    # name would return the new, hidden one. The bounded
+                    # oracle §8.1 accepts is "something blocks this
+                    # slug", not "and here is what".
+                    raise OutmemError(
+                        f"{slug!r} cannot be used: another page already answers "
+                        "to that name. Choose another slug."
+                    )
                 raise OutmemError(
                     f"{slug!r} is an alias of {owner!r}; writing a page here would "
                     f"silently retarget every [[{slug}]] link. Remove the alias from "
@@ -1170,6 +1292,17 @@ class WikiStore:
         wiki rewrote 583 of them via a throwaway script that shipped two
         bugs. Doing it here means that work is written once, with tests.
 
+        **Operator-only.** Renaming rewrites inbound ``[[links]]`` across
+        the whole corpus, which means writing into files chosen by the
+        link graph rather than by the caller — open pages, pages in
+        other compartments, pages this session cannot see. There is no
+        useful way to label-check a write whose targets are discovered
+        rather than named, and the content that lands in them is the new
+        slug, which the caller chooses. That is a write-down with
+        attacker-supplied text, and the only clean answer is that a view
+        does not get to reorganise the namespace. Same reasoning as
+        ``import_vault`` and ``repair_pages``.
+
         ``alias=True`` (default) records ``old_slug`` in the moved page's
         ``aliases:``, so the old name keeps resolving. That matters even
         with a perfect link rewrite: references *outside* the wiki —
@@ -1179,6 +1312,7 @@ class WikiStore:
 
         Returns the new HEAD SHA.
         """
+        self._require_operator("renaming a page")
         with self._write_lock:
             old_slug = self.resolve_slug(old_slug)
             validate_slug(old_slug)
@@ -1187,7 +1321,6 @@ class WikiStore:
                 raise OutmemError(f"Cannot rename {old_slug!r} to itself.")
             if INDEX_SLUG in (old_slug, new_slug):
                 raise OutmemError("The reserved 'index' slug cannot be renamed.")
-            self._check_rename(old_slug, new_slug)
             old_path = self._page_path(old_slug)
             if not old_path.exists():
                 raise OutmemError(f"No such wiki page: {old_slug}")
@@ -2124,8 +2257,12 @@ class WikiStore:
         and simply is not asking for it, which is why retrieval may tell
         them matches exist elsewhere (see ``search``).
 
-        The returned object is a shallow copy sharing this store's
-        caches, registries and write lock — one process, many views. It
+        The returned object is a shallow copy. Its lazily-opened
+        resources — both source registries, the vector store, the alias
+        map — live on one shared object rather than on the copy, so
+        every view sees the same registry rows and the process opens one
+        set of SQLite connections rather than one per request. The write
+        lock and the label cache are shared for the same reason. It
         holds no reference to the unrestricted store, so nothing
         downstream can climb back out of the view.
 
@@ -2217,7 +2354,7 @@ class WikiStore:
             parts = rel_path[len(log_prefix) :].split("/")
             if len(parts) < 2:
                 return True  # log/<date>.md — the open partition
-            labels = mode_from_dirname(parts[0])
+            labels = self.restrictions.mode_from_log_dirname(parts[0])
             return True if labels is None else self._can_see(labels)
         return True
 
@@ -2406,35 +2543,6 @@ class WikiStore:
                     "covers it."
                 )
 
-    def _check_rename(self, old_slug: str, new_slug: str) -> None:
-        """Refuse a rename that would change a page's effective labels.
-
-        Under path rules, ``hr:x -> notes:x`` is declassification
-        through an innocuous-looking tool: the page keeps its content,
-        loses its label, and nothing about the call says so. Widening is
-        allowed to anyone who may write both ends; *narrowing* needs the
-        ``declassify`` grant, which appears in no model-facing palette.
-
-        The ordinary write rule runs first, so a view can only rename a
-        page it may write at all.
-        """
-        if self._mode is None:
-            return
-        self._check_write(old_slug, new=False)
-        before = self._labels().for_page(old_slug)
-        # Path rules that applied to the old name and not to the new one
-        # are the whole point, so recompute from the labels the page
-        # carries independently of its name, plus the NEW name's rules.
-        explicit = before - self.restrictions.labels_for_slug(old_slug)
-        after = explicit | self.restrictions.labels_for_slug(new_slug)
-        removed = before - after
-        if removed and not self._grants.may_declassify(removed):
-            raise RestrictionError(
-                f"refusing to rename: the new name drops the restriction "
-                f"label(s) [{', '.join(sorted(removed))}]. Removing a label is "
-                "declassification and needs a declassify grant."
-            )
-
     def restrict_page(
         self,
         slug: str,
@@ -2454,10 +2562,17 @@ class WikiStore:
         refused until they are resolved — or ``cascade=True`` applies
         the same labels to the referrers.
 
-        Widening needs only the ability to write the page. *Removing* a
-        label needs the ``declassify`` grant, and this method is never
-        exposed through a tool palette.
+        **Operator-only**, for two reasons that both come back to the
+        same thing: it writes files the caller did not name. ``cascade``
+        picks its targets from the backlink graph, so they can include
+        pages a view may not write or even see; and the refusal below
+        has to name the referrers, which are exactly the pages a view
+        might not be allowed to know about. Restricting is an
+        administrative act taken from the server — ``outmem restrict``
+        runs it against the bare store — and the point of it is to touch
+        content the compartment's own users cannot yet reach.
         """
+        self._require_operator("restricting a page")
         with self._write_lock:
             slug = self.resolve_slug(slug)
             if slug == INDEX_SLUG:
@@ -2524,9 +2639,14 @@ class WikiStore:
                         "links, or pass cascade=True to restrict them too."
                     )
                 targets += sorted(inbound) if cascade else []
+            # Load every target BEFORE writing any. A cascade that
+            # raises halfway leaves earlier pages rewritten on disk with
+            # no commit — a dirty worktree carrying a label change
+            # nobody recorded, which is worse than either outcome the
+            # call could have had.
+            loaded = [(target, self.read(target)) for target in targets]
             paths: list[str] = []
-            for target in targets:
-                page = self.read(target)
+            for target, page in loaded:
                 merged = sorted(
                     wanted if target == slug else wanted | index.for_page(target)
                 )
@@ -2674,65 +2794,62 @@ class WikiStore:
                 return seen[:wanted]
             fetch = min(fetch * _OVERFETCH_FACTOR, _OVERFETCH_CEILING)
 
-    def compartment_hint(self, question: str) -> dict[str, int]:
-        """``label -> count`` of matches that fall outside this session's mode.
+    def compartment_hint(self) -> dict[str, int]:
+        """``label -> pages this session would gain by adding that label``.
 
-        The deliberate disclosure, and the thing that makes an opt-in
-        default workable. Hiding (§1) is a property of **grants**, not of
-        mode: for a user who does not hold ``hr``, HR content must be
-        undetectable, but for one who *does* hold it and is simply
-        running in mode ``∅``, saying "4 more results in hr" discloses
+        The deliberate disclosure that makes an opt-in default workable.
+        Hiding is a property of **grants**, not of mode: for a user who
+        does not hold ``hr``, HR content must be undetectable, but for
+        one who *does* hold it and is merely running in mode ``∅``,
+        being told the compartment exists and has content discloses
         nothing they are not already entitled to see. Without it a
         cleared user asking about parental leave gets nothing and never
         learns to switch compartment.
 
-        Counts only, never titles, slugs or excerpts. Broken down per
-        label and restricted to labels the user holds — an aggregate "N
-        more results" would leak the existence of compartments they do
-        not hold. An item whose labels are not *wholly* within the
-        user's grants is not counted at all, because no mode they could
-        choose would show it to them.
+        **It takes no query, and that is the point.** The obvious
+        implementation — count the items that matched *this question*
+        and fell outside the mode — is a content oracle, because the
+        model chooses the question. Asking for "twelve" and then
+        "eleven" and comparing the two counts reads a fact out of a
+        restricted page without ever retrieving it, one keyword at a
+        time, and the model could then commit that fact to an open page.
+        Relying on the model not to try is exactly what §1.3 forbids.
 
-        Empty for a bare store, for a user with no grants beyond the
-        current mode, and whenever nothing matched outside it.
+        So the number here is a property of the corpus, not of the
+        query: how many additional pages a session scoped to that label
+        would be able to see. It is the same answer for every question,
+        so it carries no bits about any of them, and it still tells the
+        user the thing they need — that the compartment is there and is
+        worth switching to.
+
+        Only labels the user holds are named; an aggregate count would
+        leak the existence of compartments they do not hold. A label
+        that adds nothing is omitted, so an empty compartment is not
+        advertised.
+
+        Empty for a bare store and for a user with no grants beyond the
+        current mode.
         """
         if self._mode is None:
             return {}
         elsewhere = self._grants.read - self._mode
         if not elsewhere:
             return {}
-        from outmem.optimize.blocks import _keywords
-        from outmem.slug import relpath_to_slug
-
-        pattern = _keywords(question)
-        if not pattern:
-            return {}
-        try:
-            # The unfiltered primitive on purpose: the hint is about what
-            # the filter removed, so it cannot be computed from the
-            # filtered result. Nothing but counts leaves this method.
-            raw = search(
-                pattern,
-                root=self.pages_path,
-                paths=None,
-                case_insensitive=self.config.outmem.retrieval.case_insensitive,
-            )
-        except OutmemError:
-            return {}
         index = self._labels()
         counts: dict[str, int] = {}
-        for slug in {
-            relpath_to_slug(Path(hit.path)) for hit in raw.hits if hit.is_match
-        }:
-            labels = index.for_page(slug)
-            if visible(labels, self._mode):
-                continue
-            if not self._grants.may_read(labels):
-                # No mode this user could choose would show it, so its
-                # existence is not theirs to learn.
-                continue
-            for label in labels - self._mode:
-                counts[label] = counts.get(label, 0) + 1
+        for label in elsewhere:
+            widened = self._mode | {label}
+            gained = sum(
+                1
+                for slug, labels in index.pages.items()
+                if labels
+                and not visible(labels, self._mode)
+                and visible(labels, widened)
+                and self._grants.may_read(labels)
+                and slug not in self._alias_index()
+            )
+            if gained:
+                counts[label] = gained
         return counts
 
     def semantic_reindex_path(self, rel_path: str) -> ReindexResult | None:

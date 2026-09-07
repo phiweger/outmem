@@ -443,16 +443,20 @@ class TestOperatorOnlyPathsAreRefused:
             _dummy(p)
             for p in sig.parameters.values()
             if p.default is inspect.Parameter.empty
-            and p.kind
-            in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+            and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
         ]
+        kwargs = {
+            p.name: _dummy(p)
+            for p in sig.parameters.values()
+            if p.default is inspect.Parameter.empty and p.kind is p.KEYWORD_ONLY
+        }
         with pytest.raises(RestrictionError):
-            method(*args)
+            method(*args, **kwargs)
 
 
 def _dummy(param: inspect.Parameter) -> object:
     annotation = str(param.annotation)
-    if "Sequence" in annotation or "list" in annotation:
+    if any(t in annotation for t in ("Sequence", "list", "Iterable")):
         return []
     return "x"
 
@@ -488,12 +492,34 @@ class TestLabelIndexCaching:
         a.list_slugs()
         assert b._label_cache is a._label_cache is store._label_cache
 
-    def test_a_wiki_with_no_labels_pays_nothing(self, tmp_path: Path) -> None:
+    def test_a_wiki_with_no_labels_is_unaffected(self, tmp_path: Path) -> None:
+        """No content carries a label, so the index is empty and every
+        subset test passes. The saving for such a wiki is that nothing
+        ever takes a view, not that a view is free."""
         plain = WikiStore.init(tmp_path / "plain")
         plain.write_page("p", title="P", body="Text.\n")
         view = plain.as_viewer()
         assert view.list_slugs() == ["p"]
-        assert view._labels().head == ""  # the shared empty index
+        assert view.read("p")
+
+    def test_an_unrestricted_store_never_builds_the_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The zero-cost claim, made structural: every enforcement point
+        tests `_mode is None` first, so a wiki with no access control
+        does not reach the corpus walk at all."""
+        from outmem._store import labels as labels_mod
+
+        plain = WikiStore.init(tmp_path / "plain")
+        plain.write_page("p", title="P", body="Text.\n")
+        monkeypatch.setattr(
+            labels_mod, "build", lambda *a, **k: pytest.fail("index was built")
+        )
+        plain.list_slugs()
+        plain.read("p")
+        plain.search("Text")
+        plain.exists("p")
+        plain.write_page("q", title="Q", body="More.\n")
 
 
 class TestEveryPublicMethodIsClassified:
@@ -542,13 +568,6 @@ class TestEveryPublicMethodIsClassified:
         )
         stale = classified - self._public()
         assert not stale, f"classified but gone: {sorted(stale)}"
-
-    def test_operator_only_methods_actually_guard(self) -> None:
-        """Membership of the set is a claim; this is the check that the
-        claim is backed by a call."""
-        for name in _OPERATOR_ONLY:
-            source = inspect.getsource(getattr(WikiStore, name))
-            assert "_require_operator(" in source, name
 
     def test_no_content_members_really_return_no_content(
         self, hr_view: WikiStore, store: WikiStore

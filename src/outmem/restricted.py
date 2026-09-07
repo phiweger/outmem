@@ -281,25 +281,43 @@ def mode_dirname(mode: Iterable[str]) -> str:
     return MODE_SEPARATOR.join(sorted(mode))
 
 
-def mode_from_dirname(name: str) -> frozenset[str] | None:
+def mode_from_dirname(
+    name: str, declared: Iterable[str] | None = None
+) -> frozenset[str] | None:
     """Parse a ``log/`` subdirectory name back into a label set.
 
-    Returns ``None`` for a directory that is not a mode partition at all
-    (someone's ``log/archive/``), which the caller should treat as open
-    — it was not written by this mechanism. A name that *looks* like a
-    partition but holds an invalid label returns :data:`DENY_SET`,
-    because a directory whose audience cannot be determined must not be
-    shown to an audience.
+    Returns ``None`` for a directory that is not a mode partition —
+    somebody's ``log/archive/``, or a date-nested layout — which the
+    caller treats as open, because it was not written by this mechanism
+    and hiding it would break a wiki that never used compartments.
+
+    ``declared`` is what makes that distinction possible. Without it
+    ``archive`` and ``2024`` are perfectly good label names, so every
+    such directory became invisible to every viewer. A name is a
+    partition only if every part of it is a label this wiki actually
+    declares; a name that is *shaped* like a partition and holds a
+    label the wiki does not declare returns :data:`DENY_SET`, since a
+    directory whose audience cannot be determined must not be shown to
+    an audience.
     """
     if not name:
         return frozenset()
     parts = name.split(MODE_SEPARATOR)
-    if len(parts) == 1 and not _LABEL_RE.match(name):
-        return None
     try:
-        return normalise_labels(parts)
+        labels = normalise_labels(parts)
     except LabelError:
+        # Not label-shaped at all (`log/2024-archive backup/`).
+        return None
+    if declared is None:
+        return labels
+    known = frozenset(declared)
+    if labels <= known:
+        return labels
+    if MODE_SEPARATOR in name:
+        # `hr+nonsense` can only have been written by this mechanism,
+        # and we cannot tell who it was for.
         return DENY_SET
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +468,10 @@ class RestrictedSettings:
                 "`restricted.labels` in config.yaml first — an undeclared "
                 "label hides content from everyone, including you."
             )
+
+    def mode_from_log_dirname(self, name: str) -> frozenset[str] | None:
+        """:func:`mode_from_dirname`, against this wiki's declared set."""
+        return mode_from_dirname(name, self.labels)
 
     def resolve(self, labels: Iterable[str]) -> frozenset[str]:
         """Fail-closed label resolution for content read off disk.

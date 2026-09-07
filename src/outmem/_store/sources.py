@@ -238,6 +238,11 @@ def add_source(
         # privileged path.
         if labels and not labels <= existing.restricted:
             registry.set_restricted(rel_path, existing.restricted | labels)
+            # HEAD is the label index's validity token, and a local-tree
+            # ingest commits nothing — so re-ingesting with `--restricted`,
+            # the documented way to correct a mislabelled source, would
+            # land on disk and never reach a live view. Say so directly.
+            store._label_cache.invalidate()
             if commit and tree.tracked:
                 store._commit_paths(
                     [tree.repo_registry_relpath],
@@ -279,6 +284,8 @@ def add_source(
     # the returned copy so the caller's `citation_path` is right without
     # a second lookup.
     entry = replace(entry, local=not tree.tracked)
+    if labels:
+        store._label_cache.invalidate()
     record_source_refs(store, rel_path, tree)
     # A local ingest has nothing to commit: both the file and its
     # registry live inside the gitignored tree. Committing here would be

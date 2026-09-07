@@ -28,11 +28,13 @@ Three sources of labels for a page (spec §5.1), unioned:
 
 from __future__ import annotations
 
+import posixpath
 import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from outmem.restricted import DENY_SET, RestrictedSettings
+from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
 
 if TYPE_CHECKING:  # pragma: no cover
     from outmem.store import WikiStore
@@ -60,19 +62,63 @@ class LabelIndex:
     """slug → labels, for every page including aliases and unparseable ones."""
 
     sources: dict[str, frozenset[str]] = field(default_factory=dict)
-    """Source key → labels, keyed by BOTH the registry ``rel_path`` and the
-    tree-qualified ``citation_path``, because callers hold one or the other
-    and a miss would read as "open"."""
+    """Source labels, keyed by the bare registry ``rel_path``. Callers
+    name a source three different ways, so lookups normalise (see
+    :meth:`for_source`) rather than the map carrying every spelling."""
+
+    settings: RestrictedSettings = field(default_factory=RestrictedSettings)
+    """The config this index was built from, kept for lookups of names
+    that are not in it — see :meth:`for_page`."""
+
+    wiki_dir: str = "wiki"
 
     def for_page(self, slug: str) -> frozenset[str]:
-        """Labels for ``slug``. An unknown slug is open — it does not exist,
-        and inventing labels for it would make ``exists`` disagree with
-        ``read`` about a page that is simply absent."""
-        return self.pages.get(slug, frozenset())
+        """Labels for ``slug``, including path rules for names that are
+        not live pages.
+
+        ``pages`` is built from the ``.md`` files under ``wiki/pages/``,
+        so anything else in that tree — a ``.txt`` a search can still
+        reach, a slug named in ``AGENTS.md`` before the page exists —
+        was missing from it and read as open, right through a namespace
+        the config had restricted. The path rule is the safety net that
+        is supposed to cover exactly those cases, so it has to apply at
+        lookup as well as at build.
+        """
+        known = self.pages.get(slug)
+        if known is not None:
+            return known
+        return self.settings.labels_for_slug(slug)
 
     def for_source(self, key: str) -> frozenset[str]:
-        """Labels for a source, by registry key or citation path."""
-        return self.sources.get(key, frozenset())
+        """Labels for a source, under any spelling of its path.
+
+        ``resolve_source`` resolves a caller's string against the
+        *filesystem*, so ``sources/./x``, ``sources/../sources/x`` and
+        ``wiki/sources/x`` all reach the same file. A map of literal
+        keys cannot keep up with that, and a miss reads as open — which
+        made ``read_source("sources/./<rel>")`` return a restricted
+        file's bytes. Normalise the query instead of enumerating
+        spellings.
+        """
+        for candidate in self._source_keys(key):
+            found = self.sources.get(candidate)
+            if found is not None:
+                return found
+        return frozenset()
+
+    def _source_keys(self, key: str) -> list[str]:
+        """``key`` reduced toward the bare registry ``rel_path``."""
+        cleaned = posixpath.normpath(key.replace("\\", "/")).lstrip("/")
+        out = [cleaned]
+        for prefix in (
+            f"{self.wiki_dir}/{SOURCES_DIR}/",
+            f"{self.wiki_dir}/{SOURCES_LOCAL_DIR}/",
+            f"{SOURCES_DIR}/",
+            f"{SOURCES_LOCAL_DIR}/",
+        ):
+            if cleaned.startswith(prefix):
+                out.append(cleaned[len(prefix):])
+        return out
 
 
 #: An index for a wiki that declares no labels. Everything is open, and
@@ -89,8 +135,14 @@ def build(store: WikiStore, head: str | None = None) -> LabelIndex:
     """
     settings = store.restrictions
     sources = _source_labels(store, settings)
-    pages = _page_labels(store, settings, sources)
-    return LabelIndex(head=head, pages=pages, sources=sources)
+    index = LabelIndex(
+        head=head,
+        sources=sources,
+        settings=settings,
+        wiki_dir=store.config.wiki_dir,
+    )
+    index.pages.update(_page_labels(store, settings, index))
+    return index
 
 
 def _source_labels(
@@ -118,15 +170,21 @@ def _source_labels(
         # the second row overwrite the first would resolve an ambiguous
         # lookup to whichever tree happened to be walked last — a
         # coin-flip that fails open half the time.
+        # One key, the bare rel_path, unioned across trees: the same
+        # path can exist in both `sources/` and `sources-local/`, and
+        # letting the second row overwrite the first would resolve an
+        # ambiguous lookup to whichever tree was walked last — a
+        # coin-flip that fails open half the time. Every other spelling
+        # a caller might use is normalised down to this key by
+        # `LabelIndex.for_source`.
         out[entry.rel_path] = out.get(entry.rel_path, frozenset()) | labels
-        out[entry.citation_path] = labels
     return out
 
 
 def _page_labels(
     store: WikiStore,
     settings: RestrictedSettings,
-    sources: dict[str, frozenset[str]],
+    index: LabelIndex,
 ) -> dict[str, frozenset[str]]:
     from outmem.index import load_editorial_pages
     from outmem.lint import provenance_ref
@@ -146,18 +204,34 @@ def _page_labels(
             ref = provenance_ref(entry)
             if ref is None:
                 continue
-            labels |= sources.get(ref, frozenset())
+            # Through the index, not the raw map: a page may cite a
+            # source under any spelling, and a raw miss would leave the
+            # page open while printing the restricted source's filename.
+            labels |= index.for_source(ref)
         out[page.slug] = labels
 
     # Aliases inherit the labels of the page they resolve to; otherwise
     # `resolve_slug` would follow an alias straight past the filter.
+    live = {page.slug for page in pages}
     for page in pages:
         labels = out.get(page.slug, frozenset())
         if not labels:
             continue
         for alias in page.frontmatter.aliases:
-            # A live page always beats an alias claiming its name, so an
-            # alias must never *lower* a real page's labels.
+            # Only for a name no live page occupies. A live page always
+            # beats an alias claiming its name (`resolve_slug` checks the
+            # file first), so an alias must not change that page's labels
+            # in EITHER direction.
+            #
+            # Raising them is the dangerous one, and it was open: a
+            # session in mode {hr} could write an HR page whose
+            # `aliases:` named an open page, relabel that page to {hr}
+            # without touching it, and then legally edit it — a
+            # three-call write-down through a metadata field, ending
+            # with HR text in a file whose own frontmatter carries no
+            # label at all.
+            if alias in live:
+                continue
             out[alias] = out.get(alias, frozenset()) | labels
     return out
 
@@ -175,8 +249,20 @@ class LabelCache:
         self._lock = threading.Lock()
 
     def get(self, store: WikiStore) -> LabelIndex:
-        if not store.restrictions.enabled:
-            return EMPTY
+        # Deliberately NOT short-circuited on `restrictions.enabled`.
+        #
+        # Emptying or deleting the `restricted:` block would otherwise
+        # publish everything already labelled — one deleted line and the
+        # whole HR corpus is open to every view. Building the index
+        # anyway means an undeclared label collapses to DENY (the same
+        # rule `RestrictedSettings.resolve` applies to a typo), so
+        # withdrawing a declaration *hides* its content rather than
+        # releasing it, and the operator, who holds the bare store and
+        # is not filtered, can still see and fix it.
+        #
+        # The cost lands only on callers that took a view: every
+        # enforcement point tests `_mode is None` first, so a wiki with
+        # no access control never reaches this method at all.
         head = store.head()
         if head is None:
             # No commit to key on. Rebuilding every time is correct and

@@ -376,41 +376,62 @@ class TestRecordIngestion:
         assert store.get_source(entry.rel_path).ingestions
 
 
-class TestRenameCannotDeclassify:
-    def test_moving_out_of_a_restricted_namespace_is_refused(
-        self, tmp_path: Path
-    ) -> None:
-        """Under path rules `hr:x -> notes:x` is declassification through
-        an innocuous-looking tool: the page keeps its content, loses its
-        label, and nothing about the call says so."""
+class TestRenameAndRestrictAreOperatorOnly:
+    """Both write files the caller did not name, so neither is
+    label-checkable and neither belongs to a view.
+
+    ``rename_page`` rewrites inbound ``[[links]]`` across the corpus:
+    the targets come from the link graph rather than from the caller,
+    and the text that lands in them is the new slug, which the caller
+    chooses. That is a write-down with attacker-supplied content into
+    open pages, into other compartments, and into pages the session
+    cannot see — and there is no way to label-check a write whose
+    targets are discovered rather than named.
+
+    ``restrict_page --cascade`` picks its targets the same way, and its
+    refusal has to name the referrers, which are exactly the pages a
+    view might not be allowed to know about.
+    """
+
+    def test_rename_is_refused_to_a_view(self, tmp_path: Path) -> None:
         store = _wiki(tmp_path, paths={"hr:*": ["hr"]})
         store.write_page("hr:bands", title="Bands", body="Pay bands.\n")
         view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
-        with pytest.raises(RestrictionError, match="declassification"):
+        with pytest.raises(RestrictionError, match="operator-only"):
             view.rename_page("hr:bands", "notes:bands")
 
-    def test_the_declassify_grant_allows_it(self, tmp_path: Path) -> None:
-        store = _wiki(tmp_path, paths={"hr:*": ["hr"]})
-        store.write_page("hr:bands", title="Bands", body="Pay bands.\n")
+    def test_restrict_is_refused_to_a_view(self, store: WikiStore) -> None:
+        view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        with pytest.raises(RestrictionError, match="operator-only"):
+            view.restrict_page("hr:severance", labels=[])
+
+    def test_a_declassify_grant_does_not_buy_a_view_in(
+        self, store: WikiStore
+    ) -> None:
+        """The grant exists for an application that holds the bare store;
+        it is not a way to reach these paths through a view."""
         grants = Grants(
             read=frozenset({"hr"}),
             write=frozenset({"hr"}),
             declassify=frozenset({"hr"}),
         )
         view = store.as_viewer(mode={"hr"}, grants=grants)
-        view.rename_page("hr:bands", "notes:bands")
-        assert "notes:bands" in store.list_slugs()
+        with pytest.raises(RestrictionError, match="operator-only"):
+            view.restrict_page("hr:severance", labels=[])
 
-    def test_a_rename_within_the_compartment_is_fine(
-        self, tmp_path: Path
-    ) -> None:
+    def test_the_refusal_names_no_item(self, store: WikiStore) -> None:
+        view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        with pytest.raises(RestrictionError) as caught:
+            view.rename_page("hr:severance", "notes:x")
+        assert "severance" not in str(caught.value)
+
+    def test_the_operator_still_has_both(self, tmp_path: Path) -> None:
         store = _wiki(tmp_path, paths={"hr:*": ["hr"]})
         store.write_page("hr:bands", title="Bands", body="Pay bands.\n")
-        view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
-        view.rename_page("hr:bands", "hr:pay-bands")
+        store.rename_page("hr:bands", "hr:pay-bands")
         assert "hr:pay-bands" in store.list_slugs()
 
-    def test_declassify_is_not_in_any_model_facing_palette(
+    def test_neither_is_in_any_model_facing_palette(
         self, store: WikiStore
     ) -> None:
         from outmem.adapters.pydantic_ai import wiki_tools
@@ -419,6 +440,109 @@ class TestRenameCannotDeclassify:
         assert "rename_page" not in names
         assert "restrict_page" not in names
 
+
+class TestAliasesCannotCaptureAnotherPage:
+    """The three-call write-down that a metadata field opened.
+
+    An alias inherits the labels of the page it resolves to, so that
+    `resolve_slug` cannot follow one past the filter. Applying that to a
+    name a LIVE page already occupies inverted it: a session in mode
+    {hr} could write an HR page whose `aliases:` named an open page,
+    relabel that page to {hr} without touching it, and then legally edit
+    it — ending with HR text in a file whose own frontmatter carries no
+    label at all.
+
+    A live page always beats an alias claiming its name, so an alias
+    must not change that page's labels in either direction.
+    """
+
+    def test_an_alias_does_not_relabel_a_live_page(
+        self, store: WikiStore, hr: WikiStore
+    ) -> None:
+        hr.write_page(
+            "hr:note", title="N", body="x\n", extra={"aliases": ["glossary"]}
+        )
+        assert store._labels().for_page("glossary") == frozenset()
+
+    def test_and_the_capture_does_not_open_the_page_to_editing(
+        self, hr: WikiStore
+    ) -> None:
+        hr.write_page(
+            "hr:note", title="N", body="x\n", extra={"aliases": ["glossary"]}
+        )
+        with pytest.raises(RestrictionError):
+            hr.extend_page("glossary", body="Twelve weeks of severance.\n")
+
+    def test_the_open_page_stays_visible_to_open_sessions(
+        self, store: WikiStore, hr: WikiStore
+    ) -> None:
+        hr.write_page(
+            "hr:note", title="N", body="x\n", extra={"aliases": ["glossary"]}
+        )
+        assert "glossary" in store.as_viewer().list_slugs()
+
+    def test_an_alias_on_a_free_name_still_inherits(
+        self, store: WikiStore, hr: WikiStore
+    ) -> None:
+        """The behaviour the rule exists for is unchanged: an alias no
+        live page occupies must not resolve past the filter."""
+        hr.write_page(
+            "hr:pay", title="Pay", body="Bands.\n", extra={"aliases": ["old-pay"]}
+        )
+        assert store.as_viewer().resolve_slug("old-pay") == "old-pay"
+        assert hr.resolve_slug("old-pay") == "hr:pay"
+
+
+class TestSourceKeysAreCheckedInEverySpelling:
+    """``resolve_source`` accepts a bare rel_path, a tree-qualified one,
+    and a repo-relative one. The label index knew only two, and a miss
+    reads as open — so the third spelling returned a restricted file's
+    bytes."""
+
+    @pytest.fixture
+    def source(self, store: WikiStore, tmp_path: Path):  # type: ignore[no-untyped-def]
+        doc = tmp_path / "severance-plan-2026.md"
+        doc.write_text("Enhanced severance is 1.5 weeks per year.\n")
+        return store.add_source(doc, restricted=["hr"])
+
+    def _spellings(self, store: WikiStore, entry) -> list[str]:  # type: ignore[no-untyped-def]
+        return [
+            entry.rel_path,
+            entry.citation_path,
+            f"{store.config.wiki_dir}/{entry.citation_path}",
+        ]
+
+    def test_read_source_refuses_every_spelling(
+        self, store: WikiStore, source
+    ) -> None:
+        view = store.as_viewer()
+        for key in self._spellings(store, source):
+            with pytest.raises(OutmemError, match="no such source"):
+                view.read_source(key)
+
+    def test_get_source_returns_none_for_every_spelling(
+        self, store: WikiStore, source
+    ) -> None:
+        view = store.as_viewer()
+        for key in self._spellings(store, source):
+            assert view.get_source(key) is None, key
+
+    def test_record_ingestion_is_refused_for_every_spelling(
+        self, store: WikiStore, source
+    ) -> None:
+        """The write half of the same hole: an open session could land
+        agent-written free text in a restricted source's registry row."""
+        view = store.as_viewer(grants=Grants.writer("hr"))
+        for key in self._spellings(store, source):
+            with pytest.raises(RestrictionError):
+                view.record_ingestion(key, prompt="x", pages_touched=[])
+
+    def test_the_cleared_mode_reads_it_by_every_spelling(
+        self, store: WikiStore, source
+    ) -> None:
+        view = store.as_viewer(mode={"hr"}, grants=Grants.reader("hr"))
+        for key in self._spellings(store, source):
+            assert "1.5 weeks" in view.read_source(key), key
 
 class TestRestrictPage:
     def test_it_labels_the_page(self, store: WikiStore) -> None:
@@ -453,13 +577,6 @@ class TestRestrictPage:
     def test_an_undeclared_label_is_refused(self, store: WikiStore) -> None:
         with pytest.raises(LabelError, match="unknown restriction"):
             store.restrict_page("glossary", labels=["nope"])
-
-    def test_removing_a_label_needs_the_declassify_grant(
-        self, store: WikiStore
-    ) -> None:
-        view = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
-        with pytest.raises(RestrictionError, match="declassify grant"):
-            view.restrict_page("hr:severance", labels=[])
 
     def test_the_operator_may_declassify(self, store: WikiStore) -> None:
         """The bare store holds no mode, so the server-side operator's

@@ -173,70 +173,175 @@ class TestRetrieverCacheIsKeyedOnHead:
 
 
 class TestCompartmentHint:
-    """Counts only, per label, grant-gated. This is what makes the
-    opt-in default workable: without it a cleared user asking about
-    parental leave gets nothing and never learns to switch."""
+    """Counts only, per label, grant-gated — and independent of the
+    question. This is what makes the opt-in default workable: without it
+    a cleared user asking about parental leave gets nothing and never
+    learns to switch."""
 
-    def test_a_holder_in_the_open_mode_is_told_a_count(
+    def test_a_holder_in_the_open_mode_is_told_what_they_could_reach(
         self, store: WikiStore
     ) -> None:
         view = store.as_viewer(grants=Grants.reader("hr"))
-        assert view.compartment_hint("parental leave") == {"hr": 1}
+        assert view.compartment_hint() == {"hr": 1}
 
     def test_a_user_without_the_grant_is_told_nothing(
         self, store: WikiStore
     ) -> None:
-        assert store.as_viewer().compartment_hint("parental leave") == {}
+        assert store.as_viewer().compartment_hint() == {}
 
     def test_only_labels_the_user_holds_are_named(self, store: WikiStore) -> None:
-        """An aggregate "N more results" would leak the existence of
-        compartments the user does not hold."""
-        view = store.as_viewer(grants=Grants.reader("hr"))
-        counts = view.compartment_hint("parental leave")
+        """An aggregate count would leak the existence of compartments the
+        user does not hold."""
+        counts = store.as_viewer(grants=Grants.reader("hr")).compartment_hint()
         assert "legal" not in counts
 
     def test_a_multi_label_item_the_user_cannot_fully_hold_is_not_counted(
         self, store: WikiStore
     ) -> None:
-        """No mode this user could choose would show it, so its
-        existence is not theirs to learn."""
+        """No mode this user could choose would show it, so its existence
+        is not theirs to learn."""
         store.write_page(
             "joint:case",
             title="Case",
-            body="A parental leave dispute.\n",
+            body="A dispute.\n",
             extra={"restricted": ["hr", "legal"]},
         )
         view = store.as_viewer(grants=Grants.reader("hr"))
-        assert view.compartment_hint("parental leave") == {"hr": 1}
+        assert view.compartment_hint() == {"hr": 1}
 
     def test_nothing_is_offered_once_already_in_the_compartment(
         self, store: WikiStore
     ) -> None:
         view = store.as_viewer(mode={"hr"}, grants=Grants.reader("hr"))
-        assert view.compartment_hint("parental leave") == {}
+        assert view.compartment_hint() == {}
+
+    def test_an_empty_compartment_is_not_advertised(
+        self, tmp_path: Path
+    ) -> None:
+        store = _wiki(tmp_path)
+        store.restrict_page("hr:parental-leave", labels=[])
+        view = store.as_viewer(grants=Grants.reader("hr"))
+        assert "hr" not in view.compartment_hint()
 
     def test_the_bare_store_offers_no_hint(self, store: WikiStore) -> None:
-        assert store.compartment_hint("parental leave") == {}
+        assert store.compartment_hint() == {}
 
-    def test_the_rendered_note_carries_no_slug_or_title(
+
+class TestTheHintIsNotAContentOracle:
+    """The sharpest failure mode this feature has, and the reason the
+    hint takes no query at all.
+
+    The obvious implementation counts the items that matched *this
+    question* and fell outside the mode. The model writes the question,
+    so asking "twelve" and then "eleven" and comparing the two counts
+    reads a fact out of a restricted page without ever retrieving it —
+    and the model could then commit that fact to an open page. Relying
+    on the model not to try is exactly what the design forbids.
+    """
+
+    def test_the_method_takes_no_question(self, store: WikiStore) -> None:
+        """Structural, not behavioural: there is no argument to probe
+        with. A future refactor that reintroduces one fails here."""
+        import inspect
+
+        params = inspect.signature(WikiStore.compartment_hint).parameters
+        assert list(params) == ["self"]
+
+    def test_the_answer_does_not_vary_with_the_query(
+        self, store: WikiStore
+    ) -> None:
+        """`hr:parental-leave` says "26 weeks at full pay". A
+        query-sensitive hint would answer differently for a term the page
+        contains than for one it does not."""
+        view = store.as_viewer(grants=Grants.reader("hr"))
+        tool = _tool(view, "search_wiki")
+        hit = tool(question="26 weeks full pay parental leave")
+        miss = tool(question="31 weeks half pay parental leave")
+        assert _note(hit) == _note(miss)
+
+    def test_and_not_with_a_term_present_only_in_restricted_text(
         self, store: WikiStore
     ) -> None:
         view = store.as_viewer(grants=Grants.reader("hr"))
-        out = _tool(view, "search_wiki")(question="parental leave")
-        assert "1 in hr" in out
-        assert "parental-leave" not in out
-        assert "26 weeks" not in out
+        tool = _tool(view, "search_wiki")
+        assert _note(tool(question="parental")) == _note(
+            tool(question="zzzznonexistent")
+        )
 
-    def test_it_appears_on_the_empty_result_too(self, store: WikiStore) -> None:
+
+def _note(output: str) -> str:
+    """The compartment note from a search_wiki result, or ""."""
+    for line in output.splitlines():
+        if line.startswith("(this session is scoped"):
+            return line
+    return ""
+
+
+class TestTheHintIsRendered:
+    def test_it_appears_on_an_empty_result(self, store: WikiStore) -> None:
         """The case it exists for: an empty answer is exactly when a
         cleared user needs telling the material is elsewhere."""
         view = store.as_viewer(grants=Grants.reader("hr"))
-        out = _tool(view, "search_wiki")(question="parental leave")
-        assert "outside this session's scope" in out
+        out = _tool(view, "search_wiki")(question="zzzznonexistent")
+        assert "you also have access to: hr" in out
 
-    def test_an_uncleared_user_sees_no_note_at_all(self, store: WikiStore) -> None:
-        out = _tool(store.as_viewer(), "search_wiki")(question="parental leave")
-        assert "outside this session's scope" not in out
+    def test_it_carries_no_slug_title_or_excerpt(
+        self, store: WikiStore
+    ) -> None:
+        view = store.as_viewer(grants=Grants.reader("hr"))
+        out = _tool(view, "search_wiki")(question="zzzznonexistent")
+        assert "parental-leave" not in out
+        assert "26 weeks" not in out
+
+    def test_an_uncleared_user_sees_no_note_at_all(
+        self, store: WikiStore
+    ) -> None:
+        out = _tool(store.as_viewer(), "search_wiki")(question="zzzznonexistent")
+        assert "you also have access to" not in out
+
+    def test_a_nonempty_result_is_not_cluttered_with_it(
+        self, store: WikiStore
+    ) -> None:
+        """Attaching it to every search would be noise on the common
+        path; the empty result is where it changes what the user does."""
+        view = store.as_viewer(grants=Grants.reader("hr"))
+        out = _tool(view, "search_wiki")(question="cycle to work")
+        assert "benefits:cycling" in out
+        assert "you also have access to" not in out
+
+
+class TestARefusedSlugIsNeverEchoed:
+    def test_a_hidden_slug_from_the_retriever_is_dropped(
+        self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-open by construction otherwise: any retriever that
+        surfaces a hidden slug — a stale index, a cache built before the
+        page was restricted — turns into a disclosure of the slug
+        itself. The read is refused, so the row must go too."""
+        from outmem.optimize.blocks import RetrievalResult
+
+        view = store.as_viewer()
+        monkeypatch.setattr(
+            "outmem.optimize.blocks.BM25Retriever.retrieve",
+            lambda self, question, *, k: RetrievalResult(
+                ("hr:parental-leave", "benefits:cycling")
+            ),
+        )
+        out = _tool(view, "search_wiki")(question="anything")
+        assert "hr:parental-leave" not in out
+        assert "benefits:cycling" in out
+
+    def test_an_all_hidden_result_reads_as_no_match(
+        self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from outmem.optimize.blocks import RetrievalResult
+
+        view = store.as_viewer()
+        monkeypatch.setattr(
+            "outmem.optimize.blocks.BM25Retriever.retrieve",
+            lambda self, question, *, k: RetrievalResult(("hr:parental-leave",)),
+        )
+        assert "no pages matched" in _tool(view, "search_wiki")(question="x")
 
 
 class TestPaletteReduction:

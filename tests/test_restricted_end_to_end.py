@@ -201,10 +201,16 @@ class TestTheClearedEmployeeInAnOpenSession:
         with pytest.raises(OutmemError):
             view.read("hr:severance")
 
-    def test_but_they_are_told_a_count(self, view: WikiStore) -> None:
-        out = _tools(view)["search_wiki"](question="severance")  # type: ignore[operator]
-        assert "1 in hr" in out
+    def test_but_they_are_told_the_compartment_is_there(
+        self, view: WikiStore
+    ) -> None:
+        """A count of what the compartment holds, not of what this
+        question matched — the count is the same for every question, so
+        it carries no bits about any of them."""
+        out = _tools(view)["search_wiki"](question="zzzznonexistent")  # type: ignore[operator]
+        assert "you also have access to: hr" in out
         assert "hr:severance" not in out
+        assert "1.5 weeks" not in out
 
     def test_and_cannot_write_the_restricted_page_from_here(
         self, view: WikiStore
@@ -387,16 +393,58 @@ class TestTheOperatorRetainsFullControl:
             company.restrict_page("benefits:cycling", labels=["hr"])
 
 
-def test_turning_restrictions_off_restores_the_previous_behaviour(
+def test_deleting_the_config_block_hides_labelled_content_rather_than_publishing_it(
     company: WikiStore,
 ) -> None:
-    """The rollout guarantee in reverse: the labels are inert data, so a
-    wiki that stops declaring them is an ordinary wiki again rather than
-    one with unreachable content."""
+    """The single most dangerous edit anyone can make to this feature.
+
+    Removing the `restricted:` block looks like "turn it off", and the
+    obvious implementation — skip the label index when nothing is
+    declared — makes one deleted line publish the whole HR corpus to
+    every view. The safe reading is the one an undeclared label already
+    gets: a label nobody declares is a label nobody can hold, so its
+    content is hidden rather than released.
+
+    The operator is unaffected, which is what makes this recoverable:
+    they hold the bare store, they can still read the page, and they can
+    put the declaration back.
+    """
     raw = yaml.safe_load((company.root / "config.yaml").read_text())
     del raw["restricted"]
     (company.root / "config.yaml").write_text(yaml.safe_dump(raw))
     company.close()
 
     plain = WikiStore.open(company.root)
-    assert "hr:severance" in plain.as_viewer().list_slugs()
+    assert "hr:severance" not in plain.as_viewer().list_slugs()
+    assert "hr:severance" in plain.list_slugs()  # the operator still sees it
+
+
+def test_withdrawing_one_label_hides_only_that_compartment(
+    company: WikiStore,
+) -> None:
+    """Rules naming the withdrawn label have to go too — the config
+    refuses to open otherwise, which is the loud half of the same
+    protection."""
+    raw = yaml.safe_load((company.root / "config.yaml").read_text())
+    raw["restricted"] = {"labels": ["legal"]}
+    (company.root / "config.yaml").write_text(yaml.safe_dump(raw))
+    company.close()
+
+    plain = WikiStore.open(company.root)
+    visible = plain.as_viewer().list_slugs()
+    assert "hr:severance" not in visible
+    assert "glossary" in visible
+
+
+def test_an_orphaned_path_rule_refuses_to_open(company: WikiStore) -> None:
+    """Withdrawing a label while a rule still assigns it would restrict a
+    whole namespace to a compartment nobody can hold. Loud, not silent."""
+    from outmem.restricted import LabelError
+
+    raw = yaml.safe_load((company.root / "config.yaml").read_text())
+    raw["restricted"]["labels"] = ["legal"]  # rule "hr:*" still names hr
+    (company.root / "config.yaml").write_text(yaml.safe_dump(raw))
+    company.close()
+
+    with pytest.raises(LabelError, match="unknown restriction"):
+        WikiStore.open(company.root)
