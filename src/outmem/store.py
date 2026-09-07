@@ -312,8 +312,15 @@ def _config_from_yaml(
 # outright, or nothing to do.
 # ---------------------------------------------------------------------------
 
+# How far semantic retrieval widens its fetch when filtering has left it
+# short of k, and where it stops. The ceiling exists so a query whose
+# whole neighbourhood is restricted cannot walk the entire index.
+_OVERFETCH_FACTOR = 4
+_OVERFETCH_CEILING = 200
+
 _VISIBILITY_ENFORCED = frozenset({
     "backlinks",
+    "compartment_hint",
     "exists",
     "get_source",
     "index_tree",
@@ -2246,17 +2253,101 @@ class WikiStore:
         away: ``.vectors.db`` holds restricted chunk text verbatim and
         is as sensitive as the most restricted item in it.
         """
-        matches = _semantic.find_similar(
-            self,
-            text,
-            top_k=top_k,
-            threshold=threshold,
-            exclude_slug=exclude_slug,
-        )
         if not self.enforces_visibility:
-            return matches
+            return _semantic.find_similar(
+                self,
+                text,
+                top_k=top_k,
+                threshold=threshold,
+                exclude_slug=exclude_slug,
+            )
+        # Over-fetch rather than filter a fixed top-k. Trimming after the
+        # cut makes the result *count* an existence oracle: eight matches
+        # for a cleared user and three for an uncleared one says five
+        # restricted items sit near that topic. Widen the fetch until k
+        # visible rows are found or the ceiling is hit, so the count
+        # depends on the corpus rather than on the viewer.
+        wanted = top_k if top_k is not None else self.config.outmem.semantic.top_k
         index = self._labels()
-        return [m for m in matches if self._repo_path_visible(m.rel_path, index)]
+        fetch = wanted
+        seen: list[Match] = []
+        while True:
+            matches = _semantic.find_similar(
+                self,
+                text,
+                top_k=fetch,
+                threshold=threshold,
+                exclude_slug=exclude_slug,
+            )
+            seen = [m for m in matches if self._repo_path_visible(m.rel_path, index)]
+            if (
+                len(seen) >= wanted
+                or len(matches) < fetch  # the index is exhausted
+                or fetch >= _OVERFETCH_CEILING
+            ):
+                return seen[:wanted]
+            fetch = min(fetch * _OVERFETCH_FACTOR, _OVERFETCH_CEILING)
+
+    def compartment_hint(self, question: str) -> dict[str, int]:
+        """``label -> count`` of matches that fall outside this session's mode.
+
+        The deliberate disclosure, and the thing that makes an opt-in
+        default workable. Hiding (§1) is a property of **grants**, not of
+        mode: for a user who does not hold ``hr``, HR content must be
+        undetectable, but for one who *does* hold it and is simply
+        running in mode ``∅``, saying "4 more results in hr" discloses
+        nothing they are not already entitled to see. Without it a
+        cleared user asking about parental leave gets nothing and never
+        learns to switch compartment.
+
+        Counts only, never titles, slugs or excerpts. Broken down per
+        label and restricted to labels the user holds — an aggregate "N
+        more results" would leak the existence of compartments they do
+        not hold. An item whose labels are not *wholly* within the
+        user's grants is not counted at all, because no mode they could
+        choose would show it to them.
+
+        Empty for a bare store, for a user with no grants beyond the
+        current mode, and whenever nothing matched outside it.
+        """
+        if self._mode is None:
+            return {}
+        elsewhere = self._grants.read - self._mode
+        if not elsewhere:
+            return {}
+        from outmem.optimize.blocks import _keywords
+        from outmem.slug import relpath_to_slug
+
+        pattern = _keywords(question)
+        if not pattern:
+            return {}
+        try:
+            # The unfiltered primitive on purpose: the hint is about what
+            # the filter removed, so it cannot be computed from the
+            # filtered result. Nothing but counts leaves this method.
+            raw = search(
+                pattern,
+                root=self.pages_path,
+                paths=None,
+                case_insensitive=self.config.outmem.retrieval.case_insensitive,
+            )
+        except OutmemError:
+            return {}
+        index = self._labels()
+        counts: dict[str, int] = {}
+        for slug in {
+            relpath_to_slug(Path(hit.path)) for hit in raw.hits if hit.is_match
+        }:
+            labels = index.for_page(slug)
+            if visible(labels, self._mode):
+                continue
+            if not self._grants.may_read(labels):
+                # No mode this user could choose would show it, so its
+                # existence is not theirs to learn.
+                continue
+            for label in labels - self._mode:
+                counts[label] = counts.get(label, 0) + 1
+        return counts
 
     def semantic_reindex_path(self, rel_path: str) -> ReindexResult | None:
         """Reindex a single file by repo-relative path.

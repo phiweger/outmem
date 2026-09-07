@@ -88,12 +88,31 @@ def _summarise(value: Any, *, limit: int = 60) -> str:
     return repr(value)
 
 
+# Tool arguments that carry page or source text rather than a reference
+# to it. Redacted from the structured log payload: `_log_call` attaches
+# its kwargs to every LogRecord, and Logfire is a handler, so an
+# unredacted `body` exports restricted page text to an observability
+# backend outside the deployment. The formatted message already
+# summarises long strings as "(N chars)"; this closes the structured
+# half, which was verbatim.
+_CONTENT_ARGS = frozenset({"body", "text", "note", "prompt"})
+
+
+def _redacted(kwargs: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: (f"({len(value)} chars, redacted)" if isinstance(value, str) else value)
+        if key in _CONTENT_ARGS
+        else value
+        for key, value in kwargs.items()
+    }
+
+
 def _log_call(name: str, **kwargs: Any) -> None:
     formatted = " ".join(f"{k}={_summarise(v)}" for k, v in kwargs.items())
-    # ``tool_call`` carries the raw kwargs so logging handlers can do
+    # ``tool_call`` carries the kwargs so logging handlers can do
     # structured analysis (e.g. eval recorders) without having to parse
     # the formatted string. Stays on the LogRecord as ``record.tool_call``.
-    _tool_log.info("%s %s", name, formatted, extra={"tool_call": (name, dict(kwargs))})
+    _tool_log.info("%s %s", name, formatted, extra={"tool_call": (name, _redacted(kwargs))})
 
 
 def _log_error(name: str, exc: Exception) -> None:
@@ -106,6 +125,24 @@ def _log_error(name: str, exc: Exception) -> None:
 
 
 log = logging.getLogger(__name__)
+
+
+def _compartment_note(store: WikiStore, question: str) -> str:
+    """Render the grant-gated compartment hint, or "" when there is none.
+
+    Counts only, per label, and only for labels the viewer holds. This
+    is what makes the opt-in default workable: a cleared user asking
+    about parental leave from an open session would otherwise get
+    nothing and never learn to switch compartment.
+    """
+    counts = store.compartment_hint(question)
+    if not counts:
+        return ""
+    parts = ", ".join(f"{n} in {label}" for label, n in sorted(counts.items()))
+    return (
+        f"\n(also matched, outside this session's scope: {parts}. "
+        "Ask the user to start a session in that compartment.)"
+    )
 
 
 def _hit_leading(path: str, scope: str) -> str:
@@ -667,7 +704,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
     # difference between O(turns·N) and O(N) page reads. Keyed by strategy
     # so a mid-session config.yaml retrieval save (which updates
     # store.config) transparently rebuilds.
-    _retriever_cache: dict[str, Any] = {}
+    _retriever_cache: dict[tuple[str, str | None], Any] = {}
     _retriever_lock = threading.Lock()
 
     def search_wiki(question: str, k: int = 5) -> str:
@@ -718,14 +755,22 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             # the same strategy don't both pay the O(N) candidate-net build
             # (and orphan one retriever). retrieve() runs outside the lock —
             # only the cache miss is serialized.
+            #
+            # Keyed on HEAD as well as strategy. BM25 snapshots every
+            # page body at construction, so a retriever built before a
+            # page was restricted would keep answering from the text it
+            # had — a cache that fails open. HEAD moves on every outmem
+            # write, which is exactly the invalidation signal.
+            cache_key = (effective, store.head())
             with _retriever_lock:
-                retriever = _retriever_cache.get(effective)
+                retriever = _retriever_cache.get(cache_key)
                 if retriever is None:
                     settings = store.config.outmem.retrieval
                     if effective != configured:
                         settings = replace(settings, strategy=effective)
                     retriever = build_retriever_from_settings(store, settings)
-                    _retriever_cache[effective] = retriever
+                    _retriever_cache.clear()  # one generation at a time
+                    _retriever_cache[cache_key] = retriever
             result = retriever.retrieve(question, k=k)
         except (OutmemError, ImportError) as exc:
             # Expected, recoverable failures: a semantic strategy with no
@@ -739,13 +784,16 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         # with the retriever's own per-query diagnostic — the agent sees
         # both reasons it wasn't run with the configured pipeline.
         notes = [n for n in (fallback_note, result.note) if n]
+        hint = _compartment_note(store, question)
         if not result.slugs:
             # Carry diagnostics onto the no-match path too, so the agent
-            # learns *why* it got nothing.
+            # learns *why* it got nothing. The compartment hint matters
+            # most here: an empty answer is exactly when a cleared user
+            # needs to be told the material is in another compartment.
             suffix = f" ({'; '.join(notes)})" if notes else ""
             return (
                 "(no pages matched — try rephrasing or `grep_wiki` "
-                f"for literal keyword matches){suffix}"
+                f"for literal keyword matches){suffix}{hint}"
             )
         lines: list[str] = []
         for slug in result.slugs:
@@ -757,7 +805,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             lines.append(f"  - [[{slug}]] {preview}")
         if notes:
             lines.append(f"(diagnostics: {'; '.join(notes)})")
-        return "\n".join(lines)
+        return "\n".join(lines) + hint
 
     tools: list[WikiTool] = [
         search_wiki,
@@ -766,11 +814,17 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         list_pages,
         search_index,
         find_backlinks,
-        page_history,
-        topic_evolution,
         list_sources,
         read_source,
     ]
+    # The history pair is served only when nothing is being filtered.
+    # Both are answered by git, which knows nothing about restriction
+    # labels, and `topic_evolution` returns raw diff *bodies* — a page
+    # restricted today would hand over the text it had while it was
+    # open. The store refuses them to a view anyway; not exposing them
+    # is the half that costs nothing and cannot regress.
+    if not store.enforces_visibility:
+        tools += [page_history, topic_evolution]
     # find_similar is only exposed when the semantic index is enabled,
     # so the model isn't tempted to call a tool that always returns
     # "unavailable".
@@ -1185,7 +1239,7 @@ _CONSULT_MODEL_SETTINGS: dict[str, Any] = {
 
 
 def build_consult_wiki(
-    wiki_path: str | Path,
+    wiki_path: str | Path | WikiStore,
     *,
     model: Any = "anthropic:claude-sonnet-5",
 ) -> Callable[[str], str]:
@@ -1242,7 +1296,13 @@ def build_consult_wiki(
 
     Args:
         wiki_path: Path to a curated wiki directory (must already
-            exist; use ``outmem init`` to scaffold one).
+            exist; use ``outmem init`` to scaffold one), or an
+            already-open :class:`~outmem.store.WikiStore`. Pass a store
+            when access control is in play: hand it
+            ``store.as_viewer(mode=…, grants=…)`` and the inner agent
+            sees only what that viewer may see. Passing a path opens the
+            whole wiki, which is the right default only for a wiki with
+            no restricted content.
         model: Anything :class:`pydantic_ai.Agent` accepts — a model ID
             string (``"anthropic:claude-sonnet-5"``), a
             :class:`~pydantic_ai.models.Model` instance, or
@@ -1251,7 +1311,14 @@ def build_consult_wiki(
     """
     from pydantic_ai import Agent
 
-    store = WikiStore.open(wiki_path, read_only=True)
+    # An already-open store (typically a view from ``as_viewer``) is
+    # used as given. Opening a fresh one from a path would discard the
+    # caller's mode and grants and serve the whole wiki — a complete
+    # bypass reached by passing the obvious argument.
+    if isinstance(wiki_path, WikiStore):
+        store = wiki_path
+    else:
+        store = WikiStore.open(wiki_path, read_only=True)
     # Library entry point: honour `logfire.enabled` from config.yaml the
     # same way the CLI's `_open_store` does. Idempotent process-wide.
     from outmem._logfire import setup as _setup_logfire
