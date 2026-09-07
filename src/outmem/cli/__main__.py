@@ -881,12 +881,15 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             as_key=args.as_key,
             local=args.local,
             commit=True,
+            restricted=args.restricted,
         )
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 1
     where = "wiki/sources-local (not tracked)" if args.local else "wiki/sources"
     _status(f"registered {entry.rel_path} in {where} (sha256: {entry.sha256[:12]}…)")
+    if entry.restricted:
+        _status(f"restricted to: {', '.join(sorted(entry.restricted))}")
     _report_source_refs(store, entry.rel_path)
 
     if args.register_only:
@@ -1610,6 +1613,17 @@ def build_parser() -> argparse.ArgumentParser:
         "supersedes this one instead of landing as an unrelated source, "
         "which is what lets `outmem stale` find the pages compacted from "
         "the old version. Derived from the path when unambiguous.",
+    )
+    p_ingest.add_argument(
+        "--restricted",
+        action="append",
+        default=None,
+        metavar="LABEL",
+        help="Restriction label for this source; repeat for several. Only "
+        "users holding the label can retrieve it, and every page compiled "
+        "from it inherits the label. Must be declared under "
+        "`restricted.labels` in config.yaml. Orthogonal to --local: that "
+        "is about redistribution rights, this is about secrecy.",
     )
     p_ingest.add_argument(
         "--prompt",

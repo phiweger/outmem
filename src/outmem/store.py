@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -100,6 +100,7 @@ from outmem.index import (
     index_page_text,
     navigate_index,
 )
+from outmem.restricted import RestrictedSettings
 from outmem.search import DEFAULT_RESULT_BYTES, SearchResult, rg_available, search
 from outmem.slug import PAGES_DIR, relpath_to_slug, slug_to_relpath, validate_slug
 from outmem.sources import (
@@ -1261,6 +1262,7 @@ class WikiStore:
         as_key: str | None = None,
         local: bool = False,
         commit: bool = True,
+        restricted: Iterable[str] | None = None,
     ) -> SourceEntry:
         """Copy a source file into a source tree and register it.
 
@@ -1293,6 +1295,15 @@ class WikiStore:
         document, same filename" are indistinguishable from the path
         alone, and guessing wrong writes a supersession edge that would
         later drive a recheck of one document against another.
+
+        ``restricted`` labels the source (see
+        :mod:`outmem.restricted`). Ingest is the right moment for the
+        decision because it is the one point where a person is holding
+        the document; every page later compiled from it inherits these
+        labels automatically, so restricting here restricts the whole
+        downstream. Labels from matching ``restricted.sources`` path
+        rules are unioned in. Orthogonal to ``local``, which is about
+        redistribution rights rather than secrecy.
         """
         return _sources.add_source(
             self,
@@ -1302,6 +1313,7 @@ class WikiStore:
             as_key=as_key,
             local=local,
             commit=commit,
+            restricted=restricted,
         )
 
     def source_citations(
@@ -1683,6 +1695,16 @@ class WikiStore:
     # ------------------------------------------------------------------
     # Semantic index — implementations live in :mod:`outmem._store.semantic`
     # ------------------------------------------------------------------
+
+    @property
+    def restrictions(self) -> RestrictedSettings:
+        """The wiki's ``restricted:`` config block.
+
+        A shorthand for ``config.outmem.restricted`` — consulted from
+        enough places that the long form buries the interesting part of
+        every call site.
+        """
+        return self.config.outmem.restricted
 
     def semantic_available(self) -> bool:
         """Whether this wiki's semantic index has been built (its db

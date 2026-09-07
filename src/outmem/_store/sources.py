@@ -8,13 +8,14 @@ methods, which forward here.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from outmem.exceptions import OutmemError
+from outmem.restricted import normalise_labels
 from outmem.slug import extract_slug_references
 from outmem.sources import (
     REGISTRY_FILENAME,
@@ -173,6 +174,26 @@ def _ambiguous_identity_error(
     return OutmemError("\n".join(lines))
 
 
+def _ingest_labels(
+    store: WikiStore, rel_path: str, explicit: Iterable[str] | None
+) -> frozenset[str]:
+    """Labels for a source being ingested: explicit ``--restricted`` plus
+    whatever ``restricted.sources`` path rules match, unioned.
+
+    The union is the fail-safe direction, and it is why the path rule is
+    worth having at all: an operator who drops a file into ``hr/`` and
+    forgets the flag still gets a restricted source. Explicit labels are
+    validated against the declared set here — this is a person choosing a
+    label with the document in front of them, which is the moment a typo
+    is cheap to fix.
+    """
+    settings = store.restrictions
+    chosen = normalise_labels(explicit)
+    if chosen:
+        settings.check_declared(chosen)
+    return chosen | settings.labels_for_source(rel_path)
+
+
 def add_source(
     store: WikiStore,
     source: str | Path,
@@ -182,6 +203,7 @@ def add_source(
     as_key: str | None = None,
     local: bool = False,
     commit: bool = True,
+    restricted: Iterable[str] | None = None,
 ) -> SourceEntry:
     source_path = Path(source).expanduser()
     if local:
@@ -200,6 +222,7 @@ def add_source(
     # relative/absolute mix makes `distinguishing_segment` diverge at the
     # root and propose a name that distinguishes nothing.
     origin = str(source_path.resolve())
+    labels = _ingest_labels(store, rel_path, restricted)
 
     existing = registry.entries.get(rel_path)
     if existing and existing.sha256 == sha:
@@ -207,6 +230,19 @@ def add_source(
         # explicit `--as` still has to land, because "re-ingest with
         # `--as <name>`" is exactly what `sources backfill` tells the
         # operator to do about an ambiguous group.
+        #
+        # Labels land here too, for the same reason: re-ingesting the
+        # same bytes with `--restricted hr` is how an operator corrects a
+        # source they should have labelled the first time. Widening only
+        # — `set_restricted` refuses to drop a label without the
+        # privileged path.
+        if labels and not labels <= existing.restricted:
+            registry.set_restricted(rel_path, existing.restricted | labels)
+            if commit and tree.tracked:
+                store._commit_paths(
+                    [tree.repo_registry_relpath],
+                    subject=f"restrict: {rel_path}",
+                )
         if as_key is None:
             return replace(existing, local=not tree.tracked)
         return replace(
@@ -232,6 +268,7 @@ def add_source(
             # A *derived* key that is already taken is unresolvable; a
             # declared one means "supersede that".
             derived_key=as_key is None,
+            restricted=labels,
         )
     except DocumentKeyConflict as conflict:
         _unlink_orphan(dest, tree.path)

@@ -25,7 +25,8 @@ Registry format
         document_key  TEXT,   -- which document this file is a version of
         superseded_by TEXT,   -- rel_path of the version that replaced it
         origin_path   TEXT,   -- where it was ingested from
-        refs_scanned_at TEXT  -- when it was scanned for page references
+        refs_scanned_at TEXT, -- when it was scanned for page references
+        restricted    TEXT    -- JSON array of restriction labels, or NULL
     );
 
     CREATE TABLE source_refs (
@@ -82,6 +83,7 @@ from outmem._sqlite import connect as _sqlite_connect
 from outmem._time import format_iso_z, parse_iso_z, utc_now
 from outmem.completeness import tool_note
 from outmem.exceptions import OutmemError
+from outmem.restricted import DENY_SET, LabelError, normalise_labels
 
 SOURCES_DIR = "sources"
 
@@ -102,7 +104,7 @@ SOURCES_LOCAL_DIR = "sources-local"
 REGISTRY_FILENAME = ".sources.db"
 
 # Bumped only when the sources/ingestions schema changes shape.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 ALLOWED_EXTENSIONS = frozenset({".md", ".txt", ".csv", ".json", ".mmd", ".yaml", ".yml"})
 
@@ -188,6 +190,25 @@ class SourceEntry:
     historical rows and was previously discarded — a pipeline emitting
     ``.../<drug>/output/<hash>/document.md`` puts the distinguishing part
     here and nowhere else.
+    """
+    restricted: frozenset[str] = frozenset()
+    """Restriction labels carried by this source. Empty means open.
+
+    In the registry, not in the path and not in a separate tree. A
+    source's ``rel_path`` embeds its original filename, so
+    ``sources/policy/9b3d0d/severance-plan-2026.md`` is itself
+    disclosure; keeping the labels beside the path is what lets every
+    consumer of the row filter it without re-deriving anything.
+
+    Orthogonal to :attr:`local`, which is about *redistribution rights*
+    — a licensed handbook everyone may read but nobody may republish is
+    local-and-open, an internal memo is tracked-and-restricted.
+    Conflating the two axes weakens both.
+
+    Ingest is where this is set, and that is the point: it is the one
+    moment when a person is holding the document and knows what it is.
+    Every page later compiled from it inherits these labels
+    automatically.
     """
 
     @property
@@ -554,11 +575,14 @@ class SourceRegistry:
         document_key: str | None = None,
         origin_path: str | None = None,
         derived_key: bool = False,
+        restricted: Iterable[str] | None = None,
     ) -> SourceEntry:
         """Add or refresh an entry. Returns the canonical entry.
 
         Re-registering with the same hash returns the existing entry
-        unchanged.
+        unchanged — including its existing labels, so a second ingest
+        that forgets ``--restricted`` cannot declassify a source by
+        accident.
 
         When ``document_key`` is given and a live version of that document
         already exists, this registration **supersedes** it: the older row
@@ -585,6 +609,15 @@ class SourceRegistry:
         Note the sha is part of ``rel_path``, so a revised document is
         always a *new row*; the ``!= sha256`` refresh branch below is only
         reachable for callers that build paths themselves.
+
+        ``restricted`` labels a source at the moment someone is holding
+        the document — the highest-leverage point in the system, since
+        every page later compiled from it inherits the labels. Omitting
+        the argument means "unchanged", never "open": a re-registration
+        keeps whatever labels the row already had, and a new version
+        inherits at least those of the version it supersedes. Narrowing
+        labels is a privileged operation (``sources restrict``), not
+        something a forgotten flag can do.
         """
         existing = self.entries.get(rel_path)
         if existing and existing.sha256 == sha256:
@@ -604,12 +637,25 @@ class SourceRegistry:
                 if claimants and derived_key:
                     raise DocumentKeyConflict(document_key, claimants[0])
                 predecessor = claimants[0] if claimants else None
+            # A floor, not a default. Re-ingesting v2 of a restricted
+            # document without `--restricted` would otherwise leave the
+            # document key with an OPEN current version, and `outmem
+            # stale` would then quietly point pages at it — silent
+            # declassification through a forgotten flag.
+            labels = (
+                normalise_labels(restricted)
+                if restricted is not None
+                else (existing.restricted if existing else frozenset())
+            )
+            if predecessor is not None:
+                labels |= predecessor.restricted
             con.execute(
                 "INSERT OR REPLACE INTO sources "
                 "(rel_path, sha256, size_bytes, registered_at, document_key, "
-                "superseded_by, origin_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "superseded_by, origin_path, restricted) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (rel_path, sha256, size_bytes, format_iso_z(ts), document_key,
-                 None, origin_path),
+                 None, origin_path, _encode_restricted(labels)),
             )
             # INSERT OR REPLACE preserves the row, so FK ON DELETE
             # CASCADE doesn't fire — clear ingestions explicitly when
@@ -634,10 +680,45 @@ class SourceRegistry:
             ingestions=[],
             document_key=document_key,
             origin_path=origin_path,
+            restricted=labels,
         )
         if predecessor is not None and predecessor.rel_path in self.entries:
             self.entries[predecessor.rel_path].superseded_by = rel_path
         self.entries[rel_path] = entry
+        return entry
+
+    def set_restricted(
+        self, rel_path: str, labels: Iterable[str], *, allow_narrowing: bool = False
+    ) -> SourceEntry:
+        """Set the restriction labels on an already-registered source.
+
+        Widening (adding labels) is the ordinary operation and needs
+        nothing special. *Narrowing* — removing a label, or replacing a
+        set with one that does not contain it — is declassification, and
+        the caller must have checked a ``declassify`` grant and say so
+        with ``allow_narrowing``. Refusing by default means no ordinary
+        code path can strip a label by passing a smaller set.
+
+        This is the registry half only; the store wraps it with the
+        grant check and the commit.
+        """
+        entry = self.entries.get(rel_path)
+        if entry is None:
+            raise OutmemError(f"source {rel_path!r} is not registered.")
+        resolved = normalise_labels(labels)
+        if not allow_narrowing and not entry.restricted <= resolved:
+            removed = ", ".join(sorted(entry.restricted - resolved))
+            raise LabelError(
+                f"refusing to remove restriction label(s) {removed} from "
+                f"{rel_path!r}: declassification is a privileged operation."
+            )
+        con = self._connection()
+        with con:
+            con.execute(
+                "UPDATE sources SET restricted = ? WHERE rel_path = ?",
+                (_encode_restricted(resolved), rel_path),
+            )
+        entry.restricted = resolved
         return entry
 
     def adopt_document_key(self, rel_path: str, document_key: str) -> SourceEntry:
@@ -1138,7 +1219,18 @@ def _migrate(con: sqlite3.Connection) -> None:
     """
     version = con.execute("PRAGMA user_version").fetchone()[0]
     existing = {row[1] for row in con.execute("PRAGMA table_info(sources)")}
-    wanted = ("document_key", "superseded_by", "origin_path", "refs_scanned_at")
+    wanted = (
+        "document_key",
+        "superseded_by",
+        "origin_path",
+        "refs_scanned_at",
+        # v4. NULL on every pre-existing row, which reads as "open" — the
+        # correct answer for a registry filled before restrictions
+        # existed, and the same answer the wiki gave before this column
+        # did. Restricting an already-ingested source is a deliberate act
+        # (`outmem sources restrict`), not a migration default.
+        "restricted",
+    )
     missing = [c for c in wanted if c not in existing]
     # v3 added source_refs, created unconditionally above by CREATE TABLE
     # IF NOT EXISTS — so the migration only has to move user_version.
@@ -1161,7 +1253,7 @@ def _migrate(con: sqlite3.Connection) -> None:
 
 _ENTRY_COLUMNS = (
     "rel_path, sha256, size_bytes, registered_at, document_key, "
-    "superseded_by, origin_path, refs_scanned_at"
+    "superseded_by, origin_path, refs_scanned_at, restricted"
 )
 """Every column :func:`_entry_from_row` reads, in one place.
 
@@ -1182,9 +1274,43 @@ def _entry_from_row(row: sqlite3.Row) -> SourceEntry:
         superseded_by=row["superseded_by"],
         origin_path=row["origin_path"],
         refs_scanned_at=row["refs_scanned_at"],
+        restricted=_decode_restricted(row["restricted"]),
         size_bytes=int(row["size_bytes"]),
         ingestions=[],
     )
+
+
+def _decode_restricted(raw: str | None) -> frozenset[str]:
+    """Read the ``restricted`` column, failing closed on anything odd.
+
+    NULL means open — that is the migration default and the honest
+    reading of a row written before the column existed. Anything else
+    that is not a well-formed JSON array of labels resolves to
+    :data:`~outmem.restricted.DENY_SET`, so a corrupted or
+    hand-edited value hides the source rather than publishing it. The
+    same choice frontmatter makes for an unparseable page (spec §5.2).
+    """
+    if raw is None or raw == "":
+        return frozenset()
+    try:
+        decoded = json.loads(raw)
+    except (ValueError, TypeError):
+        return DENY_SET
+    # A JSON `null` decodes to None, which ``normalise_labels`` reads as
+    # "open" — the one shape where a malformed column would fail *open*.
+    # Only a list is a labels value.
+    if not isinstance(decoded, list):
+        return DENY_SET
+    try:
+        return normalise_labels(decoded)
+    except LabelError:
+        return DENY_SET
+
+
+def _encode_restricted(labels: frozenset[str]) -> str | None:
+    """Serialise labels for the column. Open sources store NULL, not
+    ``"[]"`` — one representation of "open", so a query can rely on it."""
+    return json.dumps(sorted(labels)) if labels else None
 
 
 def _read_all_entries(con: sqlite3.Connection) -> dict[str, SourceEntry]:
