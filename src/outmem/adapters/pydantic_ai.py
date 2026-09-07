@@ -136,23 +136,69 @@ _QUERY_ARGS = frozenset(
 )
 
 
-def _redact(key: str, value: Any) -> Any:
-    if key not in _CONTENT_ARGS or not isinstance(value, str):
-        return value
-    return f"({len(value)} chars, redacted)"
+def _redact(key: str, value: Any, *, references: bool) -> Any:
+    """Replace a logged argument's value when it must not be recorded.
+
+    ``references=True`` also masks the names of the items touched —
+    slugs, source paths, provenance, tags. Those are not content, and a
+    trace that omits them is much harder to read, so it is not the
+    default. But a source path embeds its original filename and a slug
+    can be as disclosing as one (`hr:alice-severance`), and this record
+    reaches every logging handler — Logfire among them, which sends it
+    outside the deployment.
+    """
+    if key in _CONTENT_ARGS and isinstance(value, str):
+        return f"({len(value)} chars, redacted)"
+    if references and key in _REFERENCE_ARGS:
+        if isinstance(value, str):
+            return "(redacted)"
+        if isinstance(value, list | tuple):
+            return f"({len(value)} item(s), redacted)"
+    return value
 
 
 def _log_call(name: str, **kwargs: Any) -> None:
-    # Redact ONCE, for both halves. `_summarise` only collapses strings
-    # over 60 characters, so a title or a log topic — short by nature —
-    # was appearing verbatim in the formatted message even while the
-    # structured payload was clean.
-    safe = {key: _redact(key, value) for key, value in kwargs.items()}
-    formatted = " ".join(f"{k}={_summarise(v)}" for k, v in safe.items())
+    """Emit one tool-call trace line. Values arrive already redacted.
+
+    Redaction happens in :func:`_call_logger`, *before* this — which is
+    also the seam consumers monkeypatch to record calls, so what they
+    record is what was logged rather than what was passed in.
+    """
+    formatted = " ".join(f"{k}={_summarise(v)}" for k, v in kwargs.items())
     # ``tool_call`` carries the kwargs so logging handlers can do
     # structured analysis (e.g. eval recorders) without having to parse
     # the formatted string. Stays on the LogRecord as ``record.tool_call``.
-    _tool_log.info("%s %s", name, formatted, extra={"tool_call": (name, safe)})
+    _tool_log.info("%s %s", name, formatted, extra={"tool_call": (name, dict(kwargs))})
+
+
+def _call_logger(store: WikiStore) -> Callable[..., None]:
+    """The tool-call logger for one store, with its redaction decided.
+
+    Every tool logs through this rather than through
+    :func:`_log_call` directly, so there is exactly one place where an
+    argument can be withheld. Redacting once here also covers the
+    formatted message, which matters because ``_summarise`` only
+    collapses strings over sixty characters — a page title or a log
+    topic is shorter than that and was appearing verbatim.
+
+    References are masked for the wikis that have something to protect
+    — those declaring restriction labels — and left alone everywhere
+    else, which is every wiki that existed before this feature. The
+    population at risk gets the safer trace by default; nobody else
+    pays for it, and there is no config knob to get wrong.
+    """
+    references = store.restrictions.enabled
+
+    def log(name: str, **kwargs: Any) -> None:
+        _log_call(
+            name,
+            **{
+                key: _redact(key, value, references=references)
+                for key, value in kwargs.items()
+            },
+        )
+
+    return log
 
 
 def _log_error(name: str, exc: Exception) -> None:
@@ -339,6 +385,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
     is the function body, not a string allowlist that could drift.
     """
 
+    _log = _call_logger(store)
+
     def grep_wiki(
         pattern: str,
         scope: str = "wiki",
@@ -390,7 +438,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 (default 0). Costs output budget, so prefer 2-3 over 10 —
                 a wide pattern with generous context truncates.
         """
-        _log_call(
+        _log(
             "grep_wiki",
             pattern=pattern,
             scope=scope,
@@ -456,7 +504,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 first then substring; an ambiguous or unknown value comes
                 back with the candidates listed rather than a guess.
         """
-        _log_call("read_page", slug=slug, peek=peek, section=section)
+        _log("read_page", slug=slug, peek=peek, section=section)
         try:
             page = store.read(slug)
         except SlugError as exc:
@@ -505,7 +553,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         Example:
             list_pages()
         """
-        _log_call("list_pages")
+        _log("list_pages")
         slugs = store.list_slugs()
         return "\n".join(slugs) if slugs else "(no pages)"
 
@@ -528,7 +576,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         Args:
             prefix: A namespace to drill into (omit for the root level).
         """
-        _log_call("search_index", prefix=prefix)
+        _log("search_index", prefix=prefix)
         level = store.index_tree(prefix)
         if not level.namespaces and not level.pages:
             return f"(nothing under {prefix!r})" if level.prefix else "(no pages)"
@@ -558,7 +606,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         Args:
             slug: The target slug whose referrers you want.
         """
-        _log_call("find_backlinks", slug=slug)
+        _log("find_backlinks", slug=slug)
         try:
             refs = store.backlinks(slug)
         except SlugError as exc:
@@ -579,7 +627,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         Args:
             slug: The page whose history you want.
         """
-        _log_call("page_history", slug=slug)
+        _log("page_history", slug=slug)
         try:
             history = store.history(slug)
         except SlugError as exc:
@@ -607,7 +655,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             slugs: One or more wiki slugs to walk.
             include_log: ``True`` to include ``log/`` entries in the timeline (default).
         """
-        _log_call("topic_evolution", slugs=slugs, include_log=include_log)
+        _log("topic_evolution", slugs=slugs, include_log=include_log)
         if not slugs:
             return "(topic_evolution requires at least one slug)"
         try:
@@ -638,7 +686,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         Example:
             list_sources()
         """
-        _log_call("list_sources")
+        _log("list_sources")
         entries = store.list_sources()
         if not entries:
             return "(no sources registered)"
@@ -679,7 +727,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             rel_path: A path from ``list_sources`` (either the
                 tree-prefixed form or the bare one works).
         """
-        _log_call("read_source", rel_path=rel_path)
+        _log("read_source", rel_path=rel_path)
         try:
             return store.read_source(rel_path)
         except OutmemError as exc:
@@ -713,7 +761,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             exclude_slug: A slug to exclude from results (use when comparing
                 a page against the rest of the wiki).
         """
-        _log_call(
+        _log(
             "find_similar",
             text=text,
             top_k=top_k,
@@ -780,7 +828,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             question: Natural-language question to retrieve pages for.
             k: Number of pages to return (default 5).
         """
-        _log_call("search_wiki", question=question, k=k)
+        _log("search_wiki", question=question, k=k)
         configured = store.config.outmem.retrieval.strategy
         try:
             from dataclasses import replace
@@ -913,6 +961,8 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
     :class:`OutmemError` propagated back through the tool's return path.
     """
 
+    _log = _call_logger(store)
+
     def write_page(
         slug: str,
         title: str,
@@ -980,7 +1030,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 frontmatter unchanged.
             tags: Optional tag list for the frontmatter.
         """
-        _log_call(
+        _log(
             "write_page",
             slug=slug,
             title=title,
@@ -1055,7 +1105,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             provenance: Optional replacement source pointers. Omit to
                 leave the page's existing provenance untouched.
         """
-        _log_call("extend_page", slug=slug, body=body)
+        _log("extend_page", slug=slug, body=body)
         try:
             return store.extend_page(slug, body=body, provenance=provenance,
             )
@@ -1118,7 +1168,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             body: The section to append. Complete — never an excerpt.
             provenance: Optional additional source pointers.
         """
-        _log_call("append_page", slug=slug, body=body)
+        _log("append_page", slug=slug, body=body)
         try:
             return store.append_page(slug, body=body, provenance=provenance,
             )
@@ -1166,7 +1216,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             topic: Short topic for the commit subject (``log: <topic>``).
             content: The markdown content to append. End with a newline.
         """
-        _log_call("append_log", topic=topic, content=content)
+        _log("append_log", topic=topic, content=content)
         try:
             return store.append_log(topic=topic, content=content)
         except WritebackError:
@@ -1202,7 +1252,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             prompt: The focus directive you ingested under (or "" if none).
             pages_touched: Slugs you wrote or extended in this turn.
         """
-        _log_call(
+        _log(
             "record_ingestion",
             rel_path=rel_path,
             prompt=prompt,

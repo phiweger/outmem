@@ -416,14 +416,32 @@ class TestToolLoggingIsRedacted:
         payload = self._records(caplog)[0].tool_call[1]
         assert payload["body"] == "(40 chars, redacted)"
 
-    def test_references_are_still_logged(
+    def test_references_are_logged_on_a_wiki_with_nothing_to_protect(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Redaction must not blind the trace by default: slugs, paths
+        and tags are what make a tool log useful, and none of them is
+        content. Every wiki that existed before this feature is here."""
+        plain = WikiStore.init(tmp_path / "plain")
+        plain.write_page("benefits:cycling", title="C", body="Text.\n")
+        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
+            _tool(plain, "read_page")(slug="benefits:cycling")
+        assert self._records(caplog)[0].tool_call[1]["slug"] == "benefits:cycling"
+
+    def test_references_are_masked_once_the_wiki_declares_labels(
         self, store: WikiStore, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Redaction must not blind the trace: slugs, paths and tags are
-        what make a tool log useful, and none of them is content."""
+        """A slug can be as disclosing as a filename (`hr:alice-severance`),
+        and a source path embeds its original name. This record reaches
+        every handler, Logfire among them, which sends it outside the
+        deployment — so the wikis with something to protect get the
+        safer trace without having to ask for it."""
         with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
-            _tool(store, "read_page")(slug="benefits:cycling")
-        assert self._records(caplog)[0].tool_call[1]["slug"] == "benefits:cycling"
+            _tool(store, "read_page")(slug="hr:parental-leave")
+        record = self._records(caplog)[0]
+        assert "parental-leave" not in str(record.tool_call)
+        assert "parental-leave" not in record.getMessage()
+        assert record.tool_call[0] == "read_page"  # the verb still shows
 
 
 class TestEveryLoggedArgumentIsClassified:
@@ -449,7 +467,7 @@ class TestEveryLoggedArgumentIsClassified:
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "_log_call"
+            and node.func.id == "_log"
             for kw in node.keywords
             if kw.arg
         }
