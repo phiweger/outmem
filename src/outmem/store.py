@@ -2331,6 +2331,24 @@ class WikiStore:
         if self._mode is None:
             return True
         idx = index if index is not None else self._labels()
+        if slug not in idx.pages and slug != INDEX_SLUG:
+            # The index does not know this slug. Either the page does not
+            # exist — in which case there is nothing to hide and the path
+            # rules alone decide — or it was written after the index was
+            # built, and we do not know what it is labelled.
+            #
+            # That second case is a real race, not a theoretical one: a
+            # write puts the file on disk and commits afterwards, both
+            # under the write lock, while readers hold no lock at all. In
+            # the window between, HEAD has not moved, so the token says
+            # the index is current when it is not — and a page created in
+            # mode {hr} would be served to everyone until the commit
+            # landed. Deny what we cannot classify, as everywhere else.
+            try:
+                if self._page_path(slug).exists():
+                    return False
+            except (SlugError, OutmemError):
+                pass  # not addressable as a page; path rules decide
         return self._can_see(idx.for_page(slug))
 
     def _source_visible(self, key: str, index: LabelIndex | None = None) -> bool:
@@ -2355,7 +2373,10 @@ class WikiStore:
             from outmem.slug import relpath_to_slug
 
             tail = rel_path[len(pages_prefix) :]
-            return self._can_see(index.for_page(relpath_to_slug(Path(tail))))
+            # Through `_page_visible`, not `index.for_page`: a ripgrep hit
+            # can name a file the index has not classified yet, and that
+            # is the case the fail-closed branch in there exists for.
+            return self._page_visible(relpath_to_slug(Path(tail)), index)
         for tree in (SOURCES_DIR, SOURCES_LOCAL_DIR):
             prefix = f"{self.config.wiki_dir}/{tree}/"
             if rel_path.startswith(prefix):

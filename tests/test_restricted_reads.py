@@ -889,3 +889,87 @@ class TestTheIndexTokenCoversWritesThatMakeNoCommit:
         not switched on."""
         plain = WikiStore.init(tmp_path / "plain")
         assert plain.corpus_token() is None
+
+
+class TestAPageTheIndexHasNotClassifiedIsDenied:
+    """The fail-closed rule applied to time rather than to content.
+
+    A write puts the file on disk and commits afterwards, both under the
+    write lock — while readers hold no lock at all. In the window
+    between, HEAD has not moved, so the index's token says it is current
+    when it is not, and the new page is absent from its page map. Read
+    as "no labels", a page created in mode {hr} would be served to
+    everyone until the commit landed.
+
+    Found by hammering the cache with concurrent readers and writers,
+    which is what the deployment does by construction: one process, many
+    requests. The window is milliseconds and the state converges — which
+    is exactly why nothing else would have caught it.
+    """
+
+    def test_an_uncommitted_page_is_hidden_rather_than_open(
+        self, store: WikiStore
+    ) -> None:
+        view = store.as_viewer()
+        view.list_slugs()  # warm the index
+
+        # Reproduce the window: the file exists, HEAD has not moved.
+        head = store.head()
+        (store.pages_path / "hr").mkdir(parents=True, exist_ok=True)
+        (store.pages_path / "hr" / "draft.md").write_text(
+            "---\ntitle: Draft\nslug: hr:draft\nrestricted: [hr]\n---\n\nSECRETDRAFT\n"
+        )
+        assert store.head() == head, "the premise is that no commit landed"
+
+        assert "hr:draft" not in view.list_slugs()
+        assert not view.exists("hr:draft")
+        assert not view.search("SECRETDRAFT", scope="wiki").hits
+        assert not view.search("SECRETDRAFT", scope="all").hits
+        with pytest.raises(OutmemError):
+            view.read("hr:draft")
+
+    def test_an_uncommitted_open_page_is_hidden_too(
+        self, store: WikiStore
+    ) -> None:
+        """Denying only the ones that turn out to be restricted would
+        need us to already know the labels, which is the thing we do not
+        have. Availability yields to confidentiality for the width of
+        one commit."""
+        view = store.as_viewer()
+        view.list_slugs()
+        (store.pages_path / "plain.md").write_text(
+            "---\ntitle: Plain\nslug: plain\n---\n\nOrdinary.\n"
+        )
+        assert "plain" not in view.list_slugs()
+
+    def test_and_becomes_visible_once_the_commit_lands(
+        self, store: WikiStore
+    ) -> None:
+        """It is a window, not a wall — the state converges."""
+        view = store.as_viewer()
+        view.list_slugs()
+        store.write_page("plain", title="Plain", body="Ordinary.\n")
+        assert "plain" in view.list_slugs()
+
+    def test_the_operator_is_unaffected(self, store: WikiStore) -> None:
+        (store.pages_path / "plain.md").write_text(
+            "---\ntitle: Plain\nslug: plain\n---\n\nOrdinary.\n"
+        )
+        assert "plain" in store.list_slugs()
+
+    def test_a_slug_with_no_file_still_resolves_by_path_rule(
+        self, tmp_path: Path
+    ) -> None:
+        """The other branch: an unknown slug that names no file is not a
+        race, it is simply absent, and the path rules alone decide."""
+        store = _wiki(tmp_path, paths={"hr:*": ["hr"]})
+        view = store.as_viewer()
+        assert not view.exists("hr:never-written")
+        assert view.as_viewer()._page_visible("nothing-here")
+
+    def test_the_generated_index_slug_is_not_caught_by_the_rule(
+        self, store: WikiStore
+    ) -> None:
+        """`wiki/index.md` exists and is deliberately absent from the page
+        map, so the rule has to exempt it or the catalogue disappears."""
+        assert store.as_viewer().read("index")
