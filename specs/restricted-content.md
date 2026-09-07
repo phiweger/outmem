@@ -123,6 +123,13 @@ Consequences worth stating:
   mode `∅` makes the page's computed labels `{hr}` (§5.3), which is
   `≠ ∅`, so the write is refused. No separate mechanism is needed.
 
+**A new item's labels default to `S`.** Without this, writing an HR
+page in mode `{hr}` that happens to cite only open sources would
+compute `∅ ≠ {hr}` and be refused unless someone remembered an
+explicit label. Defaulting to the mode removes that friction and is
+fail-safe: the default is always the *more* restricted option, and it
+can only be narrowed by the privileged operation in §8.3.
+
 ### 3.3 Closure
 
 > An item's labels MUST be a superset of the labels of everything it
