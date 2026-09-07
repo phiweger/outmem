@@ -148,7 +148,10 @@ def _redact(key: str, value: Any, *, references: bool) -> Any:
     outside the deployment.
     """
     if key in _CONTENT_ARGS and isinstance(value, str):
-        return f"({len(value)} chars, redacted)"
+        # An empty value is an unset default, not withheld content.
+        # Rendering it as "(0 chars, redacted)" implies something was
+        # taken away and makes the line harder to read than the truth.
+        return f"({len(value)} chars, redacted)" if value else value
     if references and key in _REFERENCE_ARGS:
         if isinstance(value, str):
             return "(redacted)"

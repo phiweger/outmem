@@ -9,13 +9,17 @@ history (`git log --grep '^release:'`).
 organisation may see. outmem now gates that deterministically, at the
 store layer, before anything becomes prompt text — no instruction, no
 system-prompt rule, and no tool description anywhere in the enforcement
-path. Content stays open by default, and a wiki that declares no labels
-behaves exactly as it did before and pays nothing for the feature.
+path. Content stays open by default, and a wiki that never takes a view
+behaves exactly as it did before: every enforcement point tests for a
+view first, so an unrestricted store never reaches the label index at
+all.
 
 The deployment assumed is the one this was built for: outmem runs
 server-side, one company, one repository, employees with no clone
 rights. The repository is dark to them, so filtering at the store layer
-is genuine access control rather than a display convention.
+is genuine access control rather than a display convention. Full
+contract, threat boundary and rollout order in
+[`docs/restricted-content.md`](docs/restricted-content.md).
 
 ### Added
 
@@ -25,36 +29,43 @@ is genuine access control rather than a display convention.
   malformed block refuses to open the wiki, and unparseable YAML in a
   file that mentions `restricted:` is fatal, because the forgiving load
   would otherwise open a restricted wiki with access control silently
-  off.
+  off. Withdrawing a label declaration *hides* the content carrying it
+  rather than releasing it — one deleted line must not publish a
+  corpus.
 - **`store.as_viewer(mode=…, grants=…)`** — the object a served request
   should hold. Restricted content is filtered before it becomes prompt
-  text, so the model cannot disclose what it was never given. The view
-  shares the underlying store's caches and write lock and holds no
-  reference back to it.
+  text, so the model cannot disclose what it was never given. A view
+  shares the store's registries, vector store, alias map, write lock
+  and label index, so every view sees the same rows and the process
+  opens one set of SQLite connections rather than one per request. It
+  holds no reference back to the unrestricted store.
 - **`outmem ingest --restricted hr`** — label a source at the moment
   someone is holding the document. Every page later compiled from it
   inherits the label, which is the highest-leverage rule in the design.
   Orthogonal to `--local`: that tree is about redistribution rights,
   this is about secrecy.
-- **`outmem restrict <slug> --label hr [--cascade]`** — the operational
-  verb. Restricting is a graph operation, not a field edit: a page that
+- **`outmem restrict <slug> --label hr [--cascade]`** and **`outmem
+  sources restrict <path> --label hr`** — the operational verbs.
+  Restricting is a graph operation, not a field edit: a page that
   visible pages already link to is refused until those links are
   resolved, since the inbound link would still name it in a body its
-  readers can see.
-- **Compartment hints.** `search_wiki` tells a user who *holds* a label
-  but is not currently scoped to it that matches exist there — counts
-  only, per label, never for a label they do not hold. Hiding is a
-  property of grants, not of mode, and without this a cleared user
+  readers can see. Neither will remove a label that a path rule or a
+  cited source immediately reapplies — reporting success for a
+  declassification that did not happen is worse than refusing.
+- **Compartment hints.** When a search returns nothing, `search_wiki`
+  tells a user who *holds* a label but is not scoped to it that the
+  compartment exists and how much it holds. Counts only, per label,
+  never for a label they do not hold. The count is a property of the
+  corpus rather than of the question, and the hint takes no query at
+  all: counting what *this* question matched would be a content oracle,
+  since the model writes the question. Without the hint a cleared user
   asking about parental leave gets nothing and never learns to switch.
 - **Six lint kinds** (`restricted-link-violation`,
   `restricted-provenance-violation`, `restricted-slug-mentioned`,
   `restricted-label-unknown`, `restricted-frontmatter-unparseable`,
   `restricted-chain-inconsistent`) verifying the invariants against
   content already on disk — the case write-time enforcement cannot
-  reach.
-- **`docs/restricted-content.md`** — the model, the threat boundary,
-  what is explicitly not protected, and a rollout order whose first four
-  steps are safe to run while still serving the unrestricted store.
+  reach, and the state a wiki is in the day it turns restrictions on.
 
 ### Breaking
 
@@ -67,40 +78,50 @@ is genuine access control rather than a display convention.
   `restricted-frontmatter-unparseable`, and hidden from every view until
   it is fixed. Grep for `restricted:` under `wiki/pages/` before
   upgrading if you used the key.
-
-### Changed
-
 - **`rename_page` and `restrict_page` are operator-only** — refused to a
   view, as `import_vault` and `repair_pages` already were. Both write
   files the caller did not name: rename rewrites inbound links across
-  the corpus, and `--cascade` picks its targets from the backlink graph.
-  Neither was ever in a model-facing palette, so this affects only a
-  downstream app that called them through a view; hold a bare store for
-  administrative operations.
+  the corpus with the new slug as content, and `--cascade` picks its
+  targets from the backlink graph. There is no way to label-check a
+  write whose targets are discovered rather than named. Neither was ever
+  in a model-facing palette, so this affects only a downstream app that
+  called them through a view; hold a bare store for administrative
+  operations.
+
+### Changed
+
 - **`.sources.db` schema 3 → 4**, adding a `restricted` column.
   Migrated in place on open; NULL on existing rows reads as open, which
   is the same answer the wiki gave before the column existed.
-- **Tool-argument logging redacts content fields.** `_log_call`
-  attaches its kwargs to every `LogRecord` and Logfire is a handler, so
-  an unredacted `body` was exporting page text verbatim to an
-  observability backend. Lengths survive; slugs, paths and tags are
-  untouched.
+- **Tool-argument logging redacts content.** `_log_call` attaches its
+  kwargs to every `LogRecord` and Logfire is a handler, so an
+  unredacted `body` was exporting page text verbatim to an
+  observability backend. Lengths survive. On a wiki that declares
+  labels the item *names* — slugs, source paths, provenance, tags — are
+  masked too, since a slug can be as disclosing as a filename; a wiki
+  with nothing to protect keeps the readable trace it had.
 - **`build_consult_wiki` accepts an open store**, so a caller can pass a
   view. It previously always opened its own from a path, which would
   discard a caller's mode and grants.
-- **The retriever cache is keyed on HEAD.** BM25 snapshots page bodies
-  at construction, so a retriever built before a page changed kept
-  answering from the text it had — a staleness bug that predates this
-  work and became a fail-open one with it.
+- **Caches derived from page content are keyed on the corpus, not on
+  HEAD.** BM25 snapshots page bodies at construction, so a retriever
+  built before a page changed kept answering from the text it had — a
+  staleness bug that predates this work and became a fail-open one with
+  it. HEAD alone is not enough: a local-tree ingest, and a re-ingest
+  that only sets labels, both write the registry and commit nothing, so
+  the token carries the registries' fingerprints as well.
+  `store.corpus_token()` exposes it, and is `None` for a wiki that
+  declares no labels — which is how such a wiki keeps its old cache
+  lifetime and skips a `git rev-parse` per query.
 - **`page_history` and `topic_evolution` leave the served palette when a
   view is in play**, and the store refuses them. Both are answered by
   git, which knows nothing about labels, while the label index describes
-  only the current commit.
+  only the current commit. The system prompt and the injected
+  `evolution` skill follow the palette, so a restricted session is no
+  longer told to call tools it does not have.
 - **A restricted session writes `log/<label-set>/<date>.md`.** The open
   mode is unpartitioned, so a wiki with no restrictions has nothing to
   migrate.
-- **`outmem sources restrict`** — the source counterpart to `outmem
-  restrict`, and the command the registry's error messages point at.
 
 ## 0.15.0
 

@@ -514,6 +514,19 @@ class TestEveryLoggedArgumentIsClassified:
         assert "severance cap" not in record.getMessage()
         assert "severance cap" not in str(record.tool_call)
 
+    def test_an_unset_default_is_not_dressed_up_as_withheld_content(
+        self, store: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """`read_page(section="")` means "no section asked for". Logging
+        that as "(0 chars, redacted)" implies something was taken away
+        and makes the line harder to read than the truth."""
+        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
+            _tool(store, "read_page")(slug="benefits:cycling")
+        payload = next(
+            r for r in caplog.records if hasattr(r, "tool_call")
+        ).tool_call[1]
+        assert payload["section"] == ""
+
     def test_a_page_title_is_redacted(
         self, store: WikiStore, caplog: pytest.LogCaptureFixture
     ) -> None:
