@@ -95,12 +95,23 @@ class TestNoWriteDown:
 
 class TestNoWriteUp:
     def test_a_write_grant_alone_does_not_reach_a_restricted_page(
-        self, open_writer: WikiStore
+        self, open_writer: WikiStore, store: WikiStore
     ) -> None:
         """Holding `write hr` does not let you edit an HR page from an
-        open session; you must start a session in mode {hr}."""
-        with pytest.raises(RestrictionError, match="restricted to"):
+        open session; you must start a session in mode {hr}.
+
+        And the refusal is the one an absent page gives. Naming the
+        target's labels instead — which it used to — made every write a
+        slug probe that also reported the exact compartment."""
+        with pytest.raises(OutmemError) as hidden:
             open_writer.extend_page("hr:severance", body="Sixteen weeks.\n")
+        with pytest.raises(OutmemError) as absent:
+            open_writer.extend_page("hr:no-such-page", body="Sixteen weeks.\n")
+        assert not isinstance(hidden.value, RestrictionError)
+        assert str(hidden.value).replace("severance", "no-such-page") == str(
+            absent.value
+        )
+        assert "hr]" not in str(hidden.value)
 
     def test_the_matching_mode_succeeds(self, hr: WikiStore) -> None:
         hr.extend_page("hr:severance", body="Sixteen weeks.\n")
@@ -362,7 +373,7 @@ class TestRecordIngestion:
         doc.write_text("Internal.\n")
         entry = store.add_source(doc, restricted=["hr"])
         view = store.as_viewer(grants=Grants.writer("hr"))
-        with pytest.raises(RestrictionError):
+        with pytest.raises(OutmemError, match="no such source"):
             view.record_ingestion(entry.rel_path, prompt="x", pages_touched=[])
 
     def test_the_matching_mode_records(
@@ -534,7 +545,7 @@ class TestSourceKeysAreCheckedInEverySpelling:
         agent-written free text in a restricted source's registry row."""
         view = store.as_viewer(grants=Grants.writer("hr"))
         for key in self._spellings(store, source):
-            with pytest.raises(RestrictionError):
+            with pytest.raises(OutmemError, match="no such source"):
                 view.record_ingestion(key, prompt="x", pages_touched=[])
 
     def test_the_cleared_mode_reads_it_by_every_spelling(

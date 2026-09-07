@@ -769,34 +769,74 @@ class TestPathRulesCoverNamesThatAreNotLivePages:
         assert view.search("SECRETPAYROLL", scope="wiki").hits
 
 
-class TestLogPartitionsAreNotOverReadAsCompartments:
-    """`archive` and `2024` are perfectly good label names, so treating
-    every `log/` subdirectory as a compartment made ordinary log layouts
-    invisible to every viewer."""
+class TestLogPartitionsAreCompartments:
+    """`log/` subdirectories are compartments. One sentence, because the
+    ambiguity underneath it has no better answer.
 
-    def test_an_undeclared_directory_name_is_not_a_partition(
+    outmem creates only `log/<date>.md` and `log/<label-set>/<date>.md`,
+    so a label-shaped subdirectory is a partition. Once a label is
+    withdrawn from `restricted.labels` its old partition still holds
+    that compartment's entries, and reading an undeclared name as open
+    would let one deleted config line publish them — the exact inversion
+    the rest of the design refuses.
+
+    The cost is that a hand-made `log/archive/` is hidden from views.
+    That is the safe side of an ambiguity nothing on disk can settle,
+    and the operator still sees it.
+    """
+
+    def test_a_declared_partition_is_hidden_from_the_open_mode(
         self, store: WikiStore
     ) -> None:
-        (store.log_path / "archive").mkdir(parents=True, exist_ok=True)
-        (store.log_path / "archive" / "2024-01-01.md").write_text(
-            "An old note about cycling.\n"
-        )
-        assert store.as_viewer().search("cycling", scope="log").hits
-
-    def test_a_declared_one_still_is(self, store: WikiStore) -> None:
         hr = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
         hr.append_log(topic="t", content="A severance discussion.\n")
         assert not store.as_viewer().search("severance", scope="log").hits
+        assert hr.search("severance", scope="log").hits
 
-    def test_a_partition_shaped_name_with_an_unknown_label_is_hidden(
+    def test_withdrawing_the_label_does_not_publish_its_partition(
         self, store: WikiStore
     ) -> None:
-        """`hr+nonsense` can only have been written by this mechanism,
-        and we cannot tell who it was for."""
-        (store.log_path / "hr+nonsense").mkdir(parents=True, exist_ok=True)
-        (store.log_path / "hr+nonsense" / "d.md").write_text("Ambiguous.\n")
-        assert not store.as_viewer().search("Ambiguous", scope="log").hits
+        """The case that decides the ambiguity."""
+        import yaml
 
+        hr = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        hr.append_log(topic="t", content="A severance discussion.\n")
+        root = store.root
+        store.close()
+
+        raw = yaml.safe_load((root / "config.yaml").read_text())
+        raw["restricted"] = {"labels": ["legal"]}  # hr withdrawn
+        (root / "config.yaml").write_text(yaml.safe_dump(raw))
+
+        reopened = WikiStore.open(root)
+        assert not reopened.as_viewer().search("severance", scope="log").hits
+        assert reopened.search("severance", scope="log").hits  # operator sees it
+
+    def test_a_label_shaped_directory_is_treated_as_one(
+        self, store: WikiStore
+    ) -> None:
+        """`archive` is a valid label name and nothing on disk says it
+        was not written as a compartment, so it is hidden rather than
+        guessed at."""
+        (store.log_path / "archive").mkdir(parents=True, exist_ok=True)
+        (store.log_path / "archive" / "2024-01-01.md").write_text("Old note.\n")
+        assert not store.as_viewer().search("Old note", scope="log").hits
+        assert store.search("Old note", scope="log").hits
+
+    def test_a_name_that_could_not_be_a_label_set_stays_open(
+        self, store: WikiStore
+    ) -> None:
+        """The other side of the line: outmem could not have written
+        this, so hiding it would break a wiki that never used
+        compartments."""
+        (store.log_path / "2024 backup").mkdir(parents=True, exist_ok=True)
+        (store.log_path / "2024 backup" / "d.md").write_text("Kept note.\n")
+        assert store.as_viewer().search("Kept note", scope="log").hits
+
+    def test_the_open_partition_is_unaffected(self, store: WikiStore) -> None:
+        store.as_viewer(grants=Grants.none())
+        store.append_log(topic="t", content="An open note.\n")
+        assert store.as_viewer().search("An open note", scope="log").hits
 
 class TestSteeringDoesNotCarryLogTopics:
     """A `log:` subject is a topic somebody typed, not a name this can

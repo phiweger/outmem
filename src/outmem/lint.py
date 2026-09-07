@@ -1525,7 +1525,9 @@ def _check_restrictions(
     if settings is None or not settings.enabled:
         return
 
-    source_labels = _registry_labels(sources_dir, sources_local_dir, settings, report)
+    source_labels = _registry_labels(
+        sources_dir, sources_local_dir, settings, report, wiki_dir.name
+    )
     effective: dict[str, frozenset[str]] = {}
 
     for slug, page in sorted(pages.items()):
@@ -1550,12 +1552,10 @@ def _check_restrictions(
         for entry in page.provenance:
             ref = provenance_ref(entry)
             if ref is not None:
-                labels |= source_labels.get(ref, frozenset())
+                labels |= _source_labels_for(source_labels, ref)
         effective[slug] = labels
 
-    _check_restricted_provenance(
-        pages, effective, source_labels, settings, report
-    )
+    _check_restricted_provenance(pages, source_labels, settings, report)
     _check_restricted_links(pages, effective, report)
     _check_restricted_mentions(pages, effective, report)
     _check_unreadable_frontmatter(pages_dir, wiki_dir, report)
@@ -1566,6 +1566,7 @@ def _registry_labels(
     sources_local_dir: Path | None,
     settings: RestrictedSettings,
     report: LintReport,
+    wiki_dir_name: str = "wiki",
 ) -> dict[str, frozenset[str]]:
     """Source labels by citation path, plus the chain-consistency check.
 
@@ -1594,6 +1595,7 @@ def _registry_labels(
             out[f"{prefix}/{entry.rel_path}"] = labels
             out.setdefault(entry.rel_path, frozenset())
             out[entry.rel_path] |= labels
+            out[f"{wiki_dir_name}/{prefix}/{entry.rel_path}"] = labels
             if entry.document_key:
                 chains.setdefault(entry.document_key, {})[entry.rel_path] = labels
 
@@ -1621,9 +1623,31 @@ def _registry_labels(
     return out
 
 
+def _source_labels_for(
+    source_labels: dict[str, frozenset[str]], ref: str
+) -> frozenset[str]:
+    """Labels for a cited source, under any spelling that names it.
+
+    The store resolves a citation against the filesystem; lint has no
+    store, so it normalises the text the same way. Keying on the literal
+    string is how a page citing ``sources/./<rel>`` came to be hidden by
+    the store and reported clean by the check whose whole job is to
+    notice exactly that.
+    """
+    import posixpath
+
+    cleaned = posixpath.normpath(ref.replace("\\", "/")).lstrip("/")
+    for candidate in (ref, cleaned):
+        if candidate in source_labels:
+            return source_labels[candidate]
+    for key, labels in source_labels.items():
+        if cleaned.endswith("/" + key) or cleaned == key:
+            return labels
+    return frozenset()
+
+
 def _check_restricted_provenance(
     pages: dict[str, _LoadedPage],
-    effective: dict[str, frozenset[str]],
     source_labels: dict[str, frozenset[str]],
     settings: RestrictedSettings,
     report: LintReport,
@@ -1643,7 +1667,7 @@ def _check_restricted_provenance(
             ref = provenance_ref(entry)
             if ref is None:
                 continue
-            needed = source_labels.get(ref, frozenset())
+            needed = _source_labels_for(source_labels, ref)
             missing = needed - declared
             if missing:
                 report.findings.append(

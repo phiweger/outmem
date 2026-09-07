@@ -38,7 +38,8 @@ from outmem.exceptions import (
     SlugError,
     WritebackError,
 )
-from outmem.frontmatter import serialize_wiki_page
+from outmem.frontmatter import parse_wiki_page, serialize_wiki_page
+from outmem.index import INDEX_SLUG
 from outmem.skills import bundled_registry
 from outmem.store import WikiStore
 
@@ -113,7 +114,13 @@ _CONTENT_ARGS = frozenset(
 # the tool log records WHICH items a session touched, and a source's
 # `rel_path` embeds its original filename. That is a deployment choice
 # about an observability backend, not something a filter can take back.
-_REFERENCE_ARGS = frozenset({"slug", "slugs", "rel_path", "provenance", "tags"})
+_REFERENCE_ARGS = frozenset(
+    # `pages_touched` and `exclude_slug` are item names like the rest —
+    # they were sitting under "query" because they arrive as arguments to
+    # a question, which is not the same thing as being one.
+    {"slug", "slugs", "rel_path", "provenance", "tags", "pages_touched",
+     "exclude_slug"}
+)
 
 # Everything else a tool logs: the model's own query, and knobs. A
 # question the model wrote is not content it was shown, and a trace
@@ -122,10 +129,8 @@ _QUERY_ARGS = frozenset(
     {
         "case_insensitive",
         "context",
-        "exclude_slug",
         "include_log",
         "k",
-        "pages_touched",
         "pattern",
         "peek",
         "prefix",
@@ -136,23 +141,29 @@ _QUERY_ARGS = frozenset(
 )
 
 
-def _redact(key: str, value: Any, *, references: bool) -> Any:
+def _redact(key: str, value: Any, *, active: bool) -> Any:
     """Replace a logged argument's value when it must not be recorded.
 
-    ``references=True`` also masks the names of the items touched —
-    slugs, source paths, provenance, tags. Those are not content, and a
-    trace that omits them is much harder to read, so it is not the
-    default. But a source path embeds its original filename and a slug
-    can be as disclosing as one (`hr:alice-severance`), and this record
-    reaches every logging handler — Logfire among them, which sends it
-    outside the deployment.
+    ``active`` is on for wikis that declare restriction labels, and off
+    for every wiki that existed before this feature. That gate covers
+    content as well as references: the trace is not a leak on a wiki
+    with nothing to protect, and consumers read it — the structured
+    payload exists for eval recorders, which want the body they were
+    given.
+
+    Once on, both go. A source path embeds its original filename and a
+    slug can be as disclosing as one (`hr:alice-severance`), and this
+    record reaches every logging handler — Logfire among them, which
+    sends it outside the deployment.
     """
+    if not active:
+        return value
     if key in _CONTENT_ARGS and isinstance(value, str):
         # An empty value is an unset default, not withheld content.
         # Rendering it as "(0 chars, redacted)" implies something was
         # taken away and makes the line harder to read than the truth.
         return f"({len(value)} chars, redacted)" if value else value
-    if references and key in _REFERENCE_ARGS:
+    if key in _REFERENCE_ARGS:
         if isinstance(value, str):
             return "(redacted)"
         if isinstance(value, list | tuple):
@@ -184,19 +195,19 @@ def _call_logger(store: WikiStore) -> Callable[..., None]:
     collapses strings over sixty characters — a page title or a log
     topic is shorter than that and was appearing verbatim.
 
-    References are masked for the wikis that have something to protect
-    — those declaring restriction labels — and left alone everywhere
-    else, which is every wiki that existed before this feature. The
-    population at risk gets the safer trace by default; nobody else
-    pays for it, and there is no config knob to get wrong.
+    Redaction is on for the wikis that have something to protect — those
+    declaring restriction labels — and off everywhere else, which is
+    every wiki that existed before this feature. The population at risk
+    gets the safer trace by default; nobody else pays for a less
+    readable one, and there is no config knob to get wrong.
     """
-    references = store.restrictions.enabled
+    active = store.restrictions.enabled
 
     def log(name: str, **kwargs: Any) -> None:
         _log_call(
             name,
             **{
-                key: _redact(key, value, references=references)
+                key: _redact(key, value, active=active)
                 for key, value in kwargs.items()
             },
         )
@@ -204,12 +215,33 @@ def _call_logger(store: WikiStore) -> Callable[..., None]:
     return log
 
 
-def _log_error(name: str, exc: Exception) -> None:
+def _error_logger(store: WikiStore) -> Callable[..., None]:
+    """``_log_error`` bound to whether this wiki withholds messages."""
+    redact = store.restrictions.enabled
+
+    def log_error(name: str, exc: Exception) -> None:
+        _log_error(name, exc, redact=redact)
+
+    return log_error
+
+
+def _log_error(name: str, exc: Exception, *, redact: bool = False) -> None:
+    """Trace a failed tool call.
+
+    ``redact`` withholds the message. Refusals quote what they refused —
+    ``IncompleteBodyError`` prints the offending body lines verbatim, by
+    design, because that is what makes it actionable to the model — so
+    on a labelled wiki the error path was carrying page text to every
+    handler that the argument path had just been careful to withhold.
+    The exception *type* is the part a trace needs, and it names no
+    content.
+    """
+    detail = f"{type(exc).__name__} (message withheld)" if redact else str(exc)
     _tool_log.info(
         "%s → ERROR: %s",
         name,
-        exc,
-        extra={"tool_error": (name, type(exc).__name__, str(exc))},
+        detail,
+        extra={"tool_error": (name, type(exc).__name__, detail)},
     )
 
 
@@ -389,6 +421,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
     """
 
     _log = _call_logger(store)
+    _log_err = _error_logger(store)
 
     def grep_wiki(
         pattern: str,
@@ -460,7 +493,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 context=context,
             )
         except OutmemError as exc:
-            _log_error("grep_wiki", exc)
+            _log_err("grep_wiki", exc)
             return f"(search failed: {exc})"
         return _format_hits(result, scope, context)
 
@@ -511,28 +544,48 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         try:
             page = store.read(slug)
         except SlugError as exc:
-            _log_error("read_page", exc)
+            _log_err("read_page", exc)
             return (
                 f"(invalid slug {slug!r}: one or more ``:``-separated segments, "
                 "each lowercase ASCII letters/digits with single hyphens only)"
             )
         except FrontmatterError as exc:
-            _log_error("read_page", exc)
+            _log_err("read_page", exc)
             return f"(page {slug!r} has malformed frontmatter: {exc})"
         except OutmemError as exc:
-            _log_error("read_page", exc)
+            _log_err("read_page", exc)
             return (
                 f"(no such wiki page: {slug!r} — try `list_pages` to see "
                 "what exists, or `grep_wiki` with scope='sources' for source material)"
             )
-        # Rendered from the page the store handed back, NOT re-read from
-        # disk. Going behind the store means serving whatever the file
-        # says, and the file is not always what this caller should get:
-        # the `index` slug is rendered live per viewer (the stored
-        # wiki/index.md catalogues every page in the wiki, including the
-        # ones hidden from the reader), and a self-healed page's disk
-        # text is the broken version the store just repaired in memory.
-        raw = serialize_wiki_page(page.frontmatter, page.body)
+        # Read from disk when the file is what the store would serve,
+        # and render from the page object when it is not.
+        #
+        # Rendering always was wrong in a way that showed up nowhere near
+        # here: a wiki edited by hand or by Obsidian has frontmatter that
+        # is not in outmem's canonical form, so re-serialising changes
+        # its HEIGHT — and the outline's line numbers, which exist to
+        # match what `grep_wiki` and the user's editor report for the
+        # same page, silently drifted. It also stripped YAML comments
+        # from what the model was shown.
+        #
+        # Two pages are not their file. The `index` slug is rendered live
+        # per viewer, because the stored wiki/index.md catalogues every
+        # page in the wiki including the ones hidden from this reader; a
+        # self-healed page's disk text is the broken version the store
+        # just repaired in memory. Both are exactly the cases where the
+        # file's own line numbers are not the ones to report either.
+        on_disk = page.path.read_text(encoding="utf-8")
+        try:
+            _, disk_body = parse_wiki_page(on_disk, fallback_slug=slug)
+            faithful = disk_body == page.body
+        except FrontmatterError:
+            faithful = False
+        raw = (
+            on_disk
+            if faithful and slug != INDEX_SLUG
+            else serialize_wiki_page(page.frontmatter, page.body)
+        )
         # Frontmatter is stripped from `page.body`, so outline line
         # numbers need its height added back to match what `grep_wiki`
         # reports for the same page.
@@ -613,7 +666,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         try:
             refs = store.backlinks(slug)
         except SlugError as exc:
-            _log_error("find_backlinks", exc)
+            _log_err("find_backlinks", exc)
             return f"(invalid slug {slug!r})"
         return "\n".join(refs) if refs else "(no backlinks)"
 
@@ -634,7 +687,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         try:
             history = store.history(slug)
         except SlugError as exc:
-            _log_error("page_history", exc)
+            _log_err("page_history", exc)
             return f"(invalid slug {slug!r})"
         if not history:
             return "(no history)"
@@ -664,10 +717,10 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         try:
             return store.evolution(slugs, include_log=include_log)
         except SlugError as exc:
-            _log_error("topic_evolution", exc)
+            _log_err("topic_evolution", exc)
             return f"(invalid slug in {slugs}: {exc})"
         except OutmemError as exc:
-            _log_error("topic_evolution", exc)
+            _log_err("topic_evolution", exc)
             return f"(evolution failed: {exc})"
 
     def list_sources() -> str:
@@ -734,7 +787,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         try:
             return store.read_source(rel_path)
         except OutmemError as exc:
-            _log_error("read_source", exc)
+            _log_err("read_source", exc)
             return f"(read_source failed: {exc})"
 
     def find_similar(
@@ -782,10 +835,10 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
                 exclude_slug=exclude_slug,
             )
         except OutmemError as exc:
-            _log_error("find_similar", exc)
+            _log_err("find_similar", exc)
             return f"(find_similar failed: {exc})"
         except Exception as exc:
-            _log_error("find_similar", exc)
+            _log_err("find_similar", exc)
             return f"(find_similar failed: {exc})"
         if not matches:
             return "(no semantically similar chunks above threshold)"
@@ -893,7 +946,7 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
             # (ImportError). Surface as a tool result. Anything else
             # (TypeError, …) is a real bug — let it propagate so tests and
             # Logfire see it instead of the agent swallowing it as a string.
-            _log_error("search_wiki", exc)
+            _log_err("search_wiki", exc)
             return f"(search_wiki failed: {exc})"
         # Merge the strategy-level fallback note (if we swapped to bm25)
         # with the retriever's own per-query diagnostic — the agent sees
@@ -966,6 +1019,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
     """
 
     _log = _call_logger(store)
+    _log_err = _error_logger(store)
 
     def write_page(
         slug: str,
@@ -1061,16 +1115,16 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             # insisting; the store lets it through then, and lint
             # reports the page rather than the turn dying.
             store.allow_elision_body(body)
-            _log_error("write_page", exc)
+            _log_err("write_page", exc)
             _retry_incomplete(exc)
         except SlugError as exc:
-            _log_error("write_page", exc)
+            _log_err("write_page", exc)
             return (
                 f"(invalid slug {slug!r}: one or more ``:``-separated segments, "
                 "each lowercase ASCII letters/digits with single hyphens only)"
             )
         except OutmemError as exc:
-            _log_error("write_page", exc)
+            _log_err("write_page", exc)
             return f"(write_page failed: {exc})"
 
     def extend_page(
@@ -1124,13 +1178,13 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             # insisting; the store lets it through then, and lint
             # reports the page rather than the turn dying.
             store.allow_elision_body(body)
-            _log_error("extend_page", exc)
+            _log_err("extend_page", exc)
             _retry_incomplete(exc)
         except SlugError as exc:
-            _log_error("extend_page", exc)
+            _log_err("extend_page", exc)
             return f"(invalid slug {slug!r})"
         except OutmemError as exc:
-            _log_error("extend_page", exc)
+            _log_err("extend_page", exc)
             return f"(extend_page failed: {exc} — use `write_page` for new pages)"
 
     def append_page(
@@ -1187,13 +1241,13 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             # insisting; the store lets it through then, and lint
             # reports the page rather than the turn dying.
             store.allow_elision_body(body)
-            _log_error("append_page", exc)
+            _log_err("append_page", exc)
             _retry_incomplete(exc)
         except SlugError as exc:
-            _log_error("append_page", exc)
+            _log_err("append_page", exc)
             return f"(invalid slug {slug!r})"
         except OutmemError as exc:
-            _log_error("append_page", exc)
+            _log_err("append_page", exc)
             return f"(append_page failed: {exc} — use `write_page` for new pages)"
 
     def append_log(topic: str, content: str) -> str:
@@ -1226,7 +1280,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         except WritebackError:
             raise
         except OutmemError as exc:
-            _log_error("append_log", exc)
+            _log_err("append_log", exc)
             return f"(append_log failed: {exc})"
 
     def record_ingestion(
@@ -1270,7 +1324,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 commit=True,
             )
         except OutmemError as exc:
-            _log_error("record_ingestion", exc)
+            _log_err("record_ingestion", exc)
             return f"(record_ingestion failed: {exc})"
         return f"(recorded ingestion against {rel_path})"
 

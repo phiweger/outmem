@@ -472,6 +472,13 @@ class TestEveryLoggedArgumentIsClassified:
             if kw.arg
         }
 
+    def test_the_scan_actually_finds_the_call_sites(self) -> None:
+        """Without this the check below passes by finding nothing —
+        rename the local logger and it would go quiet while claiming it
+        cannot drift."""
+        found = self._logged_kwargs()
+        assert len(found) > 10, found
+
     def test_no_logged_argument_is_unclassified(self) -> None:
         from outmem.adapters.pydantic_ai import (
             _CONTENT_ARGS,

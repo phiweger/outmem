@@ -75,6 +75,7 @@ class WikiFrontmatter:
     configs) that outmem cannot rewrite. Resolution is one-way and
     file-first: a live page always wins over any alias claiming its name.
     """
+    extra: dict[str, Any] = field(default_factory=dict)
     restricted: list[str] = field(default_factory=list)
     """Restriction labels this page carries. Empty means open.
 
@@ -82,8 +83,12 @@ class WikiFrontmatter:
     :mod:`outmem.restricted`); path rules and inheritance from cited
     sources are resolved by the store, not stored here, so this field
     always shows what a person deliberately wrote.
+
+    Declared AFTER ``extra`` on purpose. This class is in
+    ``outmem.__all__`` and callers construct it positionally; inserting a
+    field ahead of ``extra`` rebinds their last argument to this one,
+    silently and without a type error.
     """
-    extra: dict[str, Any] = field(default_factory=dict)
 
 
 def parse_wiki_page(

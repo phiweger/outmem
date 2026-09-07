@@ -286,19 +286,17 @@ def mode_from_dirname(
 ) -> frozenset[str] | None:
     """Parse a ``log/`` subdirectory name back into a label set.
 
-    Returns ``None`` for a directory that is not a mode partition —
-    somebody's ``log/archive/``, or a date-nested layout — which the
-    caller treats as open, because it was not written by this mechanism
-    and hiding it would break a wiki that never used compartments.
+    Returns ``None`` only for a name that could not be a label set at
+    all (``log/2024 backup/``), which the caller treats as open: it was
+    not written by this mechanism and hiding it would break a wiki that
+    never used compartments.
 
-    ``declared`` is what makes that distinction possible. Without it
-    ``archive`` and ``2024`` are perfectly good label names, so every
-    such directory became invisible to every viewer. A name is a
-    partition only if every part of it is a label this wiki actually
-    declares; a name that is *shaped* like a partition and holds a
-    label the wiki does not declare returns :data:`DENY_SET`, since a
-    directory whose audience cannot be determined must not be shown to
-    an audience.
+    A label-shaped name the wiki does not declare returns
+    :data:`DENY_SET`. It is a directory whose audience cannot be
+    determined, and the case that forces the choice is withdrawal — a
+    label removed from ``restricted.labels`` leaves its partition behind,
+    and reading that as open would let one deleted config line publish a
+    compartment's logs.
     """
     if not name:
         return frozenset()
@@ -308,16 +306,21 @@ def mode_from_dirname(
     except LabelError:
         # Not label-shaped at all (`log/2024-archive backup/`).
         return None
-    if declared is None:
+    if declared is None or labels <= frozenset(declared):
         return labels
-    known = frozenset(declared)
-    if labels <= known:
-        return labels
-    if MODE_SEPARATOR in name:
-        # `hr+nonsense` can only have been written by this mechanism,
-        # and we cannot tell who it was for.
-        return DENY_SET
-    return None
+    # Label-shaped but not declared. outmem only ever creates `log/<date>.md`
+    # and `log/<label-set>/<date>.md`, so a label-shaped subdirectory is a
+    # compartment partition — and once a label is withdrawn from the config
+    # its old partition still holds that compartment's entries. Reading it
+    # as open would mean deleting one line from `restricted.labels`
+    # publishes a compartment's logs, which is the exact inversion the
+    # rest of the design refuses.
+    #
+    # The cost is that a hand-made `log/archive/` is hidden from views
+    # too. That is the safe side of an ambiguity nothing on disk can
+    # settle, the operator still sees it, and the rule is one sentence:
+    # subdirectories of `log/` are compartments.
+    return DENY_SET
 
 
 # ---------------------------------------------------------------------------

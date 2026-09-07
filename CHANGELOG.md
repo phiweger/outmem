@@ -74,10 +74,13 @@ contract, threat boundary and rollout order in
   a list of restriction labels, so a page using the key for something
   else changes shape (a bare string becomes a one-item list, an empty
   value is dropped) and a value that is not a label list makes the page
-  unparseable — reported by `outmem lint` as
-  `restricted-frontmatter-unparseable`, and hidden from every view until
-  it is fixed. Grep for `restricted:` under `wiki/pages/` before
-  upgrading if you used the key.
+  unparseable — reported by `outmem lint` as `frontmatter-invalid` (and,
+  once you declare labels, also as
+  `restricted-frontmatter-unparseable`), and hidden from every view
+  until it is fixed. A `restricted: [a, b]` value whose entries are not
+  declared labels is the quiet one: the page parses and is then hidden
+  from every view. **Grep for `restricted:` under `wiki/pages/` before
+  upgrading if you used the key.**
 - **`rename_page` and `restrict_page` are operator-only** — refused to a
   view, as `import_vault` and `repair_pages` already were. Both write
   files the caller did not name: rename rewrites inbound links across
@@ -93,13 +96,15 @@ contract, threat boundary and rollout order in
 - **`.sources.db` schema 3 → 4**, adding a `restricted` column.
   Migrated in place on open; NULL on existing rows reads as open, which
   is the same answer the wiki gave before the column existed.
-- **Tool-argument logging redacts content.** `_log_call` attaches its
-  kwargs to every `LogRecord` and Logfire is a handler, so an
-  unredacted `body` was exporting page text verbatim to an
-  observability backend. Lengths survive. On a wiki that declares
-  labels the item *names* — slugs, source paths, provenance, tags — are
-  masked too, since a slug can be as disclosing as a filename; a wiki
-  with nothing to protect keeps the readable trace it had.
+- **Tool calls are traced without their content on a wiki that declares
+  labels.** `_log_call` attaches its kwargs to every `LogRecord` and
+  Logfire is a handler, so an unredacted `body` was exporting page text
+  verbatim to an observability backend. Bodies, titles and log topics
+  are withheld (lengths survive), the item *names* with them — a slug
+  can be as disclosing as a filename — and a refusal's message is
+  reduced to its exception type, since `IncompleteBodyError` quotes the
+  body it refused. A wiki that declares no labels keeps byte-identical
+  traces, so eval recorders reading `record.tool_call` are unaffected.
 - **`build_consult_wiki` accepts an open store**, so a caller can pass a
   view. It previously always opened its own from a path, which would
   discard a caller's mode and grants.
@@ -122,6 +127,11 @@ contract, threat boundary and rollout order in
 - **A restricted session writes `log/<label-set>/<date>.md`.** The open
   mode is unpartitioned, so a wiki with no restrictions has nothing to
   migrate.
+- **`store.corpus_token()` and the label index read HEAD from
+  `.git/HEAD` rather than by forking `git rev-parse`.** A visibility
+  check on a view was paying ~2 ms of subprocess per call; it is now
+  two `stat`s. Unusual repository shapes (worktrees, packed refs) still
+  fall back to git, so the token is never weaker — only cheaper.
 - **`add_source` takes the write lock**, like every other
   commit-producing path. The registry was already safe across processes
   — SQLite serialises the writers — but the git half was not: two

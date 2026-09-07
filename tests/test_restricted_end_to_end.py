@@ -215,8 +215,12 @@ class TestTheClearedEmployeeInAnOpenSession:
     def test_and_cannot_write_the_restricted_page_from_here(
         self, view: WikiStore
     ) -> None:
-        with pytest.raises(RestrictionError):
+        """Refused as absent, not as restricted — a write refusal that
+        names the compartment is a slug probe with a label report
+        attached."""
+        with pytest.raises(OutmemError) as caught:
             view.extend_page("hr:severance", body="Edited.\n")
+        assert not isinstance(caught.value, RestrictionError)
 
 
 class TestAnAgentInTheHrCompartment:

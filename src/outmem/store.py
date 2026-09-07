@@ -351,7 +351,7 @@ def _write_refusal(
 # here falls through to "shown", and the pathspec narrowing in
 # `_steering_paths` is what covers the ones whose subject names no item.
 _SLUG_SUBJECT_VERBS = frozenset({"compact", "extend", "append", "rename", "restrict"})
-_SOURCE_SUBJECT_VERBS = frozenset({"source", "ingest"})
+_SOURCE_SUBJECT_VERBS = frozenset({"source", "ingest", "restrict-source"})
 
 _VISIBILITY_ENFORCED = frozenset({
     "backlinks",
@@ -873,7 +873,10 @@ class WikiStore:
         from outmem.slug import relpath_to_slug
 
         out: list[tuple[str, str]] = []
-        index = self._labels()
+        # Only when something will be filtered: building the index on an
+        # unrestricted store is a corpus walk nobody asked for, and the
+        # docs promise such a store never reaches it.
+        index = self._labels() if self.enforces_visibility else None
         for path in editorial_pages(self.pages_path):
             slug = relpath_to_slug(path.relative_to(self.pages_path))
             try:
@@ -893,7 +896,7 @@ class WikiStore:
                         "(usually a `git mv` that didn't update the frontmatter)",
                     )
                 )
-        if self.enforces_visibility:
+        if index is not None:
             # An unparseable page resolves to DENY, so it drops out here
             # for every mode — which is the point: its labels could not be
             # read, so it cannot be shown to anyone.
@@ -1694,9 +1697,9 @@ class WikiStore:
                 existing = f"# {log_date.isoformat()}\n\n"
             log_file.write_text(existing + prefix + content.rstrip() + "\n", encoding="utf-8")
 
-            rel = f"{self.config.log_dir}/{log_file.name}"
-            if partition:
-                rel = f"{self.config.log_dir}/{partition}/{log_file.name}"
+            rel = "/".join(
+                p for p in (self.config.log_dir, partition, log_file.name) if p
+            )
             return self._commit_paths(
                 [rel],
                 subject=commit_subject or f"log: {topic}",
@@ -2175,6 +2178,8 @@ class WikiStore:
         """
         if self._mode is not None:
             self._require_write_grant()
+            if not self._source_visible(rel_path):
+                raise OutmemError(f"no such source: {rel_path}")
             labels = self._labels().for_source(rel_path)
             if not writable(labels, self._mode, self._grants):
                 raise RestrictionError(
@@ -2324,9 +2329,9 @@ class WikiStore:
         """
         if not self.restrictions.enabled:
             return None
-        from outmem._store.labels import registry_stamp
+        from outmem._store.labels import head_stamp, registry_stamp
 
-        return (self.head(), registry_stamp(self))
+        return (head_stamp(self), registry_stamp(self))
 
     def _can_see(self, labels: Iterable[str]) -> bool:
         """§3.1 — ``labels ⊆ mode``. Always true on the bare store."""
@@ -2362,28 +2367,29 @@ class WikiStore:
         if self._mode is None:
             return True
         idx = index if index is not None else self._labels()
-        if not idx.knows_source(key) and self._source_file_exists(key, idx):
+        # Resolve against the FILESYSTEM, the way every reader does,
+        # rather than matching the caller's string against index keys.
+        # A guard that normalises text can always be out-normalised —
+        # `sources/../../wiki/sources/<rel>` walks straight back into the
+        # tree and reaches a real file under a spelling the registry has
+        # never held. `resolve_source` is what `read_source` itself uses,
+        # so asking it is the only way the check and the read can agree.
+        found = _sources.resolve_source(self, key)
+        if found is None:
+            # Names no source, so there is nothing to hide; a denial here
+            # would say something about a path that holds no content.
+            return True
+        tree, canonical = found
+        labels = idx.for_source(f"{tree.name}/{canonical}")
+        if not idx.knows_source(f"{tree.name}/{canonical}"):
             # The mirror of the page race. `add_source` copies the file
             # into the tree and registers it afterwards, so between the
             # two there is a file on disk with no registry row — and a
-            # row is where its labels live. An unknown key that names a
-            # real file means the index predates it, not that it is open.
+            # row is where its labels live. An unknown key that resolves
+            # to a real file means the index predates it, not that the
+            # source is open.
             return False
-        return self._can_see(idx.for_source(key))
-
-    def _source_file_exists(self, key: str, index: LabelIndex) -> bool:
-        """Whether ``key``, in any spelling, names a file in either tree."""
-        for candidate in index.source_keys(key):
-            for tree in (self.sources_path, self.sources_local_path):
-                path = tree / candidate
-                try:
-                    if path.is_file() and path.resolve().is_relative_to(
-                        tree.resolve()
-                    ):
-                        return True
-                except OSError:
-                    continue
-        return False
+        return self._can_see(labels)
 
     def _repo_path_visible(self, rel_path: str, index: LabelIndex) -> bool:
         """Visibility for a repo-relative path — the form ripgrep hits and
@@ -2498,6 +2504,13 @@ class WikiStore:
                 raise RestrictionError(_write_refusal(mode, labels, new=True))
         else:
             labels = index.for_page(slug)
+            if not visible(labels, mode):
+                # Hidden, so the answer must be the one a page that is not
+                # there gives. Saying "restricted to [hr]" instead turns
+                # every write into a slug probe that also reports the
+                # exact label set — the same oracle the alias-collision
+                # branch was fixed for.
+                self._no_such_page(slug)
             if not writable(labels, mode, self._grants):
                 raise RestrictionError(_write_refusal(mode, labels, new=False))
             # An edit may also change what the page WILL be labelled,
@@ -2645,6 +2658,7 @@ class WikiStore:
             )
         entry = registry.set_restricted(key, wanted, allow_narrowing=True)
         self._label_cache.invalidate()
+        self._label_cache.note_registry_write(self)
         # Nothing to commit when the labels did not move — and asking git
         # to commit an unchanged file surfaces its "nothing added to
         # commit" message, which reads like a failure for what is in
@@ -2652,7 +2666,12 @@ class WikiStore:
         # rule can supply what the caller asked to remove.
         if commit and tree.tracked and before != entry.restricted:
             self._commit_paths(
-                [tree.repo_registry_relpath], subject=f"restrict: {key}"
+                [tree.repo_registry_relpath],
+                # A distinct verb: `restrict:` alone is resolved as a
+                # SLUG by the steering filter, so a source path under it
+                # missed the page map and carried the filename into every
+                # open system prompt.
+                subject=f"restrict-source: {key}",
             )
         return replace(entry, local=not tree.tracked)
 

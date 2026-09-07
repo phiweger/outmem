@@ -358,8 +358,11 @@ class OutmemConfig:
     approval: ApprovalSettings = field(default_factory=ApprovalSettings)
     logfire: LogfireSettings = field(default_factory=LogfireSettings)
     retrieval: RetrievalSettings = field(default_factory=RetrievalSettings)
-    restricted: RestrictedSettings = field(default_factory=RestrictedSettings)
     extra: dict[str, Any] = field(default_factory=dict)
+    # After `extra`, for the same reason as WikiFrontmatter.restricted:
+    # a field inserted ahead of it rebinds a positional caller's last
+    # argument without a type error.
+    restricted: RestrictedSettings = field(default_factory=RestrictedSettings)
 
 
 def _outmem_repo_root() -> Path | None:
@@ -457,9 +460,12 @@ def load_yaml_config(wiki_root: Path) -> OutmemConfig:
     return _config_from_dict(raw) if raw is not None else OutmemConfig()
 
 
-# A top-level `restricted:` key, ignoring commented-out lines. Used only
+# A TOP-LEVEL `restricted:` key, ignoring commented-out lines. Used only
 # to decide whether a YAML parse failure is fatal (see
-# :func:`_read_yaml_mapping`), so it errs toward matching.
+# :func:`_read_yaml_mapping`). Deliberately anchored: a nested
+# `agent: {restricted: …}` is not this block, and treating it as one
+# would make an unrelated typo fatal for a wiki that has no
+# restrictions at all.
 _RESTRICTED_KEY_RE = re.compile(r"^[ \t]*restricted[ \t]*:", re.MULTILINE)
 
 

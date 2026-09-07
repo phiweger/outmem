@@ -283,8 +283,8 @@ includes the namespace root page `hr`.
 **This block is deliberately not forgiving.** Every other setting here
 degrades a feature when it is wrong; this one degrades a boundary. A
 malformed block refuses to open the wiki rather than falling back to
-defaults, and unparseable YAML anywhere in a `config.yaml` that
-mentions `restricted:` is fatal — otherwise a syntax error would drop
+defaults, and unparseable YAML in a `config.yaml` carrying a
+top-level `restricted:` key is fatal — otherwise a syntax error would drop
 the whole file and open the wiki with access control silently off.
 
 Full contract in [`restricted-content.md`](restricted-content.md).

@@ -88,8 +88,8 @@ Everything about this block is fail-closed, and it is deliberately
 **not** covered by config.yaml's usual forgiving load. Every other
 setting degrades a feature when it is wrong; this one degrades a
 boundary. A malformed block refuses to open the wiki, and unparseable
-YAML that mentions `restricted:` is fatal rather than silently dropping
-the file and opening with access control off.
+YAML in a file carrying a top-level `restricted:` key is fatal rather
+than silently dropping the file and opening with access control off.
 
 A label used anywhere but absent from `restricted.labels` hides its
 content from **everyone**, including the people it was meant for.

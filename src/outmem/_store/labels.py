@@ -28,9 +28,11 @@ Three sources of labels for a page (spec §5.1), unioned:
 
 from __future__ import annotations
 
+import contextlib
 import posixpath
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from outmem.restricted import DENY_SET, RestrictedSettings
@@ -44,8 +46,8 @@ if TYPE_CHECKING:  # pragma: no cover
 class LabelIndex:
     """Resolved labels for everything in the wiki, as of one commit."""
 
-    head: str | None
-    """The HEAD sha this index was built from. Half of its validity token.
+    head: tuple[object, ...] | None
+    """What HEAD was when this index was built. Half of its validity token.
 
     Almost every outmem write produces a commit, so a moved HEAD is
     usually the invalidation signal — but see :attr:`registries` for the
@@ -151,9 +153,27 @@ class LabelIndex:
         return out
 
 
+def _release_registries(store: WikiStore) -> None:
+    """Close and drop both registry handles.
+
+    Closing matters: dropping the reference alone orphans a live SQLite
+    connection that ``WikiStore.close`` can then never reach, so a
+    long-lived worker leaks one per cross-process registry write.
+    """
+    for attr in ("_source_registry", "_source_registry_local"):
+        handle = getattr(store, attr)
+        if handle is not None:
+            # Suppressed: the handle is on its way out either way, and a
+            # close that fails must not stop the caller getting a fresh
+            # one.
+            with contextlib.suppress(Exception):
+                handle.close()
+            setattr(store, attr, None)
+
+
 #: An index for a wiki that declares no labels. Everything is open, and
 #: every lookup is a dict miss on an empty dict.
-EMPTY = LabelIndex(head="")
+EMPTY = LabelIndex(head=())
 
 
 def registry_stamp(store: WikiStore) -> tuple[tuple[int, int], ...]:
@@ -162,16 +182,47 @@ def registry_stamp(store: WikiStore) -> tuple[tuple[int, int], ...]:
 
     out: list[tuple[int, int]] = []
     for directory in (store.sources_path, store.sources_local_path):
-        try:
-            stat = (directory / REGISTRY_FILENAME).stat()
-        except OSError:
-            out.append((0, 0))
-        else:
-            out.append((stat.st_mtime_ns, stat.st_size))
+        out.append(_stamp(directory / REGISTRY_FILENAME))
     return tuple(out)
 
 
-def build(store: WikiStore, head: str | None = None) -> LabelIndex:
+def _stamp(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def head_stamp(store: WikiStore) -> tuple[object, ...]:
+    """What HEAD is, read from the filesystem rather than from git.
+
+    ``git rev-parse HEAD`` is a subprocess — about 2 ms — and every
+    visibility check on a view was paying for one. The label index needs
+    to know only whether HEAD *moved*, and ``.git/HEAD`` plus the ref it
+    names answer that from two ``stat`` calls.
+
+    Falls back to the subprocess for anything unusual (a worktree, a
+    packed ref this cannot see), so the token is never weaker than it
+    was — only cheaper in the common case.
+    """
+    git_dir = store.root / ".git"
+    head_file = git_dir / "HEAD"
+    try:
+        raw = head_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return (store.head(),)
+    if not raw.startswith("ref: "):
+        return ("detached", raw)  # already the sha
+    ref = git_dir / raw[len("ref: ") :]
+    if not ref.exists():
+        # Packed refs, or a branch with no commits yet. Ask git; the
+        # answer is what it always was.
+        return (store.head(),)
+    return ("ref", raw, _stamp(ref))
+
+
+def build(store: WikiStore, head: tuple[object, ...] | None = None) -> LabelIndex:
     """Walk the wiki and resolve every item's labels.
 
     Sources first: a page's labels include those of the sources it
@@ -207,15 +258,6 @@ def _source_labels(
         labels = settings.resolve(entry.restricted) | settings.labels_for_source(
             entry.rel_path
         )
-        # Both keys: `provenance:` cites the tree-qualified form while
-        # the registry is keyed on the bare rel_path, and a lookup miss
-        # would silently read as "this source is open".
-        #
-        # The bare key takes the UNION across trees. The same rel_path
-        # can exist in both `sources/` and `sources-local/`, and letting
-        # the second row overwrite the first would resolve an ambiguous
-        # lookup to whichever tree happened to be walked last — a
-        # coin-flip that fails open half the time.
         # One key, the bare rel_path, unioned across trees: the same
         # path can exist in both `sources/` and `sources-local/`, and
         # letting the second row overwrite the first would resolve an
@@ -250,10 +292,11 @@ def _page_labels(
             ref = provenance_ref(entry)
             if ref is None:
                 continue
-            # Through the index, not the raw map: a page may cite a
-            # source under any spelling, and a raw miss would leave the
-            # page open while printing the restricted source's filename.
-            labels |= index.for_source(ref)
+            # Resolved against the filesystem, not matched as text: a
+            # page may cite a source under any spelling that reaches the
+            # file, and a miss leaves the page open while printing the
+            # restricted source's filename in its own provenance.
+            labels |= _source_labels_for_ref(store, index, ref)
         out[page.slug] = labels
 
     # Aliases inherit the labels of the page they resolve to; otherwise
@@ -282,6 +325,21 @@ def _page_labels(
     return out
 
 
+def _source_labels_for_ref(
+    store: WikiStore, index: LabelIndex, ref: str
+) -> frozenset[str]:
+    """Labels of the source a provenance entry cites, under any spelling."""
+    from outmem._store.sources import resolve_source
+
+    found = resolve_source(store, ref)
+    if found is not None:
+        tree, canonical = found
+        return index.for_source(f"{tree.name}/{canonical}")
+    # Cites nothing that exists — a dangling provenance entry, which
+    # `outmem lint` reports and which discloses nothing.
+    return index.for_source(ref)
+
+
 class LabelCache:
     """Holds the current :class:`LabelIndex` for one store, keyed by HEAD.
 
@@ -293,6 +351,7 @@ class LabelCache:
     def __init__(self) -> None:
         self._index: LabelIndex | None = None
         self._lock = threading.Lock()
+        self._handle_stamp: tuple[tuple[int, int], ...] | None = None
 
     def get(self, store: WikiStore) -> LabelIndex:
         # Deliberately NOT short-circuited on `restrictions.enabled`.
@@ -309,9 +368,9 @@ class LabelCache:
         # The cost lands only on callers that took a view: every
         # enforcement point tests `_mode is None` first, so a wiki with
         # no access control never reaches this method at all.
-        head = store.head()
+        head = head_stamp(store)
         stamp = registry_stamp(store)
-        if head is None:
+        if head == (None,):
             # No commit to key on. Rebuilding every time is correct and
             # merely slow; caching against a token that never changes
             # would be wrong.
@@ -327,19 +386,32 @@ class LabelCache:
                 stamp,
             ):
                 return cached
-            if cached is not None and cached.registries != stamp:
-                # A registry changed under us, and `SourceRegistry` is an
-                # in-memory snapshot taken at load. Rebuilding the index
-                # from the handle we already hold would read the labels
-                # this process saw last time, which is the stale value
-                # the stamp just told us not to trust. Drop the handles
-                # so `build` re-reads. Existing references stay valid;
-                # they are merely old.
-                store._source_registry = None
-                store._source_registry_local = None
+            if self._handle_stamp != stamp:
+                # A registry changed since these handles were opened, and
+                # `SourceRegistry` is an in-memory snapshot taken at load.
+                # Rebuilding from the handle we hold would read the
+                # labels this process saw last time — the stale value the
+                # stamp just told us not to trust.
+                #
+                # Keyed on when the HANDLES were loaded, not on the
+                # cached index: a first build, or one triggered by HEAD
+                # alone, would otherwise reuse a snapshot that predates
+                # another process's registry write.
+                _release_registries(store)
+                self._handle_stamp = stamp
             built = build(store, head)
             self._index = built
             return built
+
+    def note_registry_write(self, store: WikiStore) -> None:
+        """Record that this process just wrote a registry itself.
+
+        Without it the next rebuild would see a moved stamp and throw
+        away a handle that is not stale at all — the one this process
+        used to make the change.
+        """
+        with self._lock:
+            self._handle_stamp = registry_stamp(store)
 
     def invalidate(self) -> None:
         """Drop the cached index for this process.

@@ -243,6 +243,7 @@ def add_source(
             # the documented way to correct a mislabelled source, would
             # land on disk and never reach a live view. Say so directly.
             store._label_cache.invalidate()
+            store._label_cache.note_registry_write(store)
             if commit and tree.tracked:
                 store._commit_paths(
                     [tree.repo_registry_relpath],
@@ -286,6 +287,7 @@ def add_source(
     entry = replace(entry, local=not tree.tracked)
     if labels:
         store._label_cache.invalidate()
+        store._label_cache.note_registry_write(store)
     record_source_refs(store, rel_path, tree)
     # A local ingest has nothing to commit: both the file and its
     # registry live inside the gitignored tree. Committing here would be
@@ -398,12 +400,36 @@ def resolve_source(store: WikiStore, rel_path: str) -> tuple[SourceTree, str] | 
     hinted, remainder = split_tree_prefix(store, rel_path)
     candidates = [hinted] if hinted is not None else existing_trees(store)
     for tree in candidates:
-        if (tree.path / remainder).is_file():
-            return tree, remainder
+        canonical = _canonical_within(tree, remainder)
+        if canonical is not None and (tree.path / canonical).is_file():
+            return tree, canonical
     for tree in candidates:
         if tree.path.is_dir() and get_registry(store, tree).get(remainder) is not None:
             return tree, remainder
     return None
+
+
+def _canonical_within(tree: SourceTree, remainder: str) -> str | None:
+    """``remainder`` as the registry would key it, or ``None`` if it
+    points outside the tree.
+
+    The prefix strip above is textual, so a caller can hand in
+    ``sources/../../wiki/sources/<rel>`` and the OS will walk it right
+    back into the tree — a real file, reached under a key the registry
+    has never held. Returning the *unnormalised* remainder was how
+    `read_source` came to serve a restricted file: every label lookup
+    keys on what this function returns, and it was returning a spelling
+    no label was ever stored under.
+
+    Resolving here rather than at each call site means the canonical
+    form is what the whole system agrees on, and a path that escapes the
+    tree is refused rather than silently reachable.
+    """
+    try:
+        resolved = (tree.path / remainder).resolve()
+        return resolved.relative_to(tree.path.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
 
 
 def _adopt_or_refuse(

@@ -585,7 +585,12 @@ def cmd_restrict(args: argparse.Namespace) -> int:
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 1
-    labels = ", ".join(sorted(args.label or [])) or "(none — now open)"
+    # The EFFECTIVE labels, not the requested ones: a `restricted.paths`
+    # rule or a cited source can leave the page with more than was asked
+    # for, and reporting the request would tell the operator something
+    # that is not true of the page.
+    effective = store._labels().for_page(store.resolve_slug(args.slug))
+    labels = ", ".join(sorted(effective)) or "(none — now open)"
     _status(f"{args.slug} restricted to: {labels}")
     print(sha)
     return 0
