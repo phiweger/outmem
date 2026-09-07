@@ -43,10 +43,16 @@ from outmem.exceptions import OutmemError
 
 __all__ = [
     "DENY",
+    "DENY_SET",
+    "MODE_SEPARATOR",
+    "UNRESTRICTED_GRANTS",
     "Grants",
     "LabelError",
     "RestrictedSettings",
+    "mode_dirname",
+    "mode_from_dirname",
     "normalise_labels",
+    "settings_from_dict",
     "validate_label",
     "visible",
     "writable",
@@ -248,6 +254,52 @@ def writable(labels: Iterable[str], mode: Iterable[str], grants: Grants) -> bool
     label_set = frozenset(labels)
     mode_set = frozenset(mode)
     return label_set == mode_set and grants.may_write(mode_set)
+
+
+# ---------------------------------------------------------------------------
+# Per-mode log partitioning
+# ---------------------------------------------------------------------------
+
+#: Joins several labels into one directory name. Not in the label
+#: grammar, so ``hr+legal`` can only ever mean the pair — a label
+#: containing the separator is impossible by construction.
+MODE_SEPARATOR = "+"
+
+
+def mode_dirname(mode: Iterable[str]) -> str:
+    """Directory under ``log/`` that a session in ``mode`` writes to.
+
+    The open mode maps to ``""`` — ``log/<date>.md``, exactly where logs
+    have always gone — so a wiki with no restrictions has no new
+    directory level and nothing to migrate.
+
+    Partitioning is not cosmetic. ``append_log`` writes to an open file,
+    and mandatory writeback actively pushes an agent there when nothing
+    else was warranted; in a restricted session that is a write-down of
+    whatever the agent was just reading.
+    """
+    return MODE_SEPARATOR.join(sorted(mode))
+
+
+def mode_from_dirname(name: str) -> frozenset[str] | None:
+    """Parse a ``log/`` subdirectory name back into a label set.
+
+    Returns ``None`` for a directory that is not a mode partition at all
+    (someone's ``log/archive/``), which the caller should treat as open
+    — it was not written by this mechanism. A name that *looks* like a
+    partition but holds an invalid label returns :data:`DENY_SET`,
+    because a directory whose audience cannot be determined must not be
+    shown to an audience.
+    """
+    if not name:
+        return frozenset()
+    parts = name.split(MODE_SEPARATOR)
+    if len(parts) == 1 and not _LABEL_RE.match(name):
+        return None
+    try:
+        return normalise_labels(parts)
+    except LabelError:
+        return DENY_SET
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ import yaml
 
 from outmem._time import ensure_utc, format_iso_z, parse_iso_z, utc_now
 from outmem.exceptions import FrontmatterError, SlugError
+from outmem.restricted import LabelError, normalise_labels
 from outmem.slug import validate_slug
 
 log = logging.getLogger(__name__)
@@ -73,6 +74,14 @@ class WikiFrontmatter:
     ``[[links]]`` and for references outside the wiki entirely (tickets,
     configs) that outmem cannot rewrite. Resolution is one-way and
     file-first: a live page always wins over any alias claiming its name.
+    """
+    restricted: list[str] = field(default_factory=list)
+    """Restriction labels this page carries. Empty means open.
+
+    The *explicit* half of a page's labels (see
+    :mod:`outmem.restricted`); path rules and inheritance from cited
+    sources are resolved by the store, not stored here, so this field
+    always shows what a person deliberately wrote.
     """
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -230,7 +239,16 @@ def touch_updated(frontmatter: WikiFrontmatter, *, now: datetime | None = None) 
 # ---------------------------------------------------------------------------
 
 
-_KNOWN_FIELDS = {"title", "slug", "provenance", "created", "updated", "tags", "aliases"}
+_KNOWN_FIELDS = {
+    "title",
+    "slug",
+    "provenance",
+    "created",
+    "updated",
+    "tags",
+    "aliases",
+    "restricted",
+}
 
 
 def _raw_sequence_text(raw_yaml: str, key: str) -> list[str] | None:
@@ -288,6 +306,7 @@ def _frontmatter_from_dict(
     aliases = _coerce_aliases(
         data.get("aliases", []), _raw_sequence_text(raw_yaml, "aliases")
     )
+    restricted = _coerce_restricted(data.get("restricted"))
     extra = {k: v for k, v in data.items() if k not in _KNOWN_FIELDS}
 
     return WikiFrontmatter(
@@ -298,8 +317,38 @@ def _frontmatter_from_dict(
         updated=updated,
         tags=tags,
         aliases=aliases,
+        restricted=restricted,
         extra=extra,
     )
+
+
+def _coerce_restricted(value: Any) -> list[str]:
+    """Read a ``restricted:`` frontmatter value into a label list.
+
+    A bare string is accepted as a single label — ``restricted: hr`` is
+    an unambiguous thing to write, and reading it as one label is the
+    *restricting* direction, so guessing here cannot widen access.
+
+    Anything else that is not a list of valid labels raises
+    :class:`FrontmatterError`, which makes the page unparseable and
+    therefore hidden from every mode (spec 5.2). Resolving it to "no
+    labels" would be the one fail-open reading available.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        candidates: list[Any] = [value]
+    elif isinstance(value, list):
+        candidates = list(value)
+    else:
+        raise FrontmatterError(
+            "Frontmatter `restricted:` must be a list of labels (or one "
+            f"label), got {type(value).__name__}."
+        )
+    try:
+        return sorted(normalise_labels(candidates))
+    except LabelError as exc:
+        raise FrontmatterError(f"Frontmatter `restricted:` is not valid: {exc}") from exc
 
 
 def _frontmatter_to_dict(frontmatter: WikiFrontmatter) -> dict[str, Any]:
@@ -320,6 +369,8 @@ def _frontmatter_to_dict(frontmatter: WikiFrontmatter) -> dict[str, Any]:
     # known field doesn't reorder existing files.
     if frontmatter.aliases:
         data["aliases"] = list(frontmatter.aliases)
+    if frontmatter.restricted:
+        data["restricted"] = list(frontmatter.restricted)
     data.update(frontmatter.extra)
     return data
 

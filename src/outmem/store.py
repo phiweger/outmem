@@ -16,6 +16,7 @@ exactly once and returns the new HEAD SHA — and the runtime sequences
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import threading
@@ -23,7 +24,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from outmem._store import import_vault as _import
 from outmem._store import semantic as _semantic
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
     from outmem.semantic import Match, ReindexResult, VectorStore
     from outmem.sources import KeyCandidate, RegistryAudit, RekeyResult, StaleCitation
 
+from outmem._store.labels import LabelCache, LabelIndex
 from outmem.backlinks import BacklinkCache
 from outmem.completeness import (
     TOOL_SENTINEL_OPEN,
@@ -59,6 +61,7 @@ from outmem.exceptions import (
     FrontmatterError,
     IncompleteBodyError,
     OutmemError,
+    RestrictionError,
     SlugError,
 )
 from outmem.frontmatter import (
@@ -100,7 +103,15 @@ from outmem.index import (
     index_page_text,
     navigate_index,
 )
-from outmem.restricted import RestrictedSettings
+from outmem.restricted import (
+    UNRESTRICTED_GRANTS,
+    Grants,
+    LabelError,
+    RestrictedSettings,
+    mode_from_dirname,
+    normalise_labels,
+    visible,
+)
 from outmem.search import DEFAULT_RESULT_BYTES, SearchResult, rg_available, search
 from outmem.slug import PAGES_DIR, relpath_to_slug, slug_to_relpath, validate_slug
 from outmem.sources import (
@@ -285,6 +296,112 @@ def _config_from_yaml(
     )
 
 
+# ---------------------------------------------------------------------------
+# Access-control classification of the public surface
+#
+# Every public member of ``WikiStore`` belongs to exactly one of these
+# four sets, and ``tests/test_restricted_reads.py`` fails until a newly
+# added one is placed. That failure is the mechanism: coverage of a
+# boundary is a property of the whole surface, not of the paths someone
+# remembered to test, and a method added later with no filtering is
+# precisely how a boundary like this rots.
+#
+# Adding a member means answering one question — can this return item
+# content, identity, or existence to a viewer? — and the four answers
+# are: filter it, gate it on the write rules, refuse it to views
+# outright, or nothing to do.
+# ---------------------------------------------------------------------------
+
+_VISIBILITY_ENFORCED = frozenset({
+    "backlinks",
+    "exists",
+    "get_source",
+    "index_tree",
+    "list_slugs",
+    "list_sources",
+    "provenance_annotations",
+    "provenance_findings",
+    "read",
+    "read_agents_md",
+    "read_source",
+    "resolve_slug",
+    "search",
+    "semantic_find_similar",
+    "source_citations",
+    "source_refs",
+    "steering",
+    "unreadable",
+})
+"""Returns content, identity or existence — filtered for the viewer.
+
+Each has a test in ``tests/test_restricted_reads.py`` showing a
+restricted item absent from its result.
+"""
+
+_WRITE_ENFORCED = frozenset({
+    "append_log",
+    "append_page",
+    "extend_page",
+    "record_ingestion",
+    "rename_page",
+    "write_page",
+})
+"""Produces a commit — subject to the write rule (§3.2) and closure."""
+
+_OPERATOR_ONLY = frozenset({
+    "add_source",
+    "assign_document_keys",
+    "commit_registry",
+    "ensure_sources_local",
+    "evolution",
+    "history",
+    "import_vault",
+    "propose_document_keys",
+    "rebuild_index",
+    "record_source_refs",
+    "rekey_document",
+    "repair_pages",
+    "semantic_reindex_all",
+    "semantic_reindex_path",
+    "semantic_remove_path",
+    "sources_gc",
+    "stale_pages",
+})
+"""Refused to a view entirely — the cheapest kind of safety.
+
+Two reasons appear here. The history readers (``history``,
+``evolution``) are answered by git, which knows nothing about labels,
+while the label index describes only the current commit: a page
+restricted today was open last month and its old bodies are still in
+the diff stream. Everything else is bulk maintenance that walks the
+whole wiki by design and that a served request has no business
+reaching.
+"""
+
+_NO_CONTENT = frozenset({
+    "allow_elision_body",
+    "as_viewer",
+    "close",
+    "contributors",
+    "enforces_visibility",
+    "grants",
+    "head",
+    "init",
+    "is_page_path",
+    "last_run",
+    "mode",
+    "open",
+    "pages_prefix",
+    "pull",
+    "push",
+    "record_run",
+    "restrictions",
+    "semantic_available",
+    "semantic_index_is_empty",
+})
+"""Returns no item content, identity, or existence. Nothing to filter."""
+
+
 class WikiStore:
     """Filesystem-backed wiki — the unit downstream code interacts with."""
 
@@ -348,6 +465,18 @@ class WikiStore:
         # an adjudication is about the words, and an alias must not make
         # the same decision be taken twice.
         self._elision_allowed: set[str] = set()
+        # Access control. ``None`` means no view has been taken: this is
+        # the bare server-side store and nothing is filtered. A view
+        # created by :meth:`as_viewer` carries a real (possibly empty)
+        # set, and every enforced path checks against it. The
+        # distinction matters — an empty mode is a *restricted* session
+        # that sees open content only, which is not the same thing as an
+        # unrestricted operator.
+        self._mode: frozenset[str] | None = None
+        self._grants: Grants = UNRESTRICTED_GRANTS
+        # Shared by every view derived from this store: views are
+        # per-request, the corpus walk that resolves labels is not.
+        self._label_cache = LabelCache()
 
     # ------------------------------------------------------------------
     # Construction
@@ -490,6 +619,15 @@ class WikiStore:
         path = self._page_path(slug)
         if not path.exists():
             raise OutmemError(f"No such wiki page: {slug}")
+        # After the existence check and before any content is read, so a
+        # hidden page and an absent one are indistinguishable from here.
+        if not self._page_visible(slug):
+            self._no_such_page(slug)
+        if slug == INDEX_SLUG and self.enforces_visibility:
+            # wiki/index.md on disk catalogues every page. Rendered live
+            # from what this view can see instead — a stored catalogue is
+            # a list of slugs the filter never gets to touch.
+            return self._visible_index_page(path)
         text = path.read_text(encoding="utf-8")
         try:
             frontmatter, body = parse_wiki_page(text, fallback_slug=slug)
@@ -513,10 +651,16 @@ class WikiStore:
         return WikiPage(slug=slug, frontmatter=frontmatter, body=body, path=path)
 
     def exists(self, slug: str) -> bool:
+        """Whether a page lives at ``slug``. ``False`` for a hidden one:
+        an honest ``True`` here is an existence oracle that costs the
+        caller nothing to query."""
         try:
-            return self._page_path(self.resolve_slug(slug)).exists()
+            resolved = self.resolve_slug(slug)
+            if not self._page_path(resolved).exists():
+                return False
         except SlugError:
             return False
+        return self._page_visible(resolved)
 
     def list_slugs(self) -> list[str]:
         """Every editorial slug under ``wiki/pages/``, alphabetically.
@@ -543,6 +687,9 @@ class WikiStore:
             except SlugError:
                 continue
             out.append(slug)
+        if self.enforces_visibility:
+            index = self._labels()
+            out = [s for s in out if self._page_visible(s, index)]
         return sorted(out)
 
     def _alias_index(self) -> dict[str, str]:
@@ -580,7 +727,14 @@ class WikiStore:
             return slug  # let the caller raise its own error
         if (self.pages_path / slug_to_relpath(slug)).exists():
             return slug
-        return self._alias_index().get(slug, slug)
+        canonical = self._alias_index().get(slug, slug)
+        if canonical != slug and not self._page_visible(canonical):
+            # Following the alias would hand back the canonical slug of a
+            # page this view cannot see — the name itself is the leak.
+            # Returning the input unchanged is what happens for an alias
+            # that does not exist.
+            return slug
+        return canonical
 
     def unreadable(self) -> list[tuple[str, str]]:
         """Every page under ``wiki/pages/`` that isn't cleanly addressable.
@@ -607,6 +761,7 @@ class WikiStore:
         from outmem.slug import relpath_to_slug
 
         out: list[tuple[str, str]] = []
+        index = self._labels()
         for path in editorial_pages(self.pages_path):
             slug = relpath_to_slug(path.relative_to(self.pages_path))
             try:
@@ -626,6 +781,11 @@ class WikiStore:
                         "(usually a `git mv` that didn't update the frontmatter)",
                     )
                 )
+        if self.enforces_visibility:
+            # An unparseable page resolves to DENY, so it drops out here
+            # for every mode — which is the point: its labels could not be
+            # read, so it cannot be shown to anyone.
+            out = [row for row in out if self._page_visible(row[0], index)]
         return sorted(set(out))
 
     def index_tree(self, prefix: str = "", *, titles: bool = False) -> IndexLevel:
@@ -692,6 +852,7 @@ class WikiStore:
         ``fix: repair frontmatter…`` commit (``commit_subject`` overrides
         the subject). Read-only stores refuse the write step.
         """
+        self._require_operator('repairing pages')
         from outmem.slug import relpath_to_slug
 
         repaired: list[tuple[str, str]] = []
@@ -739,7 +900,7 @@ class WikiStore:
         ``is_match=False``.
         """
         path, paths = self._resolve_scope(scope)
-        return search(
+        result = search(
             pattern,
             root=path,
             paths=paths,
@@ -749,15 +910,36 @@ class WikiStore:
             max_bytes=max_bytes,
             max_hits=max_hits,
         )
+        return self._filter_hits(result, scope)
 
     def backlinks(self, slug: str) -> tuple[str, ...]:
-        """Slugs of pages that link to ``slug`` at the current HEAD."""
+        """Slugs of pages that link to ``slug`` at the current HEAD.
+
+        Filtered for the viewer, and empty for a target the viewer
+        cannot see: the referrer list is a list of slugs, so an
+        unfiltered answer would name hidden pages, and answering at all
+        about a hidden target would confirm it exists.
+        """
         slug = self.resolve_slug(slug)
         validate_slug(slug)
-        return self.backlinks_cache.referrers(slug, head_or_none(self.root))
+        if not self._page_visible(slug):
+            return ()
+        refs = self.backlinks_cache.referrers(slug, head_or_none(self.root))
+        if not self.enforces_visibility:
+            return refs
+        index = self._labels()
+        return tuple(r for r in refs if self._page_visible(r, index))
 
     def history(self, slug: str) -> list[CommitInfo]:
-        """Per-page commit history (newest first), tracking renames."""
+        """Per-page commit history (newest first), tracking renames.
+
+        Operator-only. History is answered by git, which knows nothing
+        about labels, and the label index only describes the current
+        commit — a page restricted today was open last month, and its
+        old commits are still there. Filtering it correctly would mean
+        resolving labels at every commit in the range.
+        """
+        self._require_operator("page history")
         slug = self.resolve_slug(slug)
         validate_slug(slug)
         return page_history(self.root, slug, wiki_dir=self.config.wiki_dir)
@@ -768,7 +950,13 @@ class WikiStore:
         *,
         include_log: bool = True,
     ) -> str:
-        """Raw ``git log -p`` stream — the EXPANSION-pattern helper."""
+        """Raw ``git log -p`` stream — the EXPANSION-pattern helper.
+
+        Operator-only, for the same reason as :meth:`history` and with
+        more at stake: this returns diff *bodies*, so a page restricted
+        today would hand over the text it had while it was open.
+        """
+        self._require_operator("topic evolution")
         slugs = [self.resolve_slug(s) for s in slugs]
         return topic_evolution(
             self.root,
@@ -793,6 +981,15 @@ class WikiStore:
         bounded by ``default_window`` (a string ``git log --since``
         understands) so the first run doesn't dump every non-agent
         commit ever made into the agent's context.
+
+        Filtered for the viewer by commit subject. This matters more
+        than it looks: the steering signal is rendered into the *system
+        prompt*, so an unfiltered ``compact: hr:severance-policy``
+        reaches every request regardless of who is asking — the one leak
+        in the read surface that no tool call is needed to trigger.
+        Filtering on the mode rather than the user keeps the system
+        prompt identical for everyone in one compartment, which is what
+        prompt caching needs.
         """
         if head_or_none(self.root) is None:
             # No commits yet; nothing to steer on.
@@ -803,12 +1000,40 @@ class WikiStore:
         paths = [self.config.wiki_dir]
         if include_log:
             paths.append(self.config.log_dir)
-        return log_since(
+        commits = log_since(
             self.root,
             since=since,
             paths=paths,
             exclude_author=self.config.agent_identity.email,
         )
+        if not self.enforces_visibility:
+            return commits
+        index = self._labels()
+        return [c for c in commits if self._subject_visible(c.subject, index)]
+
+    def _subject_visible(self, subject: str, index: LabelIndex) -> bool:
+        """Whether a commit subject may be shown to this viewer.
+
+        outmem's own subjects are ``<verb>: <slug-or-path>``, so the
+        slug is recoverable without parsing the diff. A subject in any
+        other shape is a human's own commit message and is shown as-is —
+        it names no item this mechanism can resolve, and lint's
+        ``restricted-slug-mentioned`` check is what covers prose.
+        """
+        verb, sep, rest = subject.partition(": ")
+        if not sep:
+            return True
+        target = rest.strip()
+        if verb in ("compact", "extend", "append", "rename", "restrict"):
+            # `rename: old -> new` names two slugs; either being hidden
+            # hides the commit.
+            return all(
+                self._can_see(index.for_page(part.strip()))
+                for part in target.replace("->", " ").split()
+            )
+        if verb in ("source", "ingest"):
+            return self._can_see(index.for_source(target))
+        return True
 
     # ------------------------------------------------------------------
     # Write
@@ -972,6 +1197,7 @@ class WikiStore:
 
     def commit_registry(self, subject: str) -> str | None:
         """Commit ``.sources.db`` alone, for registry-only mutations."""
+        self._require_operator("committing the registry")
         return self._commit_paths(
             [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
             subject=subject,
@@ -985,6 +1211,7 @@ class WikiStore:
         *today* is worth capturing before the next reorganisation makes it
         unresolvable — see ``outmem sources backfill``.
         """
+        self._require_operator("recording source references")
         return _sources.record_source_refs(self, rel_path)
 
     def source_refs(self, rel_path: str | None = None) -> list[SourceRef]:
@@ -999,16 +1226,34 @@ class WikiStore:
         actually holds it is consulted — asking the tracked registry
         about a local source returns an empty list, which reads as "this
         source names no pages" when the truth is "wrong registry".
+
+        Filtered at both ends for a viewer: a ref pairs a source key
+        with a page slug, so it discloses whichever of the two is
+        hidden.
         """
         if rel_path is None:
-            return [
+            refs = [
                 ref
                 for tree in _sources.existing_trees(self)
                 for ref in _sources.get_registry(self, tree).refs(None)
             ]
-        found = _sources.resolve_source(self, rel_path)
-        tree, key = found if found is not None else (_sources.tracked_tree(self), rel_path)
-        return _sources.get_registry(self, tree).refs(key)
+        else:
+            if not self._source_visible(rel_path):
+                return []
+            found = _sources.resolve_source(self, rel_path)
+            tree, key = (
+                found if found is not None else (_sources.tracked_tree(self), rel_path)
+            )
+            refs = _sources.get_registry(self, tree).refs(key)
+        if not self.enforces_visibility:
+            return refs
+        index = self._labels()
+        return [
+            ref
+            for ref in refs
+            if self._source_visible(ref.rel_path, index)
+            and self._page_visible(ref.page_slug, index)
+        ]
 
     def _rewrite_links_to(self, old_slug: str, new_slug: str) -> list[str]:
         """Point every ``[[old_slug]]`` at ``new_slug``. Returns paths touched.
@@ -1207,6 +1452,7 @@ class WikiStore:
         hook, where we want the rebuilt index to land in the
         human's commit rather than a separate one).
         """
+        self._require_operator("rebuilding the index")
         self._regenerate_index()
         rel = f"{self.config.wiki_dir}/{INDEX_FILENAME}"
         if not commit:
@@ -1305,6 +1551,7 @@ class WikiStore:
         rules are unioned in. Orthogonal to ``local``, which is about
         redistribution rights rather than secrecy.
         """
+        self._require_operator('registering a source')
         return _sources.add_source(
             self,
             source,
@@ -1342,6 +1589,7 @@ class WikiStore:
         from outmem.lint import provenance_ref
 
         out: dict[str, list[str]] = {}
+        index = self._labels() if self.enforces_visibility else None
         pages, failures = load_editorial_pages(self.pages_path)
         for page in pages:
             for entry in page.frontmatter.provenance:
@@ -1356,8 +1604,16 @@ class WikiStore:
                 is_local = tree is not None and not tree.tracked
                 if local is not None and is_local is not local:
                     continue
+                # Both ends of the edge: the citation names a source
+                # (whose rel_path embeds a filename) and a page. Either
+                # being hidden hides the edge.
+                if index is not None and not (
+                    self._page_visible(page.slug, index)
+                    and self._source_visible(key, index)
+                ):
+                    continue
                 out.setdefault(key, []).append(page.slug)
-        return out, failures
+        return out, self._visible_failures(failures, index)
 
     def provenance_annotations(self) -> dict[tuple[str, str], ProvenanceAnnotation]:
         """``(source key, slug) -> annotation`` for citations carrying one.
@@ -1376,6 +1632,7 @@ class WikiStore:
         from outmem.lint import provenance_annotation, provenance_ref
 
         out: dict[tuple[str, str], ProvenanceAnnotation] = {}
+        index = self._labels() if self.enforces_visibility else None
         pages, _failures = load_editorial_pages(self.pages_path)
         for page in pages:
             for entry in page.frontmatter.provenance:
@@ -1384,6 +1641,11 @@ class WikiStore:
                 if ref is None or not annotation:
                     continue
                 _tree, key = _sources.split_tree_prefix(self, ref)
+                if index is not None and not (
+                    self._page_visible(page.slug, index)
+                    and self._source_visible(key, index)
+                ):
+                    continue
                 out[(key, page.slug)] = annotation
         return out
 
@@ -1423,6 +1685,7 @@ class WikiStore:
         ``include_acknowledged`` — see :func:`_acknowledgement` for why
         that suppression expires rather than being permanent.
         """
+        self._require_operator('the staleness report')
         from outmem.sources import StaleCitation
 
         out: list[StaleCitation] = []
@@ -1483,6 +1746,7 @@ class WikiStore:
         available. Should that ever stop being true, this becomes a loop
         over ``existing_trees`` like :meth:`stale_pages`.
         """
+        self._require_operator("proposing document keys")
         from outmem.sources import propose_document_keys
 
         citations, failures = self.source_citations(local=False)
@@ -1501,6 +1765,7 @@ class WikiStore:
         """
         from outmem.sources import DocumentKeyConflict
 
+        self._require_operator("assigning document keys")
         registry = _sources.get_registry(self)
         written = 0
         for rel_path, key in pairs:
@@ -1544,6 +1809,7 @@ class WikiStore:
         Each tree has its own registry, so a key held in both names two
         unrelated documents and must be disambiguated.
         """
+        self._require_operator('rekeying a document')
         tree = self._tree_for_document(old_key, local=local)
         registry = _sources.get_registry(self, tree)
         if dry_run:
@@ -1609,6 +1875,7 @@ class WikiStore:
         also the one nothing cleans. Only the tracked registry produces
         a commit; the local one lives inside the gitignored tree.
         """
+        self._require_operator("source garbage collection")
         from outmem.sources import RegistryAudit, gc_registry
 
         audit = gc_registry(self.sources_path, dry_run=dry_run)
@@ -1640,15 +1907,35 @@ class WikiStore:
         )
 
     def list_sources(self, *, include_missing: bool = False) -> list[SourceEntry]:
-        """Every registered source, ordered by relative path."""
-        return _sources.list_sources(self, include_missing=include_missing)
+        """Every registered source visible to this viewer, by relative path.
+
+        A source's ``rel_path`` embeds its original filename, so listing
+        one is disclosure even without reading it.
+        """
+        entries = _sources.list_sources(self, include_missing=include_missing)
+        if not self.enforces_visibility:
+            return entries
+        index = self._labels()
+        return [e for e in entries if self._source_visible(e.rel_path, index)]
 
     def get_source(self, rel_path: str) -> SourceEntry | None:
-        """Lookup a single registered source by its relative path."""
+        """Lookup a single registered source by its relative path.
+
+        ``None`` for a hidden source — the same answer as for one that
+        was never registered.
+        """
+        if not self._source_visible(rel_path):
+            return None
         return _sources.get_source(self, rel_path)
 
     def read_source(self, rel_path: str, *, max_chars: int | None = None) -> str:
-        """Return the text of a source file, capped at ``max_chars``."""
+        """Return the text of a source file, capped at ``max_chars``.
+
+        A hidden source produces the byte-identical not-found text that
+        an unregistered path does.
+        """
+        if not self._source_visible(rel_path):
+            raise OutmemError(f"no such source: {rel_path}")
         return _sources.read_source(self, rel_path, max_chars=max_chars)
 
     def record_ingestion(
@@ -1690,10 +1977,15 @@ class WikiStore:
         full contract — flat slug namespace with collision resolution,
         wikilink rewriting, one atomic commit.
         """
+        self._require_operator('vault import')
         return _import.import_vault(self, Path(source).expanduser(), force=force)
 
     # ------------------------------------------------------------------
     # Semantic index — implementations live in :mod:`outmem._store.semantic`
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Access control — see ``specs/restricted-content.md``
     # ------------------------------------------------------------------
 
     @property
@@ -1705,6 +1997,223 @@ class WikiStore:
         every call site.
         """
         return self.config.outmem.restricted
+
+    def as_viewer(
+        self,
+        *,
+        mode: Iterable[str] = (),
+        grants: Grants | None = None,
+    ) -> WikiStore:
+        """A store that sees only what ``mode`` is allowed to see.
+
+        This is the object a served request should hold. Hand it to
+        ``wiki_read_tools(view)`` and the model's whole world is what
+        the view exposes — restricted content is filtered before it ever
+        becomes prompt text, so there is no instruction, tool
+        description, or system-prompt rule anywhere in the enforcement
+        path, and nothing for a model to get wrong.
+
+        ``mode`` is the set of compartments this session works in, and
+        it is **immutable for the session's duration**. It defaults to
+        the empty set: a session that does not name a compartment
+        retrieves open content only, exactly as outmem behaves with no
+        restrictions configured. Restricted content is opt-in, and there
+        is deliberately no mechanism by which retrieving something
+        widens the mode.
+
+        ``grants`` is what the *user* is entitled to, from the calling
+        application's own authentication; ``mode`` is what this session
+        is scoped to within that. The two differ: a user who holds
+        ``hr`` but is running in mode ``∅`` is entitled to HR content
+        and simply is not asking for it, which is why retrieval may tell
+        them matches exist elsewhere (see ``search``).
+
+        The returned object is a shallow copy sharing this store's
+        caches, registries and write lock — one process, many views. It
+        holds no reference to the unrestricted store, so nothing
+        downstream can climb back out of the view.
+
+        Raises:
+            LabelError: if ``mode`` names an undeclared label, or one the
+                user does not hold a read grant for.
+        """
+        resolved = normalise_labels(mode)
+        entitlement = grants if grants is not None else UNRESTRICTED_GRANTS
+        self.restrictions.check_declared(resolved, what="label in mode")
+        if grants is not None and not entitlement.may_read(resolved):
+            # The one direction that would otherwise be silent: a mode
+            # wider than the grant would show the user content they are
+            # not entitled to, and every downstream check trusts the mode.
+            missing = ", ".join(sorted(resolved - entitlement.read))
+            raise LabelError(
+                f"mode requests label(s) the user cannot read: {missing}."
+            )
+        view = copy.copy(self)
+        view._mode = resolved
+        view._grants = entitlement
+        return view
+
+    @property
+    def enforces_visibility(self) -> bool:
+        """True when this store is a view, i.e. filtering is in effect.
+
+        The bare store returns ``False`` and every guard below is a
+        single attribute test — a wiki with no restrictions pays nothing
+        for this feature beyond that.
+        """
+        return self._mode is not None
+
+    @property
+    def mode(self) -> frozenset[str]:
+        """This view's compartments. Empty on the bare store."""
+        return self._mode or frozenset()
+
+    @property
+    def grants(self) -> Grants:
+        """What the viewing user is entitled to, independent of the mode."""
+        return self._grants
+
+    def _labels(self) -> LabelIndex:
+        """The resolved label index, rebuilt when HEAD has moved."""
+        return self._label_cache.get(self)
+
+    def _can_see(self, labels: Iterable[str]) -> bool:
+        """§3.1 — ``labels ⊆ mode``. Always true on the bare store."""
+        if self._mode is None:
+            return True
+        return visible(labels, self._mode)
+
+    def _page_visible(self, slug: str, index: LabelIndex | None = None) -> bool:
+        if self._mode is None:
+            return True
+        idx = index if index is not None else self._labels()
+        return self._can_see(idx.for_page(slug))
+
+    def _source_visible(self, key: str, index: LabelIndex | None = None) -> bool:
+        if self._mode is None:
+            return True
+        idx = index if index is not None else self._labels()
+        return self._can_see(idx.for_source(key))
+
+    def _repo_path_visible(self, rel_path: str, index: LabelIndex) -> bool:
+        """Visibility for a repo-relative path — the form ripgrep hits and
+        semantic chunks arrive in.
+
+        Everything a search can reach falls into one of four trees, and
+        each maps back onto an item whose labels are already resolved:
+        a page path to its slug, a source path to its registry key, a
+        log path to the mode that wrote it. A path in none of them is
+        open — the alternative, denying what we cannot classify, would
+        hide ``AGENTS.md`` from every view for no gain.
+        """
+        pages_prefix = self.pages_prefix()
+        if rel_path.startswith(pages_prefix):
+            from outmem.slug import relpath_to_slug
+
+            tail = rel_path[len(pages_prefix) :]
+            return self._can_see(index.for_page(relpath_to_slug(Path(tail))))
+        for tree in (SOURCES_DIR, SOURCES_LOCAL_DIR):
+            prefix = f"{self.config.wiki_dir}/{tree}/"
+            if rel_path.startswith(prefix):
+                return self._can_see(index.for_source(f"{tree}/{rel_path[len(prefix):]}"))
+        log_prefix = f"{self.config.log_dir}/"
+        if rel_path.startswith(log_prefix):
+            parts = rel_path[len(log_prefix) :].split("/")
+            if len(parts) < 2:
+                return True  # log/<date>.md — the open partition
+            labels = mode_from_dirname(parts[0])
+            return True if labels is None else self._can_see(labels)
+        return True
+
+    def _filter_hits(self, result: SearchResult, scope: str) -> SearchResult:
+        """Drop ripgrep rows from files this viewer cannot see.
+
+        Hit paths are relative to the scope's search root, not the repo,
+        so they are re-anchored before being classified. ``truncated``
+        is carried through unchanged: it describes the ripgrep run, and
+        rewriting it from the filtered count would tell the caller
+        something about what was removed.
+        """
+        if not self.enforces_visibility:
+            return result
+        import dataclasses
+
+        prefix = {
+            "wiki": self.pages_prefix(),
+            "log": f"{self.config.log_dir}/",
+        }.get(scope, "")
+        index = self._labels()
+        kept = tuple(
+            hit
+            for hit in result.hits
+            if self._repo_path_visible(prefix + hit.path, index)
+        )
+        return dataclasses.replace(result, hits=kept)
+
+    def _require_operator(self, what: str) -> None:
+        """Refuse a path that a served request has no business calling.
+
+        The cheapest kind of safety: a method not reachable from a view
+        is a bypass class that needs no filtering code, no test, and
+        cannot regress. Used for bulk maintenance and for the two
+        history readers, whose output is raw git and cannot be filtered
+        by a label index that only knows the current commit.
+        """
+        if self._mode is not None:
+            raise RestrictionError(
+                f"{what} is not available to a restricted view; it runs "
+                "against the whole wiki and is an operator-only path."
+            )
+
+    def _visible_index_page(self, path: Path) -> WikiPage:
+        """The ``index`` slug, rendered live from what this view can see.
+
+        ``wiki/index.md`` on disk catalogues every page in the wiki —
+        one file whose entire purpose is to list slugs. Serving it to a
+        view would hand over the name of everything hidden, which is the
+        single largest leak in the read surface and the one that no
+        amount of per-page filtering elsewhere would catch.
+        """
+        from outmem.index import INDEX_TITLE, render_index
+
+        index = self._labels()
+        body = render_index(
+            self.pages_path, include=lambda slug: self._page_visible(slug, index)
+        )
+        return WikiPage(
+            slug=INDEX_SLUG,
+            frontmatter=WikiFrontmatter(
+                title=INDEX_TITLE,
+                slug=INDEX_SLUG,
+                tags=["index"],
+                extra={"generated": True},
+            ),
+            body=body,
+            path=path,
+        )
+
+    def _visible_failures(
+        self, failures: list[PageLoadFailure], index: LabelIndex | None
+    ) -> list[PageLoadFailure]:
+        """Drop load failures for pages this viewer cannot see.
+
+        A failure names a slug and a reason, which is enough to learn
+        that a page exists. Unparseable pages resolve to DENY, so under
+        a view this drops all of them — that is deliberate, and it is
+        why lint runs against the bare store.
+        """
+        if index is None:
+            return failures
+        return [f for f in failures if self._page_visible(f.slug, index)]
+
+    def _no_such_page(self, slug: str) -> NoReturn:
+        """Raise exactly what a nonexistent slug raises.
+
+        Not a distinct "denied" error, and not a distinct message: the
+        difference between "no such page" and "you may not see that
+        page" is precisely the fact being withheld.
+        """
+        raise OutmemError(f"No such wiki page: {slug}")
 
     def semantic_available(self) -> bool:
         """Whether this wiki's semantic index has been built (its db
@@ -1729,14 +2238,25 @@ class WikiStore:
         threshold: float | None = None,
         exclude_slug: str | None = None,
     ) -> list[Match]:
-        """Return the top semantic matches for ``text``."""
-        return _semantic.find_similar(
+        """Return the top semantic matches for ``text``.
+
+        Restricted pages and sources are indexed normally and filtered
+        here, at query time, so a cleared user keeps full semantic
+        recall. The price is stated in the spec rather than engineered
+        away: ``.vectors.db`` holds restricted chunk text verbatim and
+        is as sensitive as the most restricted item in it.
+        """
+        matches = _semantic.find_similar(
             self,
             text,
             top_k=top_k,
             threshold=threshold,
             exclude_slug=exclude_slug,
         )
+        if not self.enforces_visibility:
+            return matches
+        index = self._labels()
+        return [m for m in matches if self._repo_path_visible(m.rel_path, index)]
 
     def semantic_reindex_path(self, rel_path: str) -> ReindexResult | None:
         """Reindex a single file by repo-relative path.
@@ -1745,10 +2265,12 @@ class WikiStore:
         check inside :meth:`VectorStore.reindex_file` short-circuits
         unchanged content.
         """
+        self._require_operator("reindexing")
         return _semantic.reindex_path(self, rel_path)
 
     def semantic_remove_path(self, rel_path: str) -> int:
         """Drop all chunks + vectors for ``rel_path``. Returns count removed."""
+        self._require_operator("reindexing")
         return _semantic.remove_path(self, rel_path)
 
     def semantic_reindex_all(
@@ -1767,6 +2289,7 @@ class WikiStore:
         The summary's ``dropped_paths`` lists wiki pages that exist on disk
         but did not make it into the index — check them, they are
         unreachable by search."""
+        self._require_operator('reindexing')
         return _semantic.reindex_all(
             self,
             force=force,
@@ -1997,6 +2520,7 @@ class WikiStore:
         first and ignored second is a source that a concurrent
         ``git add -A`` can still catch.
         """
+        self._require_operator("creating the local source tree")
         if self.config.read_only:
             raise OutmemError(
                 f"wiki at {self.root} is opened read-only; refused to create "
@@ -2047,11 +2571,37 @@ class WikiStore:
 
         The agent-runtime injects this into the system prompt as the
         wiki-conventions section; see :func:`outmem.agent.render_system_prompt`.
+
+        For a viewer, lines naming a hidden slug are dropped. A
+        conventions file is exactly where someone writes "HR policies go
+        under ``hr:``", and this text reaches the system prompt of every
+        request. Line granularity is crude, but it is deterministic and
+        it errs toward removing context rather than disclosing a name;
+        ``outmem lint`` reports the mentions so they can be rewritten
+        properly.
         """
         try:
-            return self.agents_path.read_text(encoding="utf-8").strip() or None
+            text = self.agents_path.read_text(encoding="utf-8").strip() or None
         except OSError:
             return None
+        if text is None or not self.enforces_visibility:
+            return text
+        return self._drop_hidden_mentions(text)
+
+    def _drop_hidden_mentions(self, text: str) -> str | None:
+        """Remove lines naming a slug this viewer cannot see."""
+        from outmem.slug import extract_slug_references
+
+        index = self._labels()
+        kept = [
+            line
+            for line in text.splitlines()
+            if all(
+                self._page_visible(ref, index)
+                for ref in {r.slug for r in extract_slug_references(line)}
+            )
+        ]
+        return "\n".join(kept).strip() or None
 
     def _commit_paths(self, paths: Sequence[str], *, subject: str) -> str:
         if self.config.read_only:
