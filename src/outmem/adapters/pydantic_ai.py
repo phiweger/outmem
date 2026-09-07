@@ -96,24 +96,63 @@ def _summarise(value: Any, *, limit: int = 60) -> str:
 # backend outside the deployment. The formatted message already
 # summarises long strings as "(N chars)"; this closes the structured
 # half, which was verbatim.
-_CONTENT_ARGS = frozenset({"body", "text", "note", "prompt"})
+# Enumerated from the `_log_call` sites, not from memory: every kwarg
+# that carries page or source *text* rather than a reference to it.
+# `title` and `topic` are content — a title is page text and an
+# `append_log` topic is written by the agent — and `content` is a whole
+# log entry. `section` is a query the model composed, which can quote
+# the page it is looking for.
+_CONTENT_ARGS = frozenset(
+    {"body", "content", "prompt", "section", "text", "title", "topic"}
+)
 
+# References, kept deliberately. A trace that says only "read_page
+# happened" is not a trace; slugs, paths and tags are what make one
+# useful, and none of them is the item's content. Note the residual this
+# leaves, stated in docs/restricted-content.md: with Logfire enabled,
+# the tool log records WHICH items a session touched, and a source's
+# `rel_path` embeds its original filename. That is a deployment choice
+# about an observability backend, not something a filter can take back.
+_REFERENCE_ARGS = frozenset({"slug", "slugs", "rel_path", "provenance", "tags"})
 
-def _redacted(kwargs: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: (f"({len(value)} chars, redacted)" if isinstance(value, str) else value)
-        if key in _CONTENT_ARGS
-        else value
-        for key, value in kwargs.items()
+# Everything else a tool logs: the model's own query, and knobs. A
+# question the model wrote is not content it was shown, and a trace
+# without it is unreadable.
+_QUERY_ARGS = frozenset(
+    {
+        "case_insensitive",
+        "context",
+        "exclude_slug",
+        "include_log",
+        "k",
+        "pages_touched",
+        "pattern",
+        "peek",
+        "prefix",
+        "question",
+        "scope",
+        "top_k",
     }
+)
+
+
+def _redact(key: str, value: Any) -> Any:
+    if key not in _CONTENT_ARGS or not isinstance(value, str):
+        return value
+    return f"({len(value)} chars, redacted)"
 
 
 def _log_call(name: str, **kwargs: Any) -> None:
-    formatted = " ".join(f"{k}={_summarise(v)}" for k, v in kwargs.items())
+    # Redact ONCE, for both halves. `_summarise` only collapses strings
+    # over 60 characters, so a title or a log topic — short by nature —
+    # was appearing verbatim in the formatted message even while the
+    # structured payload was clean.
+    safe = {key: _redact(key, value) for key, value in kwargs.items()}
+    formatted = " ".join(f"{k}={_summarise(v)}" for k, v in safe.items())
     # ``tool_call`` carries the kwargs so logging handlers can do
     # structured analysis (e.g. eval recorders) without having to parse
     # the formatted string. Stays on the LogRecord as ``record.tool_call``.
-    _tool_log.info("%s %s", name, formatted, extra={"tool_call": (name, _redacted(kwargs))})
+    _tool_log.info("%s %s", name, formatted, extra={"tool_call": (name, safe)})
 
 
 def _log_error(name: str, exc: Exception) -> None:

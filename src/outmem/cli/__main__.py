@@ -824,6 +824,30 @@ def cmd_sources_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sources_restrict(args: argparse.Namespace) -> int:
+    """`outmem sources restrict <path> --label hr` — the source verb.
+
+    The counterpart to `outmem restrict` for pages, and the one the
+    registry's own error messages point at. Every page compiled from
+    this source inherits its labels, so this is the smallest edit that
+    restricts a whole downstream.
+    """
+    store = _open_store(args)
+    try:
+        entry = store.restrict_source(args.rel_path, labels=args.label or [])
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 1
+    shown = ", ".join(sorted(entry.restricted)) or "(none — now open)"
+    _status(f"{entry.citation_path} restricted to: {shown}")
+    if not entry.restricted:
+        _status(
+            "pages compiled from it keep any labels of their own; run "
+            "`outmem lint` to see what changed."
+        )
+    return 0
+
+
 def cmd_sources_gc(args: argparse.Namespace) -> int:
     store = _open_store(args)
     audit = store.sources_gc(dry_run=not args.apply)
@@ -1453,6 +1477,27 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[root_parent],
     )
     p_sources_list.set_defaults(func=cmd_sources_list)
+
+    p_sources_restrict = sources_sub.add_parser(
+        "restrict",
+        help="Set a source's restriction labels (pages inherit them).",
+        parents=[root_parent],
+    )
+    p_sources_restrict.add_argument(
+        "rel_path",
+        help="Registry path, in any spelling `read_source` accepts.",
+    )
+    p_sources_restrict.add_argument(
+        "--label",
+        action="append",
+        default=None,
+        metavar="LABEL",
+        help="Restriction label; repeat for several. Must be declared under "
+        "`restricted.labels` in config.yaml. Passing none makes the source "
+        "open again, which is declassification — every page that inherited "
+        "the label from it loses that label too.",
+    )
+    p_sources_restrict.set_defaults(func=cmd_sources_restrict)
 
     p_sources_gc = sources_sub.add_parser(
         "gc",

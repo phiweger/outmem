@@ -249,6 +249,19 @@ class TestUnparseableFrontmatter:
         store.write_page("p", title="P", body="Text.\n")
         assert "restricted-frontmatter-unparseable" not in _kinds(_run(store))
 
+    def test_a_page_with_no_slug_key_is_not_reported(
+        self, store: WikiStore
+    ) -> None:
+        """The path addresses a page; `slug:` is a declaration to check
+        it against. The store reads such a page fine, so reporting it as
+        "denied to every mode" was simply false — lint has to use the
+        same parse contract as the reader it is describing."""
+        (store.pages_path / "nosluggy.md").write_text(
+            "---\ntitle: No Slug\n---\n\nBody.\n"
+        )
+        assert store.read("nosluggy")
+        assert "restricted-frontmatter-unparseable" not in _kinds(_run(store))
+
 
 class TestChainConsistency:
     def test_versions_with_different_labels_are_an_error(

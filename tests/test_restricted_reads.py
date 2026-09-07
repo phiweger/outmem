@@ -591,7 +591,7 @@ class TestEveryPublicMethodIsClassified:
             "init", "open", "close", "pull", "push", "record_run",
             "as_viewer", "allow_elision_body", "is_page_path",
         }
-        called = 0
+        checked: list[str] = []
         for name in sorted(_NO_CONTENT - skip):
             member = getattr(type(hr_view), name, None)
             value = (
@@ -599,10 +599,13 @@ class TestEveryPublicMethodIsClassified:
                 if isinstance(member, property)
                 else getattr(hr_view, name)()
             )
-            called += 1
+            checked.append(name)
             assert secret not in repr(value), name
             assert "hr:severance" not in repr(value), name
-        assert called >= 8, "the skip list has swallowed the check"
+        # Most of the bucket is actually exercised, so growing the skip
+        # list to dodge the check shows up here rather than passing
+        # quietly.
+        assert len(checked) > len(skip), sorted(skip)
 
 
 class TestGrantsVersusMode:
@@ -620,11 +623,11 @@ class TestGrantsVersusMode:
         session. A mode the model could change would let it read under
         one and write under another."""
         assert hr_view.mode == frozenset({"hr"})
-        assert not any(
-            "mode" in name and not name.startswith("_")
-            for name in dir(hr_view)
-            if callable(getattr(hr_view, name, None))
-        )
+        # `mode` is a read-only property, so there is no setter to reach
+        # even from inside the process — let alone from a tool argument.
+        with pytest.raises(AttributeError):
+            hr_view.mode = frozenset()  # type: ignore[misc]
+        assert hr_view.mode == frozenset({"hr"})
 
 
 def test_deny_set_is_not_reachable_as_a_mode(store: WikiStore) -> None:
@@ -633,3 +636,190 @@ def test_deny_set_is_not_reachable_as_a_mode(store: WikiStore) -> None:
     readable by asking for it."""
     with pytest.raises(LabelError):
         store.as_viewer(mode=DENY_SET, grants=Grants())
+
+
+class TestViewsShareTheStoresResources:
+    """A view is a shallow copy, so anything it *assigns* diverges — and
+    the source registries are assigned lazily.
+
+    A view that had touched sources held a registry snapshot from that
+    moment and never saw a row added afterwards. The label index then
+    had no entry for that source, and a missing entry reads as open. The
+    same divergence gave every view its own SQLite connections, which
+    only that view's `close()` would release.
+    """
+
+    def test_a_view_sees_a_source_registered_after_it_was_built(
+        self, store: WikiStore, tmp_path: Path
+    ) -> None:
+        view = store.as_viewer()
+        view.list_sources()  # force the view to open a registry
+
+        doc = tmp_path / "severance-framework.md"
+        doc.write_text("SECRET twelve weeks.\n")
+        store.add_source(doc, restricted=["hr"])
+
+        assert view.list_sources() == []
+        assert not view.search("SECRET", scope="all").hits
+
+    def test_the_registries_are_the_same_objects(
+        self, store: WikiStore
+    ) -> None:
+        view = store.as_viewer()
+        view.list_sources()
+        assert view._source_registry is store._source_registry
+
+    def test_so_are_the_lock_and_the_label_index(self, store: WikiStore) -> None:
+        view = store.as_viewer()
+        assert view._write_lock is store._write_lock
+        assert view._label_cache is store._label_cache
+
+    def test_two_views_share_them_too(self, store: WikiStore) -> None:
+        a, b = store.as_viewer(), store.as_viewer(grants=Grants.reader("hr"))
+        a.list_sources()
+        assert a._source_registry is b._source_registry
+
+
+class TestSourcePathSpellings:
+    """`resolve_source` resolves against the filesystem, so a caller can
+    name one file many ways. A guard that compares strings cannot keep
+    up, and a miss reads as open."""
+
+    @pytest.fixture
+    def entry(self, store: WikiStore, tmp_path: Path):  # type: ignore[no-untyped-def]
+        doc = tmp_path / "severance-plan-2026.md"
+        doc.write_text("SECRET: twelve weeks.\n")
+        return store.add_source(doc, restricted=["hr"])
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "{rel}",
+            "sources/{rel}",
+            "wiki/sources/{rel}",
+            "sources/./{rel}",
+            "sources/../sources/{rel}",
+            "wiki/sources/../sources/{rel}",
+            "./sources/{rel}",
+        ],
+    )
+    def test_every_spelling_is_refused(
+        self, store: WikiStore, entry, shape: str
+    ) -> None:
+        key = shape.format(rel=entry.rel_path)
+        with pytest.raises(OutmemError, match="no such source"):
+            store.as_viewer().read_source(key)
+
+    def test_the_cleared_mode_reads_it_by_any_spelling(
+        self, store: WikiStore, entry
+    ) -> None:
+        view = store.as_viewer(mode={"hr"}, grants=Grants.reader("hr"))
+        assert "twelve weeks" in view.read_source(f"sources/./{entry.rel_path}")
+
+    def test_a_page_citing_an_odd_spelling_still_inherits(
+        self, store: WikiStore, entry
+    ) -> None:
+        """Otherwise the page stays open while printing the restricted
+        source's filename in its own provenance."""
+        store.write_page(
+            "derived",
+            title="D",
+            body="A fact.\n",
+            provenance=[f"sources/./{entry.rel_path}"],
+        )
+        assert "derived" not in store.as_viewer().list_slugs()
+
+
+class TestPathRulesCoverNamesThatAreNotLivePages:
+    """The page map holds only the `.md` files under `wiki/pages/`, so
+    everything else in that tree was missing from it — and a miss reads
+    as open, right through a namespace the config had restricted."""
+
+    @pytest.fixture
+    def store(self, tmp_path: Path) -> WikiStore:
+        return _wiki(tmp_path, paths={"hr:*": ["hr"]})
+
+    def test_a_non_markdown_file_under_a_restricted_namespace(
+        self, store: WikiStore
+    ) -> None:
+        (store.pages_path / "hr").mkdir(parents=True, exist_ok=True)
+        (store.pages_path / "hr" / "table.txt").write_text("SECRETPAYROLL band 4\n")
+        view = store.as_viewer()
+        assert not view.search("SECRETPAYROLL", scope="wiki").hits
+        assert not view.search("SECRETPAYROLL", scope="all").hits
+
+    def test_agents_md_naming_a_slug_before_its_page_exists(
+        self, store: WikiStore
+    ) -> None:
+        """AGENTS.md reaches every system prompt, and it is exactly where
+        somebody writes "payroll bands belong in hr:payroll-bands" for a
+        page that has not been written yet."""
+        store.agents_path.write_text(
+            "Keep terms in [[glossary]].\n"
+            "Payroll bands belong in hr:payroll-bands.\n"
+        )
+        text = store.as_viewer().read_agents_md()
+        assert "glossary" in text
+        assert "payroll-bands" not in text
+
+    def test_the_cleared_mode_keeps_both(self, store: WikiStore) -> None:
+        (store.pages_path / "hr").mkdir(parents=True, exist_ok=True)
+        (store.pages_path / "hr" / "table.txt").write_text("SECRETPAYROLL band 4\n")
+        view = store.as_viewer(mode={"hr"}, grants=Grants.reader("hr"))
+        assert view.search("SECRETPAYROLL", scope="wiki").hits
+
+
+class TestLogPartitionsAreNotOverReadAsCompartments:
+    """`archive` and `2024` are perfectly good label names, so treating
+    every `log/` subdirectory as a compartment made ordinary log layouts
+    invisible to every viewer."""
+
+    def test_an_undeclared_directory_name_is_not_a_partition(
+        self, store: WikiStore
+    ) -> None:
+        (store.log_path / "archive").mkdir(parents=True, exist_ok=True)
+        (store.log_path / "archive" / "2024-01-01.md").write_text(
+            "An old note about cycling.\n"
+        )
+        assert store.as_viewer().search("cycling", scope="log").hits
+
+    def test_a_declared_one_still_is(self, store: WikiStore) -> None:
+        hr = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        hr.append_log(topic="t", content="A severance discussion.\n")
+        assert not store.as_viewer().search("severance", scope="log").hits
+
+    def test_a_partition_shaped_name_with_an_unknown_label_is_hidden(
+        self, store: WikiStore
+    ) -> None:
+        """`hr+nonsense` can only have been written by this mechanism,
+        and we cannot tell who it was for."""
+        (store.log_path / "hr+nonsense").mkdir(parents=True, exist_ok=True)
+        (store.log_path / "hr+nonsense" / "d.md").write_text("Ambiguous.\n")
+        assert not store.as_viewer().search("Ambiguous", scope="log").hits
+
+
+class TestSteeringDoesNotCarryLogTopics:
+    """A `log:` subject is a topic somebody typed, not a name this can
+    resolve — so it cannot be filtered by parsing it. The pathspec is
+    narrowed instead, and a partition the viewer cannot see is never
+    walked."""
+
+    def test_a_restricted_log_subject_never_reaches_an_open_view(
+        self, store: WikiStore
+    ) -> None:
+        import dataclasses
+
+        store.config.agent_identity = dataclasses.replace(
+            store.config.agent_identity, email="somebody-else@host"
+        )
+        hr = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        hr.append_log(topic="severance cap review", content="Notes.\n")
+
+        subjects = [c.subject for c in store.as_viewer().steering()]
+        assert not any("severance" in s for s in subjects)
+        assert any(
+            "severance" in c.subject
+            for c in store.as_viewer(
+                mode={"hr"}, grants=Grants.reader("hr")
+            ).steering()
+        )

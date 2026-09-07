@@ -6,8 +6,10 @@ anything becomes prompt text. No decision here depends on a model
 behaving correctly: there is no instruction, no system-prompt rule, and
 no tool description anywhere in the enforcement path.
 
-Content is **open by default**. A wiki that declares no labels behaves
-exactly as it did before this feature existed, and pays nothing for it.
+Content is **open by default**. A wiki that never takes a view behaves
+exactly as it did before this feature existed and pays nothing for it —
+every enforcement point tests for a view first, so an unrestricted store
+never reaches the label index at all.
 
 ## The deployment this assumes
 
@@ -24,9 +26,13 @@ view  = store.as_viewer(mode={"hr"}, grants=g)    # per request
 tools = wiki_read_tools(view)                     # the model never sees `store`
 ```
 
-`as_viewer` returns a store that filters. It shares the caches,
-registries and write lock with the original — one process, many views —
-and holds no reference back to it, so nothing downstream can climb out.
+`as_viewer` returns a store that filters. Its lazily-opened resources —
+both source registries, the vector store, the alias map — live on one
+object shared with the original, so every view sees the same registry
+rows and the process opens one set of SQLite connections rather than one
+per request. The write lock and the label index are shared for the same
+reason. It holds no reference back to the unrestricted store, so nothing
+downstream can climb out.
 
 ### What this protects, and what it does not
 
@@ -48,6 +54,13 @@ Not protected, and out of scope by design:
   restricted by default, but a human deciding to publish a summary is
   an editorial judgment no mechanism here checks.
 - **Anything a cleared person repeats** outside the system.
+- **The tool log, if you export it.** Tool calls are traced with their
+  arguments; content fields are redacted, but the *references* are not,
+  because a trace that does not say which page was read is not a trace.
+  With Logfire enabled that record leaves the deployment and says which
+  items a session touched, and a source's path embeds its original
+  filename. That is a deployment choice about an observability backend,
+  not something a filter can take back.
 
 ## Labels
 
@@ -153,25 +166,39 @@ an agent composing HR pages with no access to the company glossary.
 
 Hiding is a property of **grants**, not of mode. For a user who does
 not hold `hr`, HR content must be undetectable. For one who *does* hold
-it and is merely running in mode empty, being told matches exist
-elsewhere discloses nothing they are not already entitled to see.
+it and is merely running in mode empty, being told the compartment
+exists and has content discloses nothing they are not already entitled
+to see.
 
-So `search_wiki` appends a **count-only, per-label, grant-gated** note:
+So when a search returns nothing, `search_wiki` appends a
+**count-only, per-label, grant-gated** note:
 
 ```
-(also matched, outside this session's scope: 4 in hr.
- Ask the user to start a session in that compartment.)
+(this session is scoped to open content; you also have access to:
+ hr (47 pages). Ask the user to start a session in that compartment.)
 ```
 
 Never titles, slugs or excerpts. Never labels the user does not hold —
-an aggregate "N more results" would leak the existence of compartments
-they cannot hold. An item whose labels are not wholly within their
-grants is not counted at all, since no mode they could choose would
-show it.
+an aggregate "N more" would leak the existence of compartments they
+cannot hold. An item whose labels are not wholly within their grants is
+not counted at all, since no mode they could choose would show it.
 
-This is what makes the opt-in default workable. Without it a cleared
-user asking about parental leave gets nothing and never learns to
-switch compartment.
+**The count is a property of the corpus, not of the question**, and
+that is the load-bearing part. The obvious design counts the items that
+matched *this* question and fell outside the mode — and the model
+writes the question, so asking for "twelve" and then "eleven" and
+comparing the counts reads a fact out of a restricted page without ever
+retrieving it, one keyword at a time. The model could then commit that
+fact to an open page. Relying on it not to try is exactly what this
+design forbids, so the hint takes no query at all: it reports how many
+additional pages a session scoped to that label would see, which is the
+same answer for every question and therefore carries no bits about any
+of them.
+
+The trigger is the empty result, for the same reason. That depends only
+on the open corpus, which the user can already search, and it is the
+case the hint exists for — without it a cleared user asking about
+parental leave gets nothing and never learns to switch compartment.
 
 ## The two rules
 
@@ -201,11 +228,18 @@ Consequences worth knowing:
 Two further invariants follow:
 
 **Closure.** An item's labels must be a superset of the labels of
-everything it references — wikilinks, provenance, aliases. Equivalently:
-if you can see a page, you can see everything it points at. Filtering
-the page list achieves nothing if an open page's body contains
-`[[hr:severance-policy]]`, because reading the open page hands over the
-slug.
+everything it references. Equivalently: if you can see a page, you can
+see everything it points at. Filtering the page list achieves nothing if
+an open page's body contains `[[hr:severance-policy]]`, because reading
+the open page hands over the slug.
+
+Each of the three kinds of reference is held to it by a different
+mechanism. **Wikilinks** are checked in the body at write time.
+**Provenance** is covered by inheritance: citing a restricted source
+raises the page's own labels, so a page can never end up below what it
+cites. **Aliases** cannot break it because an alias derives its labels
+from the page it resolves to, and never from or onto a name a live page
+already occupies.
 
 **Per-mode logs.** A restricted session writes `log/<label-set>/<date>.md`
 rather than `log/<date>.md`. The log is otherwise an open file and
@@ -256,7 +290,12 @@ file is exactly where somebody writes "HR policies go under `hr:`".
 ```bash
 outmem restrict hr:severance --label hr
 outmem restrict hr:severance --label hr --cascade
+outmem sources restrict policy/9b3d0d/severance-plan.md --label hr
 ```
+
+The source verb has more reach: every page compiled from a document
+inherits its labels, so restricting it there restricts the whole
+downstream without anybody having to find those pages.
 
 Restricting is a **graph** operation, not a field edit. A page that
 visible pages already link to cannot simply become restricted — the
@@ -264,10 +303,21 @@ inbound link would still name it in a body its readers can see. The
 command reports the referrers and refuses until they are resolved, or
 `--cascade` applies the same labels to them.
 
-Removing a label is **declassification** and needs a `declassify`
-grant, which appears in no model-facing palette. So does renaming a
-page in a way that changes its effective labels: under path rules,
-`hr:x → notes:x` is declassification through an innocuous-looking tool.
+Both verbs, and `rename_page`, are **operator-only**: they run against
+the bare store and are refused to a view. That is not a policy choice
+about who is trusted, it is what their shape forces. Each writes files
+the caller did not name — `rename_page` rewrites inbound links across
+the corpus with the new slug as content, and `--cascade` picks its
+targets from the backlink graph — and there is no way to label-check a
+write whose targets are discovered rather than named. A refusal that has
+to name the referrers cannot be shown to a view either.
+
+Removing a label is **declassification**, and it is only available to
+the operator for the same reason. Under path rules, `hr:x → notes:x`
+would otherwise be declassification through an innocuous-looking rename.
+Note that a label a path rule or a cited source supplies cannot be
+removed by editing frontmatter at all: the verbs refuse rather than
+committing a change that would be immediately undone.
 
 The bare store is exempt throughout. It is the server-side operator, it
 holds no mode and no grants, and gating it would block the tooling that

@@ -5,12 +5,47 @@ what was decided and why, including the alternatives that were rejected.
 For how to *use* the feature, see
 [`docs/restricted-content.md`](../docs/restricted-content.md).
 
-Two things landed differently from the text below, both discovered
-while building it and both stricter than specified. `restrict_page`
-refuses to remove a label that a path rule or an inherited source label
-would immediately reapply, rather than committing a no-op that reads as
-success. And `read_page` renders from the page object the store returns
-rather than re-reading the file, because re-reading served the stored
+Several things landed differently from the text below. Each was found
+while building or reviewing it, and each is stricter than specified.
+
+**§2.4's hint takes no query.** Counting the items that matched *this
+question* and fell outside the mode is a content oracle, because the
+model writes the question: "twelve" then "eleven", compare the counts,
+and a fact has been read out of a restricted page without retrieving
+it. The count is now a corpus property — how many pages a session
+scoped to that label would gain — which is the same for every question.
+
+**§8.3's two verbs are operator-only, not grant-gated.** `rename_page`
+rewrites inbound links across the corpus and `restrict_page --cascade`
+picks its targets from the backlink graph, so both write files the
+caller did not name, with content the caller chooses. A write whose
+targets are discovered rather than named cannot be label-checked, and a
+refusal that has to list the referrers cannot be shown to a view.
+`outmem sources restrict` was added as the source counterpart.
+
+**Aliases derive labels only for names no live page occupies.** §5.2
+says aliases inherit; applied to an occupied name it inverted, letting
+an HR page's `aliases:` relabel an open page and open it to editing.
+
+**Withdrawing a declaration hides content rather than releasing it.**
+Skipping the index when `restricted.labels` is empty made one deleted
+line publish the whole corpus. An undeclared label already collapsed to
+DENY; the same rule now covers an emptied block.
+
+**Source keys are normalised, not enumerated.** `resolve_source`
+resolves against the filesystem, so `sources/./x` reached a file that a
+map of literal keys did not cover — and a miss read as open.
+
+**Path rules apply at lookup, not only at build.** The page map holds
+only live `.md` files, so a `.txt` under a restricted namespace, or a
+slug named in `AGENTS.md` before its page exists, read as open.
+
+**`restrict_page` refuses a no-op declassification**, rather than
+committing a label removal that a path rule or a cited source
+immediately reapplies.
+
+**`read_page` renders from the page object the store returns** rather
+than re-reading the file, because re-reading served the stored
 `wiki/index.md` — the one file that lists every slug — past the
 per-viewer render in §7.1.
 

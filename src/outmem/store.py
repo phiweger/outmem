@@ -21,7 +21,7 @@ import hashlib
 import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -111,6 +111,7 @@ from outmem.restricted import (
     mode_dirname,
     normalise_labels,
     visible,
+    writable,
 )
 from outmem.search import DEFAULT_RESULT_BYTES, SearchResult, rg_available, search
 from outmem.slug import PAGES_DIR, relpath_to_slug, slug_to_relpath, validate_slug
@@ -392,6 +393,7 @@ _OPERATOR_ONLY = frozenset({
     "add_source",
     "rename_page",
     "restrict_page",
+    "restrict_source",
     "assign_document_keys",
     "commit_registry",
     "ensure_sources_local",
@@ -1676,12 +1678,7 @@ class WikiStore:
         with self._write_lock:
             if not topic.strip():
                 raise OutmemError("append_log: topic must be non-empty.")
-            if self._mode is not None and not self._grants.may_write(self._mode):
-                raise RestrictionError(
-                    "this session may not write: no write grant for "
-                    + (", ".join(sorted(self._mode - self._grants.write)) or "open content")
-                    + "."
-                )
+            self._require_write_grant()
             ts = ensure_utc(when) if when else utc_now()
             log_date = ts.date()
             partition = mode_dirname(self._mode or ())
@@ -2169,17 +2166,11 @@ class WikiStore:
         where an open reader can find it.
         """
         if self._mode is not None:
+            self._require_write_grant()
             labels = self._labels().for_source(rel_path)
-            if labels != self._mode:
+            if not writable(labels, self._mode, self._grants):
                 raise RestrictionError(
                     _write_refusal(self._mode, labels, new=False)
-                )
-            if not self._grants.may_write(self._mode):
-                raise RestrictionError(
-                    "this session may not write: no write grant for "
-                    + (", ".join(sorted(self._mode - self._grants.write))
-                       or "open content")
-                    + "."
                 )
         return _sources.record_ingestion(
             self,
@@ -2417,11 +2408,7 @@ class WikiStore:
         if self._mode is None:
             return frozenset()
         mode = self._mode
-        if not self._grants.may_write(mode):
-            missing = ", ".join(sorted(mode - self._grants.write)) or "open content"
-            raise RestrictionError(
-                f"this session may not write: no write grant for {missing}."
-            )
+        self._require_write_grant()
         index = self._labels()
         if new:
             # Everything that would end up on the item: the mode it is
@@ -2435,11 +2422,11 @@ class WikiStore:
             labels = mode | self.restrictions.labels_for_slug(slug)
             labels |= normalise_labels(declared)
             labels |= self._inherited(provenance, index)
-            if labels != mode:
+            if not writable(labels, mode, self._grants):
                 raise RestrictionError(_write_refusal(mode, labels, new=True))
         else:
             labels = index.for_page(slug)
-            if labels != mode:
+            if not writable(labels, mode, self._grants):
                 raise RestrictionError(_write_refusal(mode, labels, new=False))
             # An edit may also change what the page WILL be labelled,
             # because `provenance` is part of the write and a page
@@ -2459,7 +2446,7 @@ class WikiStore:
             after = self._labels_after_edit(
                 slug, provenance, index, additive=provenance_additive
             )
-            if after != mode:
+            if not writable(after, mode, self._grants):
                 raise RestrictionError(
                     _write_refusal(mode, after, new=False)
                     + " (the citation change would relabel the page; use "
@@ -2542,6 +2529,41 @@ class WikiStore:
                     "this session's scope. Remove it, or work in a session that "
                     "covers it."
                 )
+
+    def restrict_source(
+        self,
+        rel_path: str,
+        *,
+        labels: Iterable[str],
+        commit: bool = True,
+    ) -> SourceEntry:
+        """Set a source's restriction labels. Operator-only.
+
+        The other half of ``restrict_page``, and the one with more
+        reach: a page inherits the labels of every source it cites, so
+        restricting a document here restricts everything ever compiled
+        from it, without anybody having to find those pages.
+
+        *Removing* a label is declassification and, like the page verb,
+        is available only to the operator holding the bare store —
+        which is who the registry error messages have always pointed
+        at.
+        """
+        self._require_operator("restricting a source")
+        wanted = normalise_labels(labels)
+        self.restrictions.check_declared(wanted)
+        found = _sources.resolve_source(self, rel_path)
+        if found is None:
+            raise OutmemError(f"no such source: {rel_path}")
+        tree, key = found
+        registry = _sources.get_registry(self, tree)
+        entry = registry.set_restricted(key, wanted, allow_narrowing=True)
+        self._label_cache.invalidate()
+        if commit and tree.tracked:
+            self._commit_paths(
+                [tree.repo_registry_relpath], subject=f"restrict: {key}"
+            )
+        return replace(entry, local=not tree.tracked)
 
     def restrict_page(
         self,
@@ -2662,6 +2684,22 @@ class WikiStore:
                 [*paths, f"{self.config.wiki_dir}/{INDEX_FILENAME}"],
                 subject=commit_subject or f"restrict: {slug}",
             )
+
+    def _require_write_grant(self) -> None:
+        """Refuse a session that may read its compartment but not write it.
+
+        Split out because three paths need it — page writes,
+        ``append_log`` and ``record_ingestion`` — and each had grown its
+        own copy of the message. The label comparison itself goes
+        through :func:`~outmem.restricted.writable`, so the predicate
+        the tests exercise is the predicate the store enforces.
+        """
+        if self._mode is None or self._grants.may_write(self._mode):
+            return
+        missing = ", ".join(sorted(self._mode - self._grants.write)) or "open content"
+        raise RestrictionError(
+            f"this session may not write: no write grant for {missing}."
+        )
 
     def _require_operator(self, what: str) -> None:
         """Refuse a path that a served request has no business calling.

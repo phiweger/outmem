@@ -106,6 +106,15 @@ def render_system_prompt(
     if include_steering:
         recent_human_commits = store.steering()
     skill_names = inject_skills if inject_skills is not None else DEFAULT_INJECTED_SKILLS
+    # A restricted view is not served the history tools, so the whole
+    # EXPANSION branch is unreachable for it. Injecting the skill that
+    # is entirely about those two tools would spend prompt budget
+    # teaching a workflow the model cannot run, and then have it call a
+    # tool that does not exist. Drop the skill and the prompt section
+    # together — the palette is the source of truth, and this follows it.
+    history_available = not store.enforces_visibility
+    if not history_available:
+        skill_names = tuple(n for n in skill_names if n != "evolution")
     skills = _load_injected_skills(skill_names)
     return template.render(
         wiki_root=str(store.root),
@@ -113,6 +122,7 @@ def render_system_prompt(
         agent_email=store.config.agent_identity.email,
         recent_human_commits=recent_human_commits,
         semantic_available=store.semantic_available(),
+        history_available=history_available,
         agents_md=store.read_agents_md(),
         skills=skills,
     )

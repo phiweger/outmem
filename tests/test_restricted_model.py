@@ -111,7 +111,10 @@ class TestGrants:
             Grants.reader("HR")
 
     def test_grants_are_hashable_and_frozen(self) -> None:
-        """Used as part of a cache key (§7.4), so it has to be both."""
+        """Grants are handed across a process boundary by the calling
+        application and consulted at every write. Frozen means a caller
+        cannot widen one after the view was built from it; hashable
+        means two equal entitlements are interchangeable."""
         assert hash(Grants.reader("hr")) == hash(Grants.reader("hr"))
         with pytest.raises(FrozenInstanceError):
             Grants().read = frozenset({"hr"})  # type: ignore[misc]

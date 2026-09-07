@@ -56,8 +56,27 @@ is genuine access control rather than a display convention.
   what is explicitly not protected, and a rollout order whose first four
   steps are safe to run while still serving the unrestricted store.
 
+### Breaking
+
+- **`restricted:` is now a reserved frontmatter key.** It previously
+  round-tripped through `extra` as an opaque value. It is now parsed as
+  a list of restriction labels, so a page using the key for something
+  else changes shape (a bare string becomes a one-item list, an empty
+  value is dropped) and a value that is not a label list makes the page
+  unparseable — reported by `outmem lint` as
+  `restricted-frontmatter-unparseable`, and hidden from every view until
+  it is fixed. Grep for `restricted:` under `wiki/pages/` before
+  upgrading if you used the key.
+
 ### Changed
 
+- **`rename_page` and `restrict_page` are operator-only** — refused to a
+  view, as `import_vault` and `repair_pages` already were. Both write
+  files the caller did not name: rename rewrites inbound links across
+  the corpus, and `--cascade` picks its targets from the backlink graph.
+  Neither was ever in a model-facing palette, so this affects only a
+  downstream app that called them through a view; hold a bare store for
+  administrative operations.
 - **`.sources.db` schema 3 → 4**, adding a `restricted` column.
   Migrated in place on open; NULL on existing rows reads as open, which
   is the same answer the wiki gave before the column existed.
@@ -80,6 +99,8 @@ is genuine access control rather than a display convention.
 - **A restricted session writes `log/<label-set>/<date>.md`.** The open
   mode is unpartitioned, so a wiki with no restrictions has nothing to
   migrate.
+- **`outmem sources restrict`** — the source counterpart to `outmem
+  restrict`, and the command the registry's error messages point at.
 
 ## 0.15.0
 

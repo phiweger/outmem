@@ -670,9 +670,16 @@ def test_log_summary_truncates_long_strings(
         write_page(slug="long-page", title="Long", body=long_body)
 
     msg = " ".join(r.getMessage() for r in caplog.records)
-    # The body should be summarised as "(N chars)" not pasted in full.
-    assert "(500 chars)" in msg
-    assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxx" not in msg
+    # The body is never pasted in full. It is redacted rather than merely
+    # summarised, because this record reaches every logging handler and
+    # Logfire is one of them — but the length survives, since a trace
+    # that says nothing about size is a worse trace.
+    assert "500 chars" in msg
+    assert "xxxxx" not in msg
+    # References stay legible: a trace that says only "write_page
+    # happened" is not a trace.
+    assert "long-page" in msg
+
 
 
 def test_format_validation_detail_extracts_pydantic_errors() -> None:

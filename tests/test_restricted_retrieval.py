@@ -426,6 +426,87 @@ class TestToolLoggingIsRedacted:
         assert self._records(caplog)[0].tool_call[1]["slug"] == "benefits:cycling"
 
 
+class TestEveryLoggedArgumentIsClassified:
+    """The redaction set was written from a list of tool signatures, and
+    the list was wrong — `content` (a whole log entry), `title`, `topic`
+    and `section` all reached the LogRecord verbatim while the set
+    claimed to cover content.
+
+    Enumerating the call sites is the only version of this check that
+    cannot drift: adding a tool with a new content argument fails here
+    until somebody decides which side of the line it is on.
+    """
+
+    def _logged_kwargs(self) -> set[str]:
+        import ast
+        import inspect
+
+        import outmem.adapters.pydantic_ai as mod
+
+        tree = ast.parse(inspect.getsource(mod))
+        return {
+            kw.arg
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_log_call"
+            for kw in node.keywords
+            if kw.arg
+        }
+
+    def test_no_logged_argument_is_unclassified(self) -> None:
+        from outmem.adapters.pydantic_ai import (
+            _CONTENT_ARGS,
+            _QUERY_ARGS,
+            _REFERENCE_ARGS,
+        )
+
+        unclassified = (
+            self._logged_kwargs() - _CONTENT_ARGS - _REFERENCE_ARGS - _QUERY_ARGS
+        )
+        assert not unclassified, (
+            f"tool arguments not classified for logging: {sorted(unclassified)}. "
+            "Decide whether each carries page or source text (add to "
+            "_CONTENT_ARGS) or names something (add to _REFERENCE_ARGS / "
+            "_QUERY_ARGS)."
+        )
+
+    def test_the_sets_are_disjoint(self) -> None:
+        from outmem.adapters.pydantic_ai import (
+            _CONTENT_ARGS,
+            _QUERY_ARGS,
+            _REFERENCE_ARGS,
+        )
+
+        assert not _CONTENT_ARGS & _REFERENCE_ARGS
+        assert not _CONTENT_ARGS & _QUERY_ARGS
+
+    def test_a_log_topic_is_redacted_in_both_halves(
+        self, store: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """`_summarise` only collapses strings over 60 characters, so a
+        topic — short by nature — appeared verbatim in the formatted
+        message even while the structured payload was clean."""
+        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
+            tool = next(
+                t for t in wiki_tools(store) if t.__name__ == "append_log"
+            )
+            tool(topic="severance cap", content="Twelve weeks.\n")
+        record = next(r for r in caplog.records if hasattr(r, "tool_call"))
+        assert "severance cap" not in record.getMessage()
+        assert "severance cap" not in str(record.tool_call)
+
+    def test_a_page_title_is_redacted(
+        self, store: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger="outmem.agent.tool"):
+            tool = next(t for t in wiki_tools(store) if t.__name__ == "write_page")
+            tool(slug="x", title="Q4 layoff list", body="Text.\n")
+        record = next(r for r in caplog.records if hasattr(r, "tool_call"))
+        assert "layoff" not in record.getMessage()
+        assert "layoff" not in str(record.tool_call)
+
+
 class TestConsultWikiThreadsTheView:
     def test_a_store_argument_is_used_as_given(
         self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
@@ -489,9 +570,16 @@ class TestSemanticOverFetch:
             return rows[:top_k]
 
         monkeypatch.setattr("outmem._store.semantic.find_similar", _fake)
-        got = store.as_viewer().semantic_find_similar("anything", top_k=3)
-        assert len(got) == 3
-        assert all("hr/" not in m.rel_path for m in got)
+        uncleared = store.as_viewer().semantic_find_similar("anything", top_k=3)
+        cleared = store.as_viewer(
+            mode={"hr"}, grants=Grants.reader("hr")
+        ).semantic_find_similar("anything", top_k=3)
+        # The count is what leaks. Both viewers get k; only the contents
+        # differ, so the size of the answer says nothing about how much
+        # was filtered out of it.
+        assert len(uncleared) == len(cleared) == 3
+        assert all("hr/" not in m.rel_path for m in uncleared)
+        assert any("hr/" in m.rel_path for m in cleared)
 
     def test_it_stops_when_the_index_runs_out(
         self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
@@ -513,4 +601,6 @@ class TestSemanticOverFetch:
 
         monkeypatch.setattr("outmem._store.semantic.find_similar", _fake)
         assert store.as_viewer().semantic_find_similar("x", top_k=5) == []
-        assert calls["n"] == 1
+        # Bounded, not zero: the loop must notice the index is exhausted
+        # rather than widening to the ceiling on every such query.
+        assert calls["n"] <= 2

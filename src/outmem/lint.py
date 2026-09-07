@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from outmem.completeness import find_elision_markers, find_tool_sentinels
-from outmem.exceptions import OutmemError
+from outmem.exceptions import FrontmatterError, OutmemError
 from outmem.frontmatter import ProvenanceEntry, parse_wiki_page
 from outmem.git_ops import tracked_paths_under
 from outmem.index import (
@@ -1753,10 +1753,18 @@ def _check_unreadable_frontmatter(
     if not pages_dir.is_dir():
         return
     for path in editorial_pages(pages_dir):
+        rel_path = path.relative_to(pages_dir)
         try:
-            load_page_text(path.read_text(encoding="utf-8"))
-        except Exception:
-            rel = f"{wiki_dir.name}/{PAGES_DIR}/{path.relative_to(pages_dir).as_posix()}"
+            # The same contract every other reader uses, `fallback_slug`
+            # included. Without it a page that omits `slug:` — legal,
+            # and served happily by the store — was reported here as
+            # "denied to every mode", which was simply false.
+            load_page_text(
+                path.read_text(encoding="utf-8"),
+                fallback_slug=relpath_to_slug(rel_path),
+            )
+        except FrontmatterError:
+            rel = f"{wiki_dir.name}/{PAGES_DIR}/{rel_path.as_posix()}"
             report.findings.append(
                 LintFinding(
                     kind="restricted-frontmatter-unparseable",
