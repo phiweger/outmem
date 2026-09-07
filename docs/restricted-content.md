@@ -260,6 +260,15 @@ is there.
 `RestrictionError` is for **writes** and operator-only paths, where the
 caller already knows what they were trying to do.
 
+The same rule covers *time*, not just content. A write puts the file on
+disk and commits afterwards; readers hold no lock, so for the width of
+that commit an item exists that the label index has never classified.
+Anything in that state is denied — including a page that turns out to be
+open, because telling the two apart would need the labels we just said
+we do not have. It is a window, not a wall: it closes as soon as the
+commit lands, and a caller never sees its own write hidden, since the
+write returns only after committing.
+
 ## What a view cannot reach at all
 
 Some methods are refused to a view outright rather than filtered. A

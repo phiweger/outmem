@@ -122,6 +122,11 @@ contract, threat boundary and rollout order in
 - **A restricted session writes `log/<label-set>/<date>.md`.** The open
   mode is unpartitioned, so a wiki with no restrictions has nothing to
   migrate.
+- **`add_source` takes the write lock**, like every other
+  commit-producing path. The registry was already safe across processes
+  — SQLite serialises the writers — but the git half was not: two
+  concurrent ingests interleaving between `git add` and `git commit`
+  raced on the index and one of them failed.
 
 ## 0.15.0
 
