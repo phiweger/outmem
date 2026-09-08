@@ -556,7 +556,7 @@ class Repo:
             raise OutmemError(
                 f"wiki {name!r} is listed in {REGISTRY_FILENAME} but {path} "
                 f"is not a wiki (no {CONFIG_FILENAME}). Scaffold it with "
-                "`outmem init`, or drop the entry."
+                f"`outmem repo add {name}`, or drop the entry."
             )
         return _WikiStore.open(
             path,

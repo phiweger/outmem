@@ -3,6 +3,35 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.17.3
+
+### Fixed
+
+- **`repo add` and `repo import` flattened a hand-maintained `wikis.yaml`.**
+  Both round-tripped the file through the YAML loader, which drops every
+  comment and reformats what is left — and committed the result. 0.17.2
+  worked around this by shipping a comment-free starter instead of fixing
+  it. `wikis.yaml` is the one file a person is meant to keep, so it is
+  exactly the file that carries "mirrors the IdP groups" and "see
+  ADR-014"; outmem now never rewrites one that has comments.
+
+### Changed
+
+- **`repo add NAME` on a name the registry already lists scaffolds the
+  wiki and leaves the file alone.** That is the path for a hand-maintained
+  registry: edit the YAML, then `repo add`. It used to refuse with
+  "already registered". Passing `--audience`, `--title` or `--path` for a
+  listed name is refused rather than silently ignored.
+- **For an unlisted name, the entry is written only if the file has no
+  comments.** Otherwise the command stops before changing anything — for
+  `repo import`, before moving the wiki — and says what to add by hand.
+  Detection is exact: every `#` is either inside a loaded scalar or is a
+  comment.
+- `repo import` of a listed name moves the wiki to the entry's path
+  without rewriting the registry.
+- The `registry-missing-wiki` and `registry-not-a-wiki` lint messages, and
+  the error from opening such an entry, point at `outmem repo add NAME`.
+
 ## 0.17.2
 
 A review pass over the multi-wiki work: correctness, typing, and the shape

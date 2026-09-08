@@ -427,6 +427,12 @@ outmem repo add   legal --root /srv/memory \
 outmem repo import /srv/old-hr --root /srv/memory --name hr --audience hr
 ```
 
+`repo add NAME` scaffolds a wiki the registry **already lists** without
+touching `wikis.yaml` — the path for a hand-maintained registry. For a name it
+does not list, it writes the entry too, but only if the file carries no
+comments; a commented registry is refused with a note saying what to add.
+`repo import` follows the same rule.
+
 Every ordinary subcommand takes `--wiki NAME`, with `--root` (or the cwd)
 pointing at the *repository* rather than a wiki:
 

@@ -130,6 +130,22 @@ moving it would leave a nested repository, which git treats as a foreign
 checkout and will not stage. Remove that `.git` first — which discards that
 wiki's history, so it is your call, not the command's.
 
+### Keeping `wikis.yaml` by hand
+
+`wikis.yaml` is the one file here a person is meant to maintain, and comments
+in it are welcome — "mirrors the IdP groups", "see ADR-014". **outmem never
+rewrites a `wikis.yaml` that carries comments.** `repo add` and `repo import`
+have two modes, chosen by whether the name is already listed:
+
+- **Listed** → the registry is the source of truth and is not touched. The
+  wiki is scaffolded (or moved) to the path the entry gives. Edit the YAML,
+  commit it yourself, then `outmem repo add legal`.
+- **Unlisted** → the entry is written for you, but only if the file has no
+  comments. A commented file is refused with a note saying what to add.
+
+So a hand-maintained registry and the convenience commands coexist: the
+commands only ever write to a file they could regenerate anyway.
+
 ---
 
 ## Host integration

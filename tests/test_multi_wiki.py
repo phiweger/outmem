@@ -544,11 +544,13 @@ class TestRepoImport:
         ) == 1
         assert "does not look like a wiki" in capsys.readouterr().err
 
-    def test_an_existing_name_is_refused(
+    def test_a_listed_name_whose_directory_exists_is_refused(
         self, repo: Path, tmp_path: Path,
         wiki_pair: tuple[WikiStore, WikiStore],
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        # A listed name is importable — the wiki goes to the entry's path —
+        # but not over a directory that is already there.
         from outmem.cli.__main__ import main
 
         outside = WikiStore.init(tmp_path / "elsewhere")
@@ -556,7 +558,7 @@ class TestRepoImport:
             ["repo", "import", str(outside.root), "--root", str(repo),
              "--name", "legal"]
         ) == 1
-        assert "already registered" in capsys.readouterr().err
+        assert "already exists" in capsys.readouterr().err
 
 
 class TestReviewFindings:
@@ -818,3 +820,154 @@ class TestRepositoryLint:
         openw.write_page("b", title="B", body="See [[nope]].\n")  # error
         assert main(["lint", "--repo", "--root", str(repo)]) == 2
         assert "wikis/open/wiki/pages/b.md" in capsys.readouterr().out
+
+
+COMMENTED = """\
+version: 1
+
+# Tags mirror the groups in our IdP. Keep in sync with user_tags.
+tags:
+  everyone: {description: "All employees"}   # default for every account
+  legal:    {description: "Legal counsel"}   # owned by GC's office
+
+wikis:
+  open:  {path: wikis/open,  title: "Handbook", audience: [everyone]}
+  # legal lives here rather than in a separate repo — see ADR-014
+  legal: {path: wikis/legal, title: "Legal",    audience: [legal]}
+"""
+
+
+class TestHandMaintainedRegistry:
+    """`wikis.yaml` is somebody's document. outmem does not rewrite it.
+
+    It is the one file in the system a person is meant to keep — the
+    contract with their user database — so it is exactly the file that
+    carries "mirrors the IdP groups" and "see ADR-014". A load-and-dump
+    drops every comment, reformats the rest, and used to commit the
+    result.
+    """
+
+    @pytest.fixture
+    def commented(self, tmp_path: Path) -> Path:
+        root = tmp_path / "hand"
+        root.mkdir()
+        _run_git(["init", "--initial-branch", "main"], cwd=root)
+        _commit(root, file="wikis.yaml", content=COMMENTED, message="hand-written registry")
+        return root
+
+    def test_comment_detection_is_exact(self) -> None:
+        from outmem.cli.repo import _has_comments
+
+        assert _has_comments(COMMENTED)
+        assert _has_comments("wikis: {}\n# trailing\n")
+        assert not _has_comments("version: 1\ntags: {}\nwikis: {}\n")
+        # A `#` inside a scalar is data, not commentary — it comes back
+        # from the loader, so it must not trip the check.
+        assert not _has_comments('wikis:\n  w: {path: wikis/w, title: "Issue #12"}\n')
+        assert not _has_comments("wikis:\n  w: {path: wikis/w, title: a#b}\n")
+        assert _has_comments('wikis:\n  w: {path: wikis/w, title: "Issue #12"}  # note\n')
+
+    def test_add_of_an_unlisted_name_refuses_and_changes_nothing(
+        self, commented: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        before = (commented / "wikis.yaml").read_bytes()
+        assert main(["repo", "add", "hr", "--root", str(commented), "--audience", "hr"]) == 1
+        assert (commented / "wikis.yaml").read_bytes() == before
+        assert not (commented / "wikis" / "hr").exists()
+        err = capsys.readouterr().err
+        assert "comments" in err and "repo add hr" in err
+        assert _log(commented, "--format=%s").splitlines() == ["hand-written registry"]
+
+    def test_add_of_a_listed_name_scaffolds_without_touching_the_file(
+        self, commented: Path
+    ) -> None:
+        # The hand-maintained path: edit the YAML, then `repo add`.
+        from outmem.cli.__main__ import main
+        from outmem.repo import Repo
+
+        before = (commented / "wikis.yaml").read_bytes()
+        assert main(["repo", "add", "legal", "--root", str(commented)]) == 0
+        assert (commented / "wikis.yaml").read_bytes() == before
+        store = Repo.open(commented).wiki_as_operator("legal")
+        assert store.repo == commented
+        assert not (store.root / ".git").exists()
+        store.write_page("nda", title="NDA", body="Body.\n")
+        assert "legal/ compact: nda" in _log(commented, "--format=%s")
+
+    def test_add_of_a_listed_name_is_idempotent(self, commented: Path) -> None:
+        from outmem.cli.__main__ import main
+
+        assert main(["repo", "add", "legal", "--root", str(commented)]) == 0
+        assert main(["repo", "add", "legal", "--root", str(commented)]) == 0
+
+    def test_flags_on_a_listed_name_are_refused(
+        self, commented: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Silently ignoring `--audience` would be worse than refusing: the
+        # operator would believe the audience changed.
+        from outmem.cli.__main__ import main
+
+        assert main(
+            ["repo", "add", "legal", "--root", str(commented), "--audience", "exec"]
+        ) == 1
+        assert "already listed" in capsys.readouterr().err
+        assert not (commented / "wikis" / "legal").exists()
+
+    def test_a_comment_free_registry_still_takes_the_convenience_path(
+        self, tmp_path: Path
+    ) -> None:
+        from outmem.cli.__main__ import main
+        from outmem.repo import Repo
+
+        root = tmp_path / "plain"
+        assert main(["repo", "init", "--root", str(root)]) == 0
+        assert main(["repo", "add", "hr", "--root", str(root), "--audience", "hr"]) == 0
+        assert "hr" in Repo.open(root).registry.wikis
+
+    def test_import_of_an_unlisted_name_refuses_before_moving(
+        self, commented: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Refusing *after* the move would leave the wiki relocated and
+        # unregistered — the check has to come first.
+        from outmem.cli.__main__ import main
+
+        outside = WikiStore.init(tmp_path / "elsewhere")
+        outside.write_page("x", title="X", body="Body.\n")
+        before = (commented / "wikis.yaml").read_bytes()
+        assert main(
+            ["repo", "import", str(outside.root), "--root", str(commented),
+             "--name", "hr", "--audience", "hr"]
+        ) == 1
+        assert (commented / "wikis.yaml").read_bytes() == before
+        assert outside.root.is_dir()
+        assert not (commented / "wikis" / "hr").exists()
+        assert "comments" in capsys.readouterr().err
+
+    def test_import_of_a_listed_name_uses_the_entrys_path(
+        self, commented: Path, tmp_path: Path
+    ) -> None:
+        from outmem.cli.__main__ import main
+        from outmem.repo import Repo
+
+        outside = WikiStore.init(tmp_path / "old-legal")
+        outside.write_page("nda", title="NDA", body="Old.\n")
+        before = (commented / "wikis.yaml").read_bytes()
+        assert main(
+            ["repo", "import", str(outside.root), "--root", str(commented), "--name", "legal"]
+        ) == 0
+        assert (commented / "wikis.yaml").read_bytes() == before
+        imported = Repo.open(commented).wiki_as_operator("legal")
+        assert imported.root == commented / "wikis" / "legal"
+        assert imported.read("nda").body.strip() == "Old."
+        assert "repo: import legal" in _log(commented, "--format=%s")
+
+    def test_lint_points_a_missing_wiki_at_repo_add(self, commented: Path) -> None:
+        from outmem.lint import lint_repository
+
+        messages = [
+            f.message for f in lint_repository(commented).findings
+            if f.kind == "registry-missing-wiki"
+        ]
+        assert messages and all("outmem repo add" in m for m in messages)

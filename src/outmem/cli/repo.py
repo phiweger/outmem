@@ -23,7 +23,7 @@ import yaml
 from outmem.cli._common import agent_identity, base_root, status
 from outmem.config import DEFAULT_BRANCH
 from outmem.exceptions import OutmemError
-from outmem.repo import REGISTRY_FILENAME, Repo, is_wiki_root
+from outmem.repo import REGISTRY_FILENAME, Repo, is_wiki_root, load_registry
 from outmem.store import WikiStore, ensure_gitignored
 
 # Plain on purpose. `repo add` round-trips this file through the YAML
@@ -46,11 +46,56 @@ _REPO_IGNORES = (
 # ---------------------------------------------------------------------------
 
 
-def _load_raw(registry_path: Path) -> dict[str, object]:
-    raw = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+def _parse_raw(registry_path: Path, text: str) -> dict[str, object]:
+    raw = yaml.safe_load(text) or {}
     if not isinstance(raw, dict):
         raise OutmemError(f"{registry_path}: must be a YAML mapping.")
     return raw
+
+
+def _has_comments(text: str) -> bool:
+    """True if a load-and-dump of ``text`` would drop something a person wrote.
+
+    Exact without a comment-aware parser: every ``#`` in a YAML document
+    is either inside a scalar — a key or a value, and both come back from
+    the loader — or it is a comment. Count them on both sides; any surplus
+    in the raw text is commentary. ``title: "Issue #12"`` is not a false
+    positive, because that ``#`` is in the loaded string.
+    """
+    raw = text.count("#")
+    if raw == 0:
+        return False
+
+    def inside(node: object) -> int:
+        if isinstance(node, str):
+            return node.count("#")
+        if isinstance(node, dict):
+            return sum(inside(k) + inside(v) for k, v in node.items())
+        if isinstance(node, list):
+            return sum(inside(x) for x in node)
+        return 0
+
+    return raw > inside(yaml.safe_load(text))
+
+
+def _refuse_rewrite(registry_path: Path, name: str) -> int:
+    """The registry is hand-maintained; say so and stop, changing nothing.
+
+    ``wikis.yaml`` is the one file in the system a person is meant to
+    keep — it is the contract with their user database — so it is exactly
+    the file that carries "mirrors the IdP groups" and "see ADR-014".
+    Rewriting it through the YAML loader drops every one of those and
+    reformats the rest, and committed the result. outmem does not rewrite
+    a file somebody maintains; it tells them what to add.
+    """
+    print(
+        f"outmem: {registry_path} has comments that a rewrite would drop, so "
+        f"it was left alone. Add an entry for {name!r} under `wikis:` by hand "
+        f"(and any new tags under `tags:`), then run `outmem repo add {name}` "
+        "again to scaffold it.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _save_raw(registry_path: Path, raw: dict[str, object]) -> None:
@@ -161,17 +206,34 @@ def cmd_repo_init(args: argparse.Namespace) -> int:
 
 
 def cmd_repo_add(args: argparse.Namespace) -> int:
-    """Register a new wiki and scaffold it inside the repository."""
+    """Scaffold a wiki inside the repository, registering it first if needed.
+
+    Two modes, chosen by whether ``wikis.yaml`` already lists the name.
+
+    **Listed:** the registry is the source of truth and is not touched —
+    the wiki is scaffolded at the path the entry gives. This is the path
+    for a hand-maintained registry: edit the YAML, then ``repo add``.
+
+    **Unlisted:** the entry is written and the wiki scaffolded — but only
+    if the file carries no comments. A commented registry is somebody's
+    document, and a load-and-dump would flatten it; they are told what to
+    add by hand instead.
+    """
     root = base_root(args)
     registry_path = _require_registry(root)
     if registry_path is None:
         return 1
-    raw = _load_raw(registry_path)
+    registry = load_registry(root)
+    assert registry is not None
+    if args.name in registry.wikis:
+        return _scaffold_listed(root, registry, args)
+
+    text = registry_path.read_text(encoding="utf-8")
+    if _has_comments(text):
+        return _refuse_rewrite(registry_path, args.name)
+    raw = _parse_raw(registry_path, text)
     wikis = raw.setdefault("wikis", {})
     assert isinstance(wikis, dict)
-    if args.name in wikis:
-        print(f"outmem: wiki {args.name!r} is already registered.", file=sys.stderr)
-        return 1
     rel = args.path or f"wikis/{args.name}"
     _register_entry(raw, name=args.name, rel=rel, title=args.title, audience=args.audience)
     # Write the registry BEFORE scaffolding: `WikiStore.init` discovers its
@@ -199,6 +261,30 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scaffold_listed(root: Path, registry: object, args: argparse.Namespace) -> int:
+    """``repo add`` for a name the registry already carries: scaffold only."""
+    from outmem.repo import Registry
+
+    assert isinstance(registry, Registry)
+    if args.audience or args.title or args.path:
+        print(
+            f"outmem: wiki {args.name!r} is already listed in {REGISTRY_FILENAME}; "
+            "its audience, title and path come from there. Edit the file to "
+            "change them, then run `repo add` with no flags to scaffold.",
+            file=sys.stderr,
+        )
+        return 1
+    path = registry.path_of(args.name)
+    rel = registry.wikis[args.name].path
+    if is_wiki_root(path):
+        status(f"wiki {args.name!r} is already scaffolded at {rel}; nothing to do")
+        return 0
+    path.mkdir(parents=True, exist_ok=True)
+    WikiStore.init(path, agent_identity=agent_identity())
+    status(f"scaffolded wiki {args.name!r} at {rel} ({REGISTRY_FILENAME} untouched)")
+    return 0
+
+
 def cmd_repo_import(args: argparse.Namespace) -> int:
     """Move an existing wiki into a multi-wiki repository.
 
@@ -223,13 +309,28 @@ def cmd_repo_import(args: argparse.Namespace) -> int:
     if not is_wiki_root(source):
         print(f"outmem: {source} does not look like a wiki (no config.yaml).", file=sys.stderr)
         return 1
-    raw = _load_raw(registry_path)
-    wikis = raw.setdefault("wikis", {})
-    assert isinstance(wikis, dict)
-    if args.name in wikis:
-        print(f"outmem: wiki {args.name!r} is already registered.", file=sys.stderr)
-        return 1
-    rel = args.path_in_repo or f"wikis/{args.name}"
+    registry = load_registry(root)
+    assert registry is not None
+    listed = args.name in registry.wikis
+    text = registry_path.read_text(encoding="utf-8")
+    if listed:
+        # The registry is the source of truth: the wiki goes where the
+        # entry says, and the entry is not rewritten.
+        entry = registry.wikis[args.name]
+        if args.audience or args.title or (args.path_in_repo and args.path_in_repo != entry.path):
+            print(
+                f"outmem: wiki {args.name!r} is already listed in {REGISTRY_FILENAME}; "
+                "its audience, title and path come from there.",
+                file=sys.stderr,
+            )
+            return 1
+        rel = entry.path
+    else:
+        # Decide *before* moving anything: refusing after the move would
+        # leave the wiki relocated and unregistered.
+        if _has_comments(text):
+            return _refuse_rewrite(registry_path, args.name)
+        rel = args.path_in_repo or f"wikis/{args.name}"
     target = root / rel
     if target.exists():
         print(f"outmem: {target} already exists.", file=sys.stderr)
@@ -260,12 +361,14 @@ def cmd_repo_import(args: argparse.Namespace) -> int:
         print(f"outmem: could not move the wiki: {exc}", file=sys.stderr)
         return 1
 
-    _register_entry(raw, name=args.name, rel=rel, title=args.title, audience=args.audience)
-    _save_raw(registry_path, raw)
+    paths = [rel]
+    if not listed:
+        raw = _parse_raw(registry_path, text)
+        _register_entry(raw, name=args.name, rel=rel, title=args.title, audience=args.audience)
+        _save_raw(registry_path, raw)
+        paths.insert(0, REGISTRY_FILENAME)
     try:
-        _commit_registry(
-            root, paths=[REGISTRY_FILENAME, rel], subject=f"repo: import {args.name}"
-        )
+        _commit_registry(root, paths=paths, subject=f"repo: import {args.name}")
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 1
