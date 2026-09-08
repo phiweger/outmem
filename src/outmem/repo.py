@@ -49,6 +49,7 @@ from outmem.exceptions import OutmemError
 
 if TYPE_CHECKING:
     from outmem.store import WikiStore
+    from outmem.wikiset import WikiSet
 
 REGISTRY_FILENAME = "wikis.yaml"
 
@@ -428,6 +429,24 @@ class Repo:
         if name not in self.registry.wikis:
             raise OutmemError(f"no such wiki: {name!r}")
         return self._open(name, **kwargs)
+
+    def wikiset(self, *, audience: Iterable[str], **kwargs: object) -> WikiSet:
+        """Open every wiki this audience reaches, read as one.
+
+        The ordinary shape of a served session: the open core plus
+        whatever compartments the user's tags allow, presented to the
+        model as a single knowledge base. The access decision is made
+        here, once, by choosing which stores go in — everything
+        downstream reads what it was handed in full.
+        """
+        from outmem.wikiset import WikiSet
+
+        names = self.wikis_for(audience)
+        if not names:
+            raise OutmemError(
+                "these audience tags reach no wiki in this repository."
+            )
+        return WikiSet([self._open(n, **kwargs) for n in names])
 
     def _open(self, name: str, **kwargs: object) -> WikiStore:
         from outmem.store import WikiStore as _WikiStore
