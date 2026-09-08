@@ -3,6 +3,21 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.17.1
+
+### Fixed
+
+- **`outmem repo init` overwrote an existing `.gitignore`** and committed
+  the loss. Run in a directory that already had one — the ordinary case
+  — it replaced the file wholesale, dropping rules like `__pycache__/`,
+  `*.pyc` and `.vectors.db`. Entries are appended one at a time and only
+  when absent now, reusing the same conservative helper `outmem init`
+  has always used for a wiki's own `.gitignore`; the file is staged only
+  if something was actually added to it.
+- **`repo init` failed with a raw git error when there was nothing to
+  commit.** Re-running a setup command that changed nothing is a no-op,
+  not a failure.
+
 ## 0.17.0
 
 **Multi-wiki.** Several wikis in one git repository, one per audience.

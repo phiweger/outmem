@@ -216,6 +216,32 @@ class WikiStoreConfig:
     read_only: bool = False
 
 
+def ensure_gitignored(root: Path, pattern: str, *, comment: str) -> bool:
+    """Append ``pattern`` to ``root``'s ``.gitignore``. Returns True if added.
+
+    Idempotent and conservative: a pattern already present in any of its
+    equivalent spellings is left alone, and an existing file is only ever
+    *appended to* — never rewritten. Somebody's `__pycache__/` and
+    `.vectors.db` rules are not ours to drop.
+
+    Single funnel for every "outmem must keep this out of git" rule so the
+    equivalence check (bare / leading-slash / trailing-slash) is written
+    once. A second copy of it is how one caller ends up appending a
+    duplicate line on every run — or, worse, writing the file wholesale.
+    """
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    lines = {line.strip() for line in existing.splitlines() if line.strip()}
+    bare = pattern.strip("/")
+    if lines & {bare, f"/{bare}", f"{bare}/", f"/{bare}/"}:
+        return False
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    gitignore.write_text(
+        existing + prefix + f"{comment}\n{pattern}\n", encoding="utf-8"
+    )
+    return True
+
+
 def _repo_prefix(root: Path, repo: Path) -> str:
     """``root``'s location inside ``repo``, as a POSIX prefix or ``""``.
 
@@ -1987,28 +2013,8 @@ class WikiStore:
         ensure_hook(self.repo)
 
     def _ensure_gitignored(self, pattern: str, *, comment: str) -> bool:
-        """Append ``pattern`` to the wiki's top-level ``.gitignore``.
-
-        Idempotent and conservative: a pattern already present in any
-        of its equivalent spellings is left alone, and an existing file
-        is only ever appended to. Returns ``True`` if a line was added.
-
-        Single funnel for every "outmem must keep this out of git" rule
-        so the equivalence check (bare / leading-slash / trailing-slash)
-        is written once — a second copy of it is how one caller ends up
-        appending a duplicate line on every run.
-        """
-        gitignore = self.root / ".gitignore"
-        existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-        lines = {line.strip() for line in existing.splitlines() if line.strip()}
-        bare = pattern.strip("/")
-        if lines & {bare, f"/{bare}", f"{bare}/", f"/{bare}/"}:
-            return False
-        prefix = "" if not existing or existing.endswith("\n") else "\n"
-        gitignore.write_text(
-            existing + prefix + f"{comment}\n{pattern}\n", encoding="utf-8"
-        )
-        return True
+        """Append ``pattern`` to the wiki's top-level ``.gitignore``."""
+        return ensure_gitignored(self.root, pattern, comment=comment)
 
     def _maybe_ignore_dotenv(self) -> None:
         """Keep ``.env`` out of git. Called once at :meth:`init`."""

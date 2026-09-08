@@ -38,7 +38,7 @@ from outmem.config import (
 from outmem.exceptions import OutmemError
 from outmem.repo import REGISTRY_FILENAME, Repo, load_registry, split_subject
 from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
-from outmem.store import AgentIdentity, WikiStore
+from outmem.store import AgentIdentity, WikiStore, ensure_gitignored
 
 _TIMESTAMP_FMT = "%H:%M:%S"
 
@@ -1130,11 +1130,13 @@ tags: {}
 wikis: {}
 """
 
-_REPO_GITIGNORE = """\
-# Created by outmem — repository-level state that is not part of any wiki.
-.outmem-repo/
-.env
-"""
+# Repository-level ignores, appended one at a time and only when absent.
+# `.outmem-repo/` carries its own self-ignoring `.gitignore`, so the entry
+# here is belt-and-braces for anyone reading the repo root.
+_REPO_IGNORES = (
+    (".outmem-repo/", "# outmem: repository-level state, not part of any wiki."),
+    (".env", "# outmem: secrets stay out of the repository."),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1162,10 +1164,16 @@ def _commit_registry(root: Path, *, paths: list[str], subject: str) -> None:
     `.git` inside the repo instead of joining it.
     """
     from outmem.git_ops import add as git_add
-    from outmem.git_ops import commit_as
+    from outmem.git_ops import commit_as, staged_changes
 
     identity = _agent_identity()
     git_add(root, paths)
+    added, deleted = staged_changes(root)
+    if not added and not deleted:
+        # Re-running a setup command that changed nothing is a no-op, not
+        # a failure. Without this, git's own "nothing to commit" surfaces
+        # as an error from a command that did exactly what was asked.
+        return
     commit_as(
         root,
         message=subject,
@@ -1186,13 +1194,19 @@ def cmd_repo_init(args: argparse.Namespace) -> int:
         return 1
     init_repo(root, initial_branch=args.branch)
     registry_path.write_text(_STARTER_REGISTRY, encoding="utf-8")
-    (root / ".gitignore").write_text(_REPO_GITIGNORE, encoding="utf-8")
+    # Append; never rewrite. `repo init` is routinely run in a directory
+    # that already has a `.gitignore` — writing ours over it silently
+    # dropped whatever was there (`__pycache__/`, `*.pyc`, `.vectors.db`)
+    # and committed the loss.
+    touched = [
+        ensure_gitignored(root, pattern, comment=comment)
+        for pattern, comment in _REPO_IGNORES
+    ]
+    paths = [REGISTRY_FILENAME]
+    if any(touched):
+        paths.append(".gitignore")
     try:
-        _commit_registry(
-            root,
-            paths=[REGISTRY_FILENAME, ".gitignore"],
-            subject="repo: initialise",
-        )
+        _commit_registry(root, paths=paths, subject="repo: initialise")
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 1

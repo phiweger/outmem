@@ -665,3 +665,58 @@ class TestReviewFindings:
         out = capsys.readouterr().out
         assert str(repo / ".git" / "hooks" / "pre-commit") in out
         assert "wikis/open/.git" not in out
+
+    def test_repo_init_does_not_clobber_an_existing_gitignore(
+        self, tmp_path: Path
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        # `repo init` is routinely run in a directory that already has
+        # one. Writing ours over it dropped whatever was there and
+        # committed the loss — reported from a real repository, where it
+        # took `__pycache__/`, `*.pyc` and `.vectors.db` with it.
+        root = tmp_path / "existing"
+        root.mkdir()
+        _run_git(["init", "--initial-branch", "main"], cwd=root)
+        original = "__pycache__/\n*.pyc\n.vectors.db\n"
+        (root / ".gitignore").write_text(original, encoding="utf-8")
+        _commit(root, file=".gitignore", content=original, message="initial")
+
+        assert main(["repo", "init", "--root", str(root)]) == 0
+
+        after = (root / ".gitignore").read_text(encoding="utf-8")
+        assert after.startswith(original)
+        assert ".outmem-repo/" in after
+        assert ".env" in after
+
+    def test_repo_init_appends_at_most_once(self, tmp_path: Path) -> None:
+        from outmem.cli.__main__ import main
+
+        root = tmp_path / "twice"
+        root.mkdir()
+        _run_git(["init", "--initial-branch", "main"], cwd=root)
+        assert main(["repo", "init", "--root", str(root)]) == 0
+        first = (root / ".gitignore").read_text(encoding="utf-8")
+        # A second init is refused (the registry exists), so re-run the
+        # ignore step the way a repeated setup would reach it.
+        (root / "wikis.yaml").unlink()
+        assert main(["repo", "init", "--root", str(root)]) == 0
+        assert (root / ".gitignore").read_text(encoding="utf-8") == first
+
+    def test_repo_init_leaves_an_unrelated_gitignore_untracked(
+        self, tmp_path: Path
+    ) -> None:
+        # If we add nothing to it, we have no business staging somebody
+        # else's untracked file into our commit.
+        from outmem.cli.__main__ import main
+
+        root = tmp_path / "already-ignored"
+        root.mkdir()
+        _run_git(["init", "--initial-branch", "main"], cwd=root)
+        (root / ".gitignore").write_text(
+            ".outmem-repo/\n.env\n", encoding="utf-8"
+        )
+        assert main(["repo", "init", "--root", str(root)]) == 0
+        tracked = _run_git(["ls-files"], cwd=root)
+        assert "wikis.yaml" in tracked
+        assert ".gitignore" not in tracked
