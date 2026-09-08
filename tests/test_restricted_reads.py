@@ -1303,6 +1303,16 @@ class TestAWikiWithNoGitDirectory:
         monkeypatch.setattr(labels_mod, "_HEADLESS_TTL_SECONDS", 0.0)
         assert "arrived" in view.list_slugs(), "expired cache should pick it up"
 
+    def test_the_ttl_is_the_bound_the_docs_promise(self) -> None:
+        """The test above proves the constant is *read*; this one proves
+        it is finite and short.
+
+        Both docs and the CHANGELOG state five seconds as a contract, and
+        raising it to a day — or to infinity — passed everything else."""
+        from outmem._store.labels import _HEADLESS_TTL_SECONDS
+
+        assert 0 < _HEADLESS_TTL_SECONDS <= 30, _HEADLESS_TTL_SECONDS
+
     def test_a_registry_write_expires_it_without_waiting(
         self, headless: WikiStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1320,15 +1330,55 @@ class TestAWikiWithNoGitDirectory:
         view.list_sources()
         assert walks["n"] == 1, "a moved registry stamp should rebuild at once"
 
+    def test_a_source_another_process_restricts_stops_being_served(
+        self, tmp_path: Path
+    ) -> None:
+        """The rebuild firing is not the property that matters; the
+        labels it comes back with are.
+
+        `SourceRegistry` is an in-memory snapshot taken at load, so a
+        rebuild that reuses this process's handle re-reads the labels it
+        saw last time — and then caches them under the *new* stamp, so
+        it never heals. The headless path had drifted out of step with
+        the one that releases those handles.
+        """
+        import shutil
+
+        import yaml
+
+        root = tmp_path / "shared"
+        setup = WikiStore.init(root)
+        raw = yaml.safe_load((root / "config.yaml").read_text()) or {}
+        raw["restricted"] = {"labels": ["hr"]}
+        (root / "config.yaml").write_text(yaml.safe_dump(raw))
+        setup.close()
+        setup = WikiStore.open(root)
+        setup.write_page("p", title="P", body="Text.\n")
+        doc = tmp_path / "secret-plan.md"
+        doc.write_text("TOPSECRET.\n")
+        entry = setup.add_source(doc)  # open, for now
+        setup.close()
+
+        shutil.rmtree(root / ".git")
+        served = WikiStore.open(root)
+        view = served.as_viewer()
+        assert entry.rel_path in [e.rel_path for e in view.list_sources()]
+
+        # Another process restricts it. No commit is possible here, so
+        # only the registry stamp can carry the news.
+        other = WikiStore.open(root)
+        other.restrict_source(entry.rel_path, labels=["hr"], commit=False)
+
+        assert entry.rel_path not in [e.rel_path for e in view.list_sources()]
+        with pytest.raises(OutmemError, match="no such source"):
+            view.read_source(entry.rel_path)
+
     def test_it_says_so(
         self, headless: WikiStore, caplog: pytest.LogCaptureFixture
     ) -> None:
         """The failure this replaces was silent: access control worked
         perfectly and every call took most of a second, with nothing
         anywhere saying why."""
-        from outmem._store import labels as labels_mod
-
-        labels_mod._warned_headless.discard(str(headless.root))
         with caplog.at_level("WARNING", logger="outmem._store.labels"):
             headless.as_viewer().list_slugs()
         assert "no reachable git HEAD" in caplog.text
@@ -1346,13 +1396,35 @@ class TestAWikiWithNoGitDirectory:
         index and has nothing to be told. Warning there would put the
         line in front of every `outmem lint` and `outmem read` run
         against a deployed copy, where it is noise rather than news."""
-        from outmem._store import labels as labels_mod
-
-        labels_mod._warned_headless.discard(str(headless.root))
         with caplog.at_level("WARNING", logger="outmem._store.labels"):
             headless.list_slugs()
             headless.read("glossary")
             headless.search("glossary")
+        assert "no reachable git HEAD" not in caplog.text
+
+    def test_a_second_consumer_is_warned_too(
+        self, headless: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Once per cache, not once per path in a module-level set: that
+        set grew without bound, and it let any earlier consumer of the
+        same wiki silence the warning for the next one — including
+        across tests, which is why one had to reach in and clear it."""
+        headless.as_viewer().list_slugs()
+        second = WikiStore.open(headless.root)
+        with caplog.at_level("WARNING", logger="outmem._store.labels"):
+            second.as_viewer().list_slugs()
+        assert "no reachable git HEAD" in caplog.text
+
+    def test_it_does_not_repeat_itself(
+        self, headless: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        view = headless.as_viewer()
+        view.list_slugs()  # the one warning it is allowed
+        caplog.clear()  # caplog spans the whole test, not just the block
+        with caplog.at_level("WARNING", logger="outmem._store.labels"):
+            for _ in range(10):
+                view.list_slugs()
+                view.exists("glossary")
         assert "no reachable git HEAD" not in caplog.text
 
     def test_a_wiki_with_a_repo_does_not_warn(
@@ -1361,3 +1433,80 @@ class TestAWikiWithNoGitDirectory:
         with caplog.at_level("WARNING", logger="outmem._store.labels"):
             store.as_viewer().list_slugs()
         assert "no reachable git HEAD" not in caplog.text
+
+
+class TestHeadStampAcrossRepositoryShapes:
+    """`.git` comes in more shapes than "a directory with loose refs".
+
+    Each one that falls through to `git rev-parse` costs a subprocess on
+    *every* visibility check — 28x per check on a 1200-page corpus — and
+    `git gc --auto` moves any long-lived server-side repo onto that path
+    without anybody choosing it.
+    """
+
+    def _subprocess_free(self, store: WikiStore, monkeypatch) -> object:  # type: ignore[no-untyped-def]
+        from outmem._store.labels import head_stamp
+
+        monkeypatch.setattr(
+            type(store), "head", lambda self: pytest.fail("shelled out to git")
+        )
+        return head_stamp(store)
+
+    def test_loose_ref(self, store: WikiStore, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        assert self._subprocess_free(store, monkeypatch)[0] == "ref"
+
+    def test_packed_refs(self, store: WikiStore, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """What `git gc` leaves behind."""
+        import subprocess
+
+        subprocess.run(
+            ["git", "pack-refs", "--all"], cwd=store.root, check=True,
+            capture_output=True,
+        )
+        assert self._subprocess_free(store, monkeypatch)[0] == "packed"
+
+    def test_git_is_a_file(self, store: WikiStore, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """A worktree or a submodule: `.git` holds `gitdir: <path>`."""
+        import shutil
+
+        real = store.root / ".git"
+        moved = store.root.parent / "real-git-dir"
+        shutil.move(str(real), str(moved))
+        real.write_text(f"gitdir: {moved}\n")
+        assert self._subprocess_free(store, monkeypatch)[0] == "ref"
+
+    def test_a_branch_with_no_commits_says_the_repo_is_there(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Telling somebody to keep their `.git` while `.git` is sitting
+        right there sends them hunting a missing directory instead of
+        the empty branch that is the actual cause."""
+        import subprocess
+
+        import yaml
+
+        root = tmp_path / "fresh"
+        root.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        (root / "config.yaml").write_text(
+            yaml.safe_dump({"restricted": {"labels": ["hr"]}})
+        )
+        store = WikiStore.open(root)
+        store.pages_path.mkdir(parents=True, exist_ok=True)
+        with caplog.at_level("WARNING", logger="outmem._store.labels"):
+            store.as_viewer().list_slugs()
+        assert "no commit on the current branch yet" in caplog.text
+        assert "depth-1 clone" not in caplog.text
+
+    def test_no_repository_says_to_keep_one(
+        self, store: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import shutil
+
+        root = store.root
+        store.close()
+        shutil.rmtree(root / ".git")
+        with caplog.at_level("WARNING", logger="outmem._store.labels"):
+            WikiStore.open(root).as_viewer().list_slugs()
+        assert "depth-1 clone" in caplog.text
+        assert "no commit on the current branch yet" not in caplog.text

@@ -163,29 +163,50 @@ class LabelIndex:
 # write to anyway; see `LabelCache._without_head`.
 _HEADLESS_TTL_SECONDS = 5.0
 
-_warned_headless: set[str] = set()
+def _headless_warning(store: WikiStore) -> str:
+    """What to say, which depends on WHY there is no HEAD.
 
-
-def _warn_headless_once(store: WikiStore) -> None:
-    """Say so, once per wiki per process.
-
-    The failure this replaces was silent: access control worked
-    perfectly and every tool call took most of a second, with nothing
-    anywhere saying why.
+    Telling somebody to keep their `.git` while `.git` is sitting right
+    there is worse than saying nothing — they go looking for a missing
+    directory instead of the empty branch that is actually the cause.
     """
-    key = str(store.root)
-    if key in _warned_headless:
-        return
-    _warned_headless.add(key)
-    log.warning(
-        "%s has restriction labels but no reachable git HEAD, so the label "
-        "index cannot be keyed on a commit. Falling back to a %.0fs cache: a "
-        "label change made outside this process can take that long to be "
-        "seen. Keep the wiki's .git directory (a depth-1 clone is enough) "
-        "and the index is invalidated by the commit instead.",
-        store.root,
-        _HEADLESS_TTL_SECONDS,
+    common = (
+        f"{store.root} has restriction labels but no reachable git HEAD, so "
+        f"the label index cannot be keyed on a commit. Falling back to a "
+        f"{_HEADLESS_TTL_SECONDS:.0f}s cache: a label change made outside "
+        f"this process can take that long to be seen."
     )
+    if _git_dir(store) is None:
+        return (
+            f"{common} Keep the wiki's .git directory (a depth-1 clone is "
+            "enough) and the index is invalidated by the commit instead."
+        )
+    return (
+        f"{common} The repository is there but has no commit on the current "
+        "branch yet; this resolves itself on the first one."
+    )
+
+
+def corpus_stamp(store: WikiStore) -> tuple[int, int, int]:
+    """A cheap fingerprint of ``wiki/pages/`` — no file is opened.
+
+    ``(file count, newest mtime, total size)``. Used only on the
+    headless path, where there is no commit to ask instead: it turns
+    "the clock says this may be stale" into "the disk says whether it
+    is", at a stat per file rather than a parse per file.
+    """
+    count = 0
+    newest = 0
+    total = 0
+    for path in store.pages_path.rglob("*.md"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        count += 1
+        newest = max(newest, stat.st_mtime_ns)
+        total += stat.st_size
+    return (count, newest, total)
 
 
 def _release_registries(store: WikiStore) -> None:
@@ -242,27 +263,57 @@ def head_stamp(store: WikiStore) -> tuple[object, ...]:
     cannot see), so the token is never weaker than it was — only
     cheaper in the common case.
     """
-    git_dir = store.root / ".git"
-    if not git_dir.exists():
+    git_dir = _git_dir(store)
+    if git_dir is None:
         # No repository at all — a depth-1 export, a read-only mount.
         # Returning early matters: the fallback below shells out to `git
         # rev-parse`, which on a directory with no `.git` *fails*, once
         # per visibility check. A subprocess per call to learn something
         # a single `exists()` already told us.
         return (None,)
-    head_file = git_dir / "HEAD"
     try:
-        raw = head_file.read_text(encoding="utf-8").strip()
+        raw = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
     except OSError:
         return (store.head(),)
     if not raw.startswith("ref: "):
         return ("detached", raw)  # already the sha
     ref = git_dir / raw[len("ref: ") :]
-    if not ref.exists():
-        # Packed refs, or a branch with no commits yet. Ask git; the
-        # answer is what it always was.
-        return (store.head(),)
-    return ("ref", raw, _stamp(ref))
+    if ref.exists():
+        return ("ref", raw, _stamp(ref))
+    packed = git_dir / "packed-refs"
+    if packed.exists():
+        # `git gc --auto` packs refs on any long-lived server-side repo,
+        # which used to move it silently onto the subprocess path — 28x
+        # slower per check on a corpus this size. A commit writes the
+        # ref back out loose, so the token changes shape and rebuilds.
+        return ("packed", raw, _stamp(packed))
+    # A branch with no commits yet. Nothing to key on, but there IS a
+    # repository, which is what `_warn_headless_once` needs to know.
+    return (None,)
+
+
+def _git_dir(store: WikiStore) -> Path | None:
+    """The directory holding ``HEAD``, or ``None`` when there is no repo.
+
+    ``.git`` is a *file* in a worktree or a submodule, holding
+    ``gitdir: <path>``. Following it keeps those shapes on the cheap
+    path instead of a subprocess per visibility check.
+    """
+    candidate = store.root / ".git"
+    if candidate.is_dir():
+        return candidate
+    if not candidate.is_file():
+        return None
+    try:
+        text = candidate.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text.startswith("gitdir: "):
+        return None
+    target = Path(text[len("gitdir: ") :])
+    if not target.is_absolute():
+        target = store.root / target
+    return target if target.is_dir() else None
 
 
 def build(store: WikiStore, head: tuple[object, ...] | None = None) -> LabelIndex:
@@ -396,6 +447,12 @@ class LabelCache:
         self._lock = threading.Lock()
         self._handle_stamp: tuple[tuple[int, int], ...] | None = None
         self._headless_built_at = float("-inf")
+        self._corpus_stamp: tuple[int, int, int] | None = None
+        # Per cache, not a module-level set keyed on the path: that set
+        # grew without bound, and it let any earlier consumer of the
+        # same wiki silence the warning for the next one — including
+        # across tests, which is why one had to reach in and clear it.
+        self._warned_headless = False
 
     def get(self, store: WikiStore) -> LabelIndex:
         # Deliberately NOT short-circuited on `restrictions.enabled`.
@@ -427,22 +484,41 @@ class LabelCache:
                 stamp,
             ):
                 return cached
-            if self._handle_stamp != stamp:
-                # A registry changed since these handles were opened, and
-                # `SourceRegistry` is an in-memory snapshot taken at load.
-                # Rebuilding from the handle we hold would read the
-                # labels this process saw last time — the stale value the
-                # stamp just told us not to trust.
-                #
-                # Keyed on when the HANDLES were loaded, not on the
-                # cached index: a first build, or one triggered by HEAD
-                # alone, would otherwise reuse a snapshot that predates
-                # another process's registry write.
-                _release_registries(store)
-                self._handle_stamp = stamp
-            built = build(store, head)
-            self._index = built
-            return built
+            return self._rebuild(store, head, stamp)
+
+    def _rebuild(
+        self,
+        store: WikiStore,
+        head: tuple[object, ...] | None,
+        stamp: tuple[tuple[int, int], ...],
+    ) -> LabelIndex:
+        """Build and store the index. The caller must hold the lock.
+
+        The single place a rebuild happens, because there used to be
+        two and they drifted: the headless path was a copy that had
+        forgotten the handle release below, so a source restricted by
+        another process was re-read from this process's stale snapshot
+        and cached under the *new* stamp — fail-open, and permanent,
+        since every later rebuild repeated it. One function means the
+        next step added here cannot be forgotten by half the callers.
+        """
+        if self._handle_stamp != stamp:
+            # A registry changed since these handles were opened, and
+            # `SourceRegistry` is an in-memory snapshot taken at load.
+            # Rebuilding from the handle we hold would read the labels
+            # this process saw last time — the stale value the stamp
+            # just told us not to trust.
+            #
+            # Keyed on when the HANDLES were loaded, not on the cached
+            # index: a first build, or one triggered by HEAD alone,
+            # would otherwise reuse a snapshot that predates another
+            # process's registry write.
+            _release_registries(store)
+            self._handle_stamp = stamp
+        built = build(store, head)
+        self._index = built
+        self._headless_built_at = time.monotonic()
+        return built
 
     def _without_head(
         self, store: WikiStore, stamp: tuple[tuple[int, int], ...]
@@ -456,37 +532,77 @@ class LabelCache:
         a repo, which is not a slow path, it is a cliff, and a silent
         one.
 
-        Such a wiki cannot be written through outmem at all — every
-        write path commits, and committing needs git — so the corpus
-        only changes when something outside the process replaces it,
-        which in practice means a redeploy and a restart. Caching is
-        therefore correct for that shape. The TTL is the concession to
-        the shape it is *not* correct for: somebody editing files under
-        a non-git directory in a long-lived process sees their change
-        within a bounded window rather than never.
+        Every *page* write commits, and committing needs git, so page
+        labels cannot change under such a wiki at all — they move only
+        when something outside the process replaces the corpus, which
+        in practice means a redeploy and a restart.
+
+        Source labels are the exception, and worth naming because the
+        first version of this got it wrong: ``add_source(local=True)``,
+        ``add_source(commit=False)`` and ``restrict_source(commit=False)``
+        all work without a repository, and all change what a source is
+        labelled. Those are caught by the registry fingerprint rather
+        than by the clock, so they take effect at once.
+
+        The TTL covers what neither of those does: somebody editing page
+        files under a non-git directory in a long-lived process, who
+        sees their change within a bounded window rather than never.
         """
-        if self._headless_is_fresh(stamp):
-            return self._index  # type: ignore[return-value]
+        fresh = self._fresh_headless(stamp)
+        if fresh is not None:
+            return fresh
         with self._lock:
             # Re-checked inside the lock against a FRESH clock read: a
             # thread that waited here may have waited past the TTL, and
             # deciding on the reading it took before the wait would let
             # it serve an index it had just established was too old.
-            if self._headless_is_fresh(stamp):
-                return self._index  # type: ignore[return-value]
-            _warn_headless_once(store)
-            built = build(store, None)
-            self._index = built
-            self._headless_built_at = time.monotonic()
-            return built
+            fresh = self._fresh_headless(stamp)
+            if fresh is not None:
+                return fresh
+            if not self._warned_headless:
+                self._warned_headless = True
+                log.warning("%s", _headless_warning(store))
+            cached = self._index
+            # The clock expiring says the index MAY be stale, not that it
+            # is. Ask the disk before parsing it: a stat per file against
+            # a full YAML parse per file, and on the shape this path
+            # exists for — a deployed copy nothing writes to — the answer
+            # is always "unchanged", so the steady state is one cheap
+            # walk per window rather than one expensive one forever.
+            #
+            # Only when the REGISTRY is also unchanged. `corpus_stamp`
+            # covers `wiki/pages/` and nothing else, so a source whose
+            # labels moved would sail past it — which is the same
+            # fail-open the two rebuild paths drifting apart produced.
+            if cached is not None and cached.registries == stamp:
+                corpus = corpus_stamp(store)
+                if corpus == self._corpus_stamp:
+                    self._headless_built_at = time.monotonic()
+                    return cached
+                self._corpus_stamp = corpus
+            else:
+                self._corpus_stamp = corpus_stamp(store)
+            return self._rebuild(store, None, stamp)
 
-    def _headless_is_fresh(self, stamp: tuple[tuple[int, int], ...]) -> bool:
+    def _fresh_headless(
+        self, stamp: tuple[tuple[int, int], ...]
+    ) -> LabelIndex | None:
+        """The cached index if it is still good, else ``None``.
+
+        Returns the value it validated rather than a boolean. Answering
+        "yes" and letting the caller re-read ``self._index`` was a race:
+        the fast path holds no lock, so `invalidate()` could null the
+        field in between and the caller returned ``None`` into every
+        visibility check.
+        """
         cached = self._index
-        return (
+        if (
             cached is not None
             and cached.registries == stamp
             and time.monotonic() - self._headless_built_at < _HEADLESS_TTL_SECONDS
-        )
+        ):
+            return cached
+        return None
 
     def note_registry_write(self, store: WikiStore) -> None:
         """Record that this process just wrote a registry itself.

@@ -381,19 +381,28 @@ invalidation signal.
 
 A deployment that strips `.git` — a depth-1 export, a read-only mount —
 has no commit to key that on. outmem falls back to a **5-second**
-time-based cache and logs a warning naming the cause. That fallback is
-correct for the shape it is meant for: a wiki with no repository cannot
-be written through outmem at all, since every write path commits, so
-the corpus only changes when something outside the process replaces it
-— which in practice means a redeploy and a restart.
+time-based cache and logs a warning naming the cause.
 
-What it costs is bounded staleness. A label change made outside the
-process can take up to five seconds to be seen, where a wiki with a
-repository sees it on the next commit. A change to a source's labels is
-picked up immediately either way, since the registry file's fingerprint
-is part of the token. And a page that appears on disk while the cache
-is warm is *hidden* rather than served, because its labels are unknown
-— the fail-closed rule, applied to time.
+That fallback suits the shape it is meant for. Every *page* write
+commits, and committing needs git, so page labels cannot change under
+such a wiki at all — they move only when something outside the process
+replaces the corpus, which in practice means a redeploy and a restart.
+*Source* labels are the exception: `add_source(local=True)`,
+`add_source(commit=False)` and `restrict_source(commit=False)` all work
+without a repository. Those are caught by the registry file's
+fingerprint rather than by the clock, so they take effect at once.
+
+What the fallback costs is bounded staleness on the one case neither
+covers: a page file edited in place under a non-git directory, which
+can take up to five seconds to be seen where a repository would show it
+on the next commit. A page that *appears* on disk while the cache is
+warm is meanwhile *hidden* rather than served, because its labels are
+unknown — the fail-closed rule, applied to time.
+
+The cache is not a timer alone. When the five seconds elapse, outmem
+stats the page tree before parsing it, and reuses the index when
+nothing moved — so a corpus that never changes costs one cheap walk per
+window rather than a full parse forever.
 
 Keeping `.git` is strictly better and cheap: a depth-1 clone of a
 markdown wiki is a few megabytes, against a cache that has to guess

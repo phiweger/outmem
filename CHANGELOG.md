@@ -144,11 +144,16 @@ contract, threat boundary and rollout order in
   strips the repository had no token and rebuilt constantly — measured
   on 1200 pages at 648 ms per check against 0.10 ms with a repo, and
   silent. Such a wiki cannot be written through outmem anyway (every
-  write path commits), so it now uses a 5-second cache and says so once,
-  naming the cause. The cost is bounded staleness: a label change made
-  outside the process can take that long to be seen, where a repository
-  shows it on the next commit. Keeping `.git` remains strictly better
-  and costs a few MB.
+  *page* write commits), so it now uses a 5-second cache and says so
+  once, naming the cause. When the window elapses it stats the page tree
+  before parsing it, so a corpus that never changes costs one cheap walk
+  per window rather than a full parse forever. Source labels can still
+  move without a commit and are caught by the registry fingerprint, not
+  the clock. Keeping `.git` remains strictly better and costs a few MB.
+- **Packed refs and worktrees no longer cost a subprocess per visibility
+  check.** `git gc --auto` packs refs on any long-lived server-side
+  repository, which silently moved it onto a `git rev-parse` per call
+  (28x slower); a worktree, whose `.git` is a file, did the same.
 - **`add_source` takes the write lock**, like every other
   commit-producing path. The registry was already safe across processes
   — SQLite serialises the writers — but the git half was not: two
