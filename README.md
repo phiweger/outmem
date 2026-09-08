@@ -536,56 +536,6 @@ agent = Agent(
 
 ---
 
-## Restricted content — serving one wiki to people with different access
-
-Some wikis hold material only part of the organisation may see. outmem
-gates that **deterministically**, at the store layer, before anything
-becomes prompt text — nothing in the enforcement path depends on a model
-behaving correctly.
-
-Content is open by default; a wiki that declares no labels is unaffected.
-
-```yaml
-# config.yaml
-restricted:
-  labels: [hr, legal]      # the declared vocabulary
-  paths: {"hr:*": [hr]}    # safety net: anything under hr: is restricted
-  sources: {"hr/*": [hr]}  # ...and anything ingested into hr/
-```
-
-```bash
-# Label a document at the moment you are holding it. Every page ever
-# compiled from it inherits the label.
-outmem ingest severance-plan.md --into hr --restricted hr
-```
-
-```python
-from outmem.restricted import Grants
-from outmem.adapters.pydantic_ai import wiki_read_tools
-
-store = WikiStore.open("/srv/wiki")                     # operator, unfiltered
-view  = store.as_viewer(                                # per request
-    mode={"hr"},                                        # this session's scope
-    grants=Grants.reader("hr"),                         # what the user may see
-)
-tools = wiki_read_tools(view)                           # the model never sees `store`
-```
-
-An item is visible when its labels are a subset of the session's mode,
-so open-by-default falls out of the subset relation rather than being a
-special case. A write requires labels *equal* to the mode, which
-confines whatever a session read to the compartment it read from. A
-hidden page answers exactly as a nonexistent one does — a
-distinguishable error would be an existence oracle.
-
-Assumes outmem runs server-side against a repository users cannot clone.
-The threat boundary, what is explicitly *not* protected, and a rollout
-order whose first four steps are safe to run while still serving the
-unrestricted store are in
-[`docs/restricted-content.md`](docs/restricted-content.md).
-
----
-
 ## Where to go next
 
 - [`docs/cli.md`](docs/cli.md) — every subcommand with examples.
@@ -595,9 +545,6 @@ unrestricted store are in
 - [`docs/sources.md`](docs/sources.md) — the two source trees, what
   `--local` is for, and the guarantees around material you may read
   but not redistribute.
-- [`docs/restricted-content.md`](docs/restricted-content.md) — access
-  control for a served wiki: restriction labels, grants and session
-  mode, and why nothing in the enforcement path depends on a model.
 - [`docs/python-api.md`](docs/python-api.md) — `WikiStore` + the
   PydanticAI adapter + the standalone agent runtime.
 - [`docs/growing-the-wiki.md`](docs/growing-the-wiki.md) — reading

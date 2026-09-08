@@ -255,40 +255,6 @@ Note `retrieval.semantic_top_k` is distinct from `semantic.top_k` (which
 governs the `find_similar` tool): `search_wiki` with a `semantic`/`hyde`
 strategy uses `retrieval.semantic_top_k`.
 
-## `restricted:` — access control for a served wiki
-
-Absent by default, and a wiki that declares no labels behaves exactly
-as it did before this block existed.
-
-```yaml
-restricted:
-  labels: [hr, legal, board]     # the declared vocabulary
-  paths:                          # safety net for pages
-    "hr:*": [hr]
-  sources:                        # safety net for ingested documents
-    "hr/*": [hr]
-```
-
-`labels` is the whole vocabulary. A label used anywhere but absent from
-it hides its content from **everyone**, including the people it was
-meant for; `outmem lint` reports that as an error.
-
-`paths` and `sources` are safety nets, not the primary mechanism —
-explicit `restricted:` frontmatter and `outmem ingest --restricted` are.
-They exist because explicit labels can be forgotten: a new page under
-`hr:` is restricted whether or not anyone edited its frontmatter. A
-pattern ending `:*` or `/*` covers the bare prefix too, so `hr:*`
-includes the namespace root page `hr`.
-
-**This block is deliberately not forgiving.** Every other setting here
-degrades a feature when it is wrong; this one degrades a boundary. A
-malformed block refuses to open the wiki rather than falling back to
-defaults, and unparseable YAML in a `config.yaml` carrying a
-top-level `restricted:` key is fatal — otherwise a syntax error would drop
-the whole file and open the wiki with access control silently off.
-
-Full contract in [`restricted-content.md`](restricted-content.md).
-
 ## Sample `.env`
 
 ```dotenv

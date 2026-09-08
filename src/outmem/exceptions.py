@@ -59,21 +59,6 @@ class IncompleteBodyError(OutmemError):
         self.markers = markers
 
 
-class RestrictionError(OutmemError):
-    """A write or privileged operation is refused by the access rules.
-
-    Raised at the **store** layer, so the CLI, the Python API, and a
-    downstream app driving its own agent are all covered — not only
-    outmem's tool palette.
-
-    Only *writes* and operator-only paths raise it. A denied **read**
-    raises or returns exactly what a nonexistent item would, because a
-    distinguishable error is an existence oracle: learning that
-    something is hidden is learning that it is there. Message text must
-    therefore never name a hidden item.
-    """
-
-
 class IdentityWarning(OutmemError):
     """A git author was not found in ``CONTRIBUTORS.md``.
 

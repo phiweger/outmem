@@ -18,12 +18,7 @@ Everything else is identical: same content-addressed layout
 
 ## Why two trees
 
-The distinction is **redistribution rights**, not secrecy. Secrecy is a
-separate, orthogonal axis — see
-[`restricted-content.md`](restricted-content.md). A source can be
-local-and-open (a licensed handbook everyone may read but nobody may
-republish) or tracked-and-restricted (an internal memo); conflating the
-two would weaken both.
+The distinction is **redistribution rights**, not secrecy.
 
 You can lawfully read a licensed handbook, a purchased corpus, or a
 copyrighted paper, and you can lawfully write your own notes about

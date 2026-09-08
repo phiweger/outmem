@@ -33,12 +33,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from outmem.dashboard.service import render_body
-from outmem.exceptions import (
-    FrontmatterError,
-    OutmemError,
-    RestrictionError,
-    SlugError,
-)
+from outmem.exceptions import FrontmatterError, OutmemError, SlugError
 from outmem.store import WikiStore
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -114,13 +109,6 @@ def router_for(
             commits = store.history(slug)
         except SlugError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RestrictionError as exc:
-            # History is operator-only: git knows nothing about labels
-            # and the index describes only the current commit. A
-            # dashboard served from a view has no history to show, and
-            # a 500 is the wrong way to say so. The message names no
-            # item, so this is not an oracle.
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
         template = env.get_template("wiki_history.html.j2")
         html = template.render(
             slug=slug,

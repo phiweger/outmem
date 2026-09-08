@@ -548,7 +548,6 @@ def cmd_lint(args: argparse.Namespace) -> int:
         sources_local_dir=store.sources_local_path,
         repo_root=store.root,
         indexed_paths=_indexed_paths_or_none(store),
-        restricted=store.restrictions,
     )
     sys.stdout.write(format_report(report))
     if report.has_errors:
@@ -566,32 +565,6 @@ def cmd_rename(args: argparse.Namespace) -> int:
         alias=not args.no_alias,
         rewrite_links=not args.no_rewrite,
     )
-    print(sha)
-    return 0
-
-
-def cmd_restrict(args: argparse.Namespace) -> int:
-    """`outmem restrict <slug> --label hr` — the operational verb.
-
-    Runs against the bare store, which is right: restricting is an
-    operator action taken from the server, and the whole point is to
-    touch pages the compartment's own users may not yet be able to see.
-    """
-    store = _open_store(args)
-    try:
-        sha = store.restrict_page(
-            args.slug, labels=args.label or [], cascade=args.cascade
-        )
-    except OutmemError as exc:
-        print(f"outmem: {exc}", file=sys.stderr)
-        return 1
-    # The EFFECTIVE labels, not the requested ones: a `restricted.paths`
-    # rule or a cited source can leave the page with more than was asked
-    # for, and reporting the request would tell the operator something
-    # that is not true of the page.
-    effective = store._labels().for_page(store.resolve_slug(args.slug))
-    labels = ", ".join(sorted(effective)) or "(none — now open)"
-    _status(f"{args.slug} restricted to: {labels}")
     print(sha)
     return 0
 
@@ -829,30 +802,6 @@ def cmd_sources_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sources_restrict(args: argparse.Namespace) -> int:
-    """`outmem sources restrict <path> --label hr` — the source verb.
-
-    The counterpart to `outmem restrict` for pages, and the one the
-    registry's own error messages point at. Every page compiled from
-    this source inherits its labels, so this is the smallest edit that
-    restricts a whole downstream.
-    """
-    store = _open_store(args)
-    try:
-        entry = store.restrict_source(args.rel_path, labels=args.label or [])
-    except OutmemError as exc:
-        print(f"outmem: {exc}", file=sys.stderr)
-        return 1
-    shown = ", ".join(sorted(entry.restricted)) or "(none — now open)"
-    _status(f"{entry.citation_path} restricted to: {shown}")
-    if not entry.restricted:
-        _status(
-            "pages compiled from it keep any labels of their own; run "
-            "`outmem lint` to see what changed."
-        )
-    return 0
-
-
 def cmd_sources_gc(args: argparse.Namespace) -> int:
     store = _open_store(args)
     audit = store.sources_gc(dry_run=not args.apply)
@@ -932,15 +881,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             as_key=args.as_key,
             local=args.local,
             commit=True,
-            restricted=args.restricted,
         )
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 1
     where = "wiki/sources-local (not tracked)" if args.local else "wiki/sources"
     _status(f"registered {entry.rel_path} in {where} (sha256: {entry.sha256[:12]}…)")
-    if entry.restricted:
-        _status(f"restricted to: {', '.join(sorted(entry.restricted))}")
     _report_source_refs(store, entry.rel_path)
 
     if args.register_only:
@@ -971,26 +917,6 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     )
 
     _configure_tool_logging(quiet=args.quiet)
-
-    # A restricted source must drive a restricted session. Handing the
-    # bare store to the agent would let it compile an open page from
-    # restricted material — the exact write-down the mode exists to
-    # prevent, reached through the command that created the material.
-    # The operator running `outmem ingest` holds the document, so the
-    # grants are theirs by construction.
-    if entry.restricted:
-        from outmem.restricted import Grants
-
-        labels = sorted(entry.restricted)
-        store = store.as_viewer(
-            mode=entry.restricted,
-            grants=Grants(
-                read=entry.restricted,
-                write=entry.restricted,
-                declassify=frozenset(),
-            ),
-        )
-        _status(f"agent session scoped to: {', '.join(labels)}")
 
     try:
         reviewer = require_interactive_reviewer(
@@ -1444,31 +1370,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_rename.set_defaults(func=cmd_rename)
 
-    p_restrict = sub.add_parser(
-        "restrict",
-        help="Set a page's restriction labels (and check inbound links).",
-        parents=[root_parent],
-    )
-    p_restrict.add_argument("slug")
-    p_restrict.add_argument(
-        "--label",
-        action="append",
-        default=None,
-        metavar="LABEL",
-        help="Restriction label; repeat for several. Must be declared under "
-        "`restricted.labels` in config.yaml. Passing none makes the page "
-        "open again, which is declassification.",
-    )
-    p_restrict.add_argument(
-        "--cascade",
-        action="store_true",
-        help="Also restrict pages that link to this one. Without it, an "
-        "inbound link from a page that would stay visible refuses the "
-        "call — that link would still name the page in a body its readers "
-        "can see.",
-    )
-    p_restrict.set_defaults(func=cmd_restrict)
-
     p_sources = sub.add_parser(
         "sources",
         help="Inspect / maintain the source registry.",
@@ -1482,27 +1383,6 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[root_parent],
     )
     p_sources_list.set_defaults(func=cmd_sources_list)
-
-    p_sources_restrict = sources_sub.add_parser(
-        "restrict",
-        help="Set a source's restriction labels (pages inherit them).",
-        parents=[root_parent],
-    )
-    p_sources_restrict.add_argument(
-        "rel_path",
-        help="Registry path, in any spelling `read_source` accepts.",
-    )
-    p_sources_restrict.add_argument(
-        "--label",
-        action="append",
-        default=None,
-        metavar="LABEL",
-        help="Restriction label; repeat for several. Must be declared under "
-        "`restricted.labels` in config.yaml. Passing none makes the source "
-        "open again, which is declassification — every page that inherited "
-        "the label from it loses that label too.",
-    )
-    p_sources_restrict.set_defaults(func=cmd_sources_restrict)
 
     p_sources_gc = sources_sub.add_parser(
         "gc",
@@ -1730,17 +1610,6 @@ def build_parser() -> argparse.ArgumentParser:
         "supersedes this one instead of landing as an unrelated source, "
         "which is what lets `outmem stale` find the pages compacted from "
         "the old version. Derived from the path when unambiguous.",
-    )
-    p_ingest.add_argument(
-        "--restricted",
-        action="append",
-        default=None,
-        metavar="LABEL",
-        help="Restriction label for this source; repeat for several. Only "
-        "users holding the label can retrieve it, and every page compiled "
-        "from it inherits the label. Must be declared under "
-        "`restricted.labels` in config.yaml. Orthogonal to --local: that "
-        "is about redistribution rights, this is about secrecy.",
     )
     p_ingest.add_argument(
         "--prompt",

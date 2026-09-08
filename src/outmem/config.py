@@ -26,15 +26,12 @@ out when this code is older than the file.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 from dotenv import find_dotenv, load_dotenv
-
-from outmem.restricted import LabelError, RestrictedSettings, settings_from_dict
 
 log = logging.getLogger(__name__)
 
@@ -359,10 +356,6 @@ class OutmemConfig:
     logfire: LogfireSettings = field(default_factory=LogfireSettings)
     retrieval: RetrievalSettings = field(default_factory=RetrievalSettings)
     extra: dict[str, Any] = field(default_factory=dict)
-    # After `extra`, for the same reason as WikiFrontmatter.restricted:
-    # a field inserted ahead of it rebinds a positional caller's last
-    # argument without a type error.
-    restricted: RestrictedSettings = field(default_factory=RestrictedSettings)
 
 
 def _outmem_repo_root() -> Path | None:
@@ -460,23 +453,6 @@ def load_yaml_config(wiki_root: Path) -> OutmemConfig:
     return _config_from_dict(raw) if raw is not None else OutmemConfig()
 
 
-# A TOP-LEVEL `restricted:` key, ignoring commented-out lines. Used only
-# to decide whether a YAML parse failure is fatal (see
-# :func:`_read_yaml_mapping`). Deliberately anchored: a nested
-# `agent: {restricted: …}` is not this block, and treating it as one
-# would make an unrelated typo fatal for a wiki that has no
-# restrictions at all.
-_RESTRICTED_KEY_RE = re.compile(r"^[ \t]*restricted[ \t]*:", re.MULTILINE)
-
-
-def _mentions_restricted(text: str) -> bool:
-    return any(
-        _RESTRICTED_KEY_RE.match(line)
-        for line in text.splitlines()
-        if not line.lstrip().startswith("#")
-    )
-
-
 def _read_yaml_mapping(path: Path) -> dict[str, Any] | None:
     """Read a YAML file expected to be a top-level mapping.
 
@@ -486,23 +462,9 @@ def _read_yaml_mapping(path: Path) -> dict[str, Any] | None:
     """
     if not path.exists():
         return None
-    text = path.read_text(encoding="utf-8")
     try:
-        raw = yaml.safe_load(text)
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
-        # The forgiving contract is safe because falling back to defaults
-        # is harmless for every setting it covers. It stops being safe the
-        # moment one of them is a security control: silently dropping a
-        # `restricted:` block turns access control off on a wiki that has
-        # some. So distinguish "this file declares no restrictions" from
-        # "we could not tell whether it does" and refuse the second.
-        if _mentions_restricted(text):
-            raise LabelError(
-                f"{path} is not valid YAML and mentions a `restricted:` block, "
-                "so its access-control settings cannot be read. Refusing to "
-                "open the wiki with restrictions silently disabled — fix the "
-                f"YAML syntax first. Parser said: {exc}"
-            ) from exc
         log.warning("Malformed %s, ignoring: %s", path, exc)
         return None
     if raw is None:
@@ -532,7 +494,6 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
         "approval",
         "logfire",
         "retrieval",
-        "restricted",
     }
     extra = {k: v for k, v in data.items() if k not in known}
 
@@ -643,12 +604,6 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
     retrieval_block = data.get("retrieval")
     if isinstance(retrieval_block, dict):
         _apply_retrieval_block(config.retrieval, retrieval_block)
-
-    # Deliberately not forgiving. Every other block degrades a feature
-    # when it is wrong; this one degrades a boundary. `settings_from_dict`
-    # raises LabelError and the open fails.
-    if "restricted" in data:
-        config.restricted = settings_from_dict(data["restricted"])
 
     return config
 
