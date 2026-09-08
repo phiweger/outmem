@@ -100,6 +100,7 @@ from outmem.index import (
     index_page_text,
     navigate_index,
 )
+from outmem.repo import find_repo_root
 from outmem.search import DEFAULT_RESULT_BYTES, SearchResult, rg_available, search
 from outmem.slug import PAGES_DIR, relpath_to_slug, slug_to_relpath, validate_slug
 from outmem.sources import (
@@ -190,6 +191,12 @@ class WikiStoreConfig:
     """
 
     root: Path
+    # The git repository ``root`` commits into. Equal to ``root`` for a
+    # standalone wiki; an ancestor when several wikis share one repo (see
+    # :mod:`outmem.repo`). Resolved by ``open``/``init``; construct a
+    # config by hand and it defaults to ``root``, which is the
+    # single-wiki behaviour.
+    repo: Path | None = None
     outmem: OutmemConfig = field(default_factory=OutmemConfig)
     agent_identity: AgentIdentity = field(default_factory=AgentIdentity)
     remote: str = DEFAULT_REMOTE
@@ -203,6 +210,24 @@ class WikiStoreConfig:
     # external agent system as a read-only tool (see
     # :func:`outmem.adapters.pydantic_ai.build_consult_wiki`).
     read_only: bool = False
+
+
+def _repo_prefix(root: Path, repo: Path) -> str:
+    """``root``'s location inside ``repo``, as a POSIX prefix or ``""``.
+
+    ``""`` means the wiki *is* the repository, so a wiki-relative path is
+    already repo-relative and nothing needs translating — the standalone
+    case, and the reason this returns a string rather than a Path.
+    """
+    if root == repo:
+        return ""
+    try:
+        rel = root.resolve().relative_to(repo.resolve()).as_posix()
+    except (OSError, ValueError) as exc:
+        raise OutmemError(
+            f"wiki root {root} is not inside its repository {repo}."
+        ) from exc
+    return "" if rel == "." else f"{rel}/"
 
 
 def _require_external_binaries() -> None:
@@ -274,8 +299,10 @@ def _config_from_yaml(
             email=yaml_cfg.agent.email,
         )
 
+    repo, _prefix = find_repo_root(root)
     return WikiStoreConfig(
         root=root,
+        repo=repo,
         outmem=yaml_cfg,
         agent_identity=agent_identity,
         remote=remote or yaml_cfg.remote.name,
@@ -290,6 +317,15 @@ class WikiStore:
     def __init__(self, config: WikiStoreConfig) -> None:
         self.config = config
         self.root = Path(config.root)
+        # `root` is the *content* root — pages, sources, log, config.yaml,
+        # `.vectors.db`, `.outmem/` all hang off it. `repo` is the *git*
+        # root, which every `git_ops` call takes. They are the same
+        # directory for a standalone wiki, and differ only when several
+        # wikis share one repository; `repo_prefix` is then this wiki's
+        # location within it, and is what turns a wiki-relative path into
+        # one git will accept.
+        self.repo = Path(config.repo) if config.repo is not None else self.root
+        self.repo_prefix = _repo_prefix(self.root, self.repo)
         self.wiki_path = self.root / config.wiki_dir
         self.pages_path = self.wiki_path / PAGES_DIR
         self.log_path = self.root / config.log_dir
@@ -445,7 +481,13 @@ class WikiStore:
         _require_external_binaries()
         root = Path(path).expanduser()
         root.mkdir(parents=True, exist_ok=True)
-        init_repo(root, initial_branch=branch or DEFAULT_BRANCH)
+        # A wiki placed inside an existing multi-wiki repository joins
+        # that repository's history rather than starting one of its own —
+        # a nested `.git` would make its commits invisible to the repo
+        # that contains it.
+        repo, _prefix = find_repo_root(root)
+        if repo == root:
+            init_repo(root, initial_branch=branch or DEFAULT_BRANCH)
         # Seed config before resolving it so the yaml exists for read.
         _seed_config_files(root, agent_identity=agent_identity or AgentIdentity())
         config = _config_from_yaml(
@@ -753,13 +795,15 @@ class WikiStore:
         """Slugs of pages that link to ``slug`` at the current HEAD."""
         slug = self.resolve_slug(slug)
         validate_slug(slug)
-        return self.backlinks_cache.referrers(slug, head_or_none(self.root))
+        return self.backlinks_cache.referrers(slug, head_or_none(self.repo))
 
     def history(self, slug: str) -> list[CommitInfo]:
         """Per-page commit history (newest first), tracking renames."""
         slug = self.resolve_slug(slug)
         validate_slug(slug)
-        return page_history(self.root, slug, wiki_dir=self.config.wiki_dir)
+        return page_history(
+            self.repo, slug, wiki_dir=self.config.wiki_dir, prefix=self.repo_prefix
+        )
 
     def evolution(
         self,
@@ -770,11 +814,12 @@ class WikiStore:
         """Raw ``git log -p`` stream — the EXPANSION-pattern helper."""
         slugs = [self.resolve_slug(s) for s in slugs]
         return topic_evolution(
-            self.root,
+            self.repo,
             slugs,
             wiki_dir=self.config.wiki_dir,
             include_log=include_log,
             log_dir=self.config.log_dir,
+            prefix=self.repo_prefix,
         )
 
     def steering(
@@ -793,17 +838,17 @@ class WikiStore:
         understands) so the first run doesn't dump every non-agent
         commit ever made into the agent's context.
         """
-        if head_or_none(self.root) is None:
+        if head_or_none(self.repo) is None:
             # No commits yet; nothing to steer on.
             return []
         if since is None:
             marker = self.state.last_run()
             since = marker.timestamp if marker else default_window
-        paths = [self.config.wiki_dir]
+        paths = [self._repo_relpath(self.config.wiki_dir)]
         if include_log:
-            paths.append(self.config.log_dir)
+            paths.append(self._repo_relpath(self.config.log_dir))
         return log_since(
-            self.root,
+            self.repo,
             since=since,
             paths=paths,
             exclude_author=self.config.agent_identity.email,
@@ -1210,7 +1255,7 @@ class WikiStore:
         rel = f"{self.config.wiki_dir}/{INDEX_FILENAME}"
         if not commit:
             return None
-        if not path_is_dirty(self.root, rel):
+        if not path_is_dirty(self.repo, self._repo_relpath(rel)):
             return None
         return self._commit_paths([rel], subject="index: rebuild")
 
@@ -1776,7 +1821,7 @@ class WikiStore:
                 "pull. Reopen with `WikiStore.open(..., read_only=False)` "
                 "to sync from the remote."
             )
-        _git_pull_rebase(self.root, remote=self.config.remote, branch=self.config.branch)
+        _git_pull_rebase(self.repo, remote=self.config.remote, branch=self.config.branch)
         # The cached backlinks key off HEAD; invalidate so the next
         # caller picks up the new state.
         self.backlinks_cache.invalidate()
@@ -1784,11 +1829,11 @@ class WikiStore:
 
     def push(self) -> None:
         """``git push`` to the configured remote / branch."""
-        _git_push(self.root, remote=self.config.remote, branch=self.config.branch)
+        _git_push(self.repo, remote=self.config.remote, branch=self.config.branch)
 
     def head(self) -> str | None:
         """Current HEAD SHA, or ``None`` if the repo has no commits."""
-        return head_or_none(self.root)
+        return head_or_none(self.repo)
 
     # ------------------------------------------------------------------
     # Identity + run marker
@@ -1919,7 +1964,7 @@ class WikiStore:
         settings = self.config.outmem.git
         if not settings.remove_stale_lock:
             return
-        clear_stale_index_lock(self.root, max_age_seconds=settings.stale_lock_seconds)
+        clear_stale_index_lock(self.repo, max_age_seconds=settings.stale_lock_seconds)
 
     def _maybe_auto_install_hook(self) -> None:
         """Ensure the pre-commit hook unless the user opted out.
@@ -1933,7 +1978,7 @@ class WikiStore:
             return
         if not self.config.outmem.git.auto_install_hook:
             return
-        ensure_hook(self.root)
+        ensure_hook(self.repo)
 
     def _ensure_gitignored(self, pattern: str, *, comment: str) -> bool:
         """Append ``pattern`` to the wiki's top-level ``.gitignore``.
@@ -2031,6 +2076,13 @@ class WikiStore:
         except OSError:
             return None
 
+    def _repo_relpath(self, rel: str) -> str:
+        """A wiki-relative path as git sees it, from the repository root.
+
+        A no-op for a standalone wiki, where the two roots coincide.
+        """
+        return f"{self.repo_prefix}{rel}" if self.repo_prefix else rel
+
     def _commit_paths(self, paths: Sequence[str], *, subject: str) -> str:
         if self.config.read_only:
             raise OutmemError(
@@ -2038,16 +2090,22 @@ class WikiStore:
                 f"{subject!r}. Reopen with `WikiStore.open(..., read_only=False)` "
                 "to mutate it."
             )
-        if not is_git_repo(self.root):
-            raise OutmemError(f"{self.root} is not a git repo — call WikiStore.init() first.")
+        if not is_git_repo(self.repo):
+            raise OutmemError(f"{self.repo} is not a git repo — call WikiStore.init() first.")
         commit_paths = list(paths)
         # Reindex first so the vector DB mutates *before* `git add` runs.
+        # These paths stay wiki-relative: the vector DB keys on them, and
+        # a key that moved when a wiki was placed in a repo would orphan
+        # every chunk already stored.
         db_rel = self._maybe_reindex_commit_paths(commit_paths)
         if db_rel is not None and (self.root / db_rel).exists():
             commit_paths.append(db_rel)
-        add(self.root, commit_paths)
+        # Translate to repo-relative here and nowhere else. Every caller
+        # passes wiki-relative paths, so one wiki cannot name another's
+        # files by construction rather than by each caller remembering.
+        add(self.repo, [self._repo_relpath(p) for p in commit_paths])
         sha = commit_as(
-            self.root,
+            self.repo,
             message=subject,
             author_name=self.config.agent_identity.name,
             author_email=self.config.agent_identity.email,
@@ -2056,7 +2114,7 @@ class WikiStore:
         self.backlinks_cache.invalidate()
         self._alias_map = None
         try:
-            return current_head(self.root)
+            return current_head(self.repo)
         except OutmemError:
             return sha
 

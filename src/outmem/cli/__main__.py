@@ -391,7 +391,7 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
     from outmem.index import INDEX_FILENAME
 
     try:
-        added, deleted = staged_changes(store.root)
+        added, deleted = staged_changes(store.repo)
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 0  # do not block the commit
@@ -476,7 +476,7 @@ def cmd_hook_install(args: argparse.Namespace) -> int:
 
     store = _open_store(args)
     target = store.root / ".git" / "hooks" / HOOK_NAME
-    status = install_hook(store.root, force=args.force)
+    status = install_hook(store.repo, force=args.force)
     if status == "no-git":
         print(
             f"outmem: no .git/hooks at {store.root} — is this a git repo?",
@@ -502,7 +502,7 @@ def cmd_hook_uninstall(args: argparse.Namespace) -> int:
 
     store = _open_store(args)
     target = store.root / ".git" / "hooks" / HOOK_NAME
-    status = uninstall_hook(store.root, force=args.force)
+    status = uninstall_hook(store.repo, force=args.force)
     if status == "absent":
         _status(f"{target} is not present.")
         return 0
@@ -546,7 +546,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         log_dir=store.log_path,
         sources_dir=store.sources_path,
         sources_local_dir=store.sources_local_path,
-        repo_root=store.root,
+        repo_root=store.repo,
         indexed_paths=_indexed_paths_or_none(store),
     )
     sys.stdout.write(format_report(report))
