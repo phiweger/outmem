@@ -590,14 +590,47 @@ def _check_wikilinks(
                 )
                 continue
             if target not in known:
+                # `[[legal/nda]]` is a link reaching for another wiki.
+                # Reported as its own kind because "that page does not
+                # exist" is true but unhelpful: the page usually does
+                # exist, in a wiki this one cannot link into, and the
+                # author needs to hear that rather than go looking for a
+                # typo. Wikilinks are wiki-local — a link is a claim that
+                # every reader of this page can follow it, and readers of
+                # two wikis are not the same set of people.
+                kind = (
+                    "cross-wiki-wikilink"
+                    if _looks_cross_wiki(target)
+                    else "broken-wikilink"
+                )
+                message = (
+                    f"[[{target}]] points into another wiki — wikilinks do "
+                    "not cross a wiki boundary. Cite a shared source, or "
+                    "restate what you need in this wiki."
+                    if kind == "cross-wiki-wikilink"
+                    else f"[[{target}]] refers to a page that does not exist"
+                )
                 report.findings.append(
                     LintFinding(
-                        kind="broken-wikilink",
+                        kind=kind,
                         severity=Severity.ERROR,
                         path=page.rel_path,
-                        message=f"[[{target}]] refers to a page that does not exist",
+                        message=message,
                     )
                 )
+
+
+def _looks_cross_wiki(target: str) -> bool:
+    """True when a wikilink target is spelled ``<wiki>/<slug>``.
+
+    A slug cannot contain ``/`` — the hierarchy separator is ``:`` — so a
+    target with one is either a wiki qualifier or a path someone pasted,
+    and both are worth saying more about than "does not exist".
+    """
+    from outmem.wikiset import split_qualified
+
+    wiki, slug = split_qualified(target)
+    return bool(wiki) and bool(slug)
 
 
 def _check_unchained_source_versions(

@@ -613,9 +613,61 @@ def _indexed_paths_or_none(store: WikiStore) -> list[str] | None:
     return [rel_path for rel_path, _hash, _kind in indexed]
 
 
+def _cmd_lint_repo(args: argparse.Namespace) -> int:
+    """Lint a whole multi-wiki repository: the registry, then each wiki."""
+    from outmem.lint import format_report, lint_wiki
+    from outmem.repo import lint_registry
+
+    root = _repo_root(args)
+    worst = 0
+    registry_findings = lint_registry(root)
+    if registry_findings:
+        print(f"# {REGISTRY_FILENAME}")
+        for severity, kind, message in registry_findings:
+            print(f"  [{severity}] {kind}: {message}")
+        print()
+        if any(s == "error" for s, _k, _m in registry_findings):
+            worst = 2
+        elif not args.error_only:
+            worst = max(worst, 1)
+
+    try:
+        repo = Repo.open(root)
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 2
+
+    for name in repo.registry.wikis:
+        wiki_root = repo.registry.path_of(name)
+        if not wiki_root.is_dir():
+            continue  # already reported by lint_registry
+        store = WikiStore.open(wiki_root, agent_identity=_agent_identity())
+        report = lint_wiki(
+            store.wiki_path,
+            log_dir=store.log_path,
+            sources_dir=store.sources_path,
+            sources_local_dir=store.sources_local_path,
+            repo_root=store.repo,
+            indexed_paths=_indexed_paths_or_none(store),
+        )
+        if report.has_findings:
+            print(f"# wiki: {name}")
+            sys.stdout.write(format_report(report))
+            print()
+        if report.has_errors:
+            worst = 2
+        elif report.has_findings and not args.error_only:
+            worst = max(worst, 1)
+    if worst == 0:
+        _status("lint: clean")
+    return worst
+
+
 def cmd_lint(args: argparse.Namespace) -> int:
     from outmem.lint import format_report, lint_wiki
 
+    if getattr(args, "repo", False):
+        return _cmd_lint_repo(args)
     store = _open_store(args)
     report = lint_wiki(
         store.wiki_path,
@@ -1186,6 +1238,119 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_repo_import(args: argparse.Namespace) -> int:
+    """Move an existing wiki into a multi-wiki repository.
+
+    Two cases, and they differ in what happens to history.
+
+    A wiki already inside the repository is moved with ``git mv``, so
+    every tracked file keeps its history and ``git log --follow`` still
+    works across the move.
+
+    A wiki from elsewhere is copied in and committed as new content. Its
+    own history stays in its own repository — merging two histories is
+    `git subtree`/`filter-repo` work, and doing it badly is worse than
+    not doing it, so this says so rather than pretending.
+    """
+    import shutil
+
+    import yaml
+
+    from outmem.git_ops import is_git_repo
+
+    root = _repo_root(args)
+    registry_path = root / REGISTRY_FILENAME
+    if not registry_path.is_file():
+        print(
+            f"outmem: {root} is not a multi-wiki repository — run "
+            "`outmem repo init` first.",
+            file=sys.stderr,
+        )
+        return 1
+    source = Path(args.path).expanduser().resolve()
+    if not (source / "config.yaml").is_file():
+        print(
+            f"outmem: {source} does not look like a wiki (no config.yaml).",
+            file=sys.stderr,
+        )
+        return 1
+
+    raw = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+    wikis = raw.setdefault("wikis", {})
+    if args.name in wikis:
+        print(f"outmem: wiki {args.name!r} is already registered.", file=sys.stderr)
+        return 1
+    rel = args.path_in_repo or f"wikis/{args.name}"
+    target = root / rel
+    if target.exists():
+        print(f"outmem: {target} already exists.", file=sys.stderr)
+        return 1
+
+    inside = source.is_relative_to(root.resolve())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if inside:
+            _run_git_mv(root, source, target)
+        else:
+            shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git"))
+    except (OSError, OutmemError) as exc:
+        print(f"outmem: could not move the wiki: {exc}", file=sys.stderr)
+        return 1
+
+    tags = raw.setdefault("tags", {})
+    for tag in args.audience:
+        tags.setdefault(tag, {"description": ""})
+    wikis[args.name] = {
+        "path": rel,
+        "title": args.title or args.name,
+        "audience": list(args.audience),
+    }
+    registry_path.write_text(
+        yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    try:
+        _commit_registry(
+            root,
+            paths=[REGISTRY_FILENAME, rel],
+            subject=f"repo: import {args.name}",
+        )
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 1
+
+    _status(f"imported {source} as wiki {args.name!r} at {rel}")
+    if not inside:
+        if is_git_repo(source):
+            _status(
+                f"note: {source} keeps its own git history — the copy at "
+                f"{rel} starts fresh. Move it inside the repository first "
+                "if you need `git log --follow` across the boundary."
+            )
+        _status(f"the original at {source} was left in place; remove it yourself")
+    return 0
+
+
+def _run_git_mv(root: Path, source: Path, target: Path) -> None:
+    """``git mv`` inside ``root``, falling back to a plain rename.
+
+    An untracked directory cannot be ``git mv``-ed — there is nothing to
+    move in the index — but moving it is still the right thing, so the
+    failure is not fatal.
+    """
+    import subprocess
+
+    rel_source = source.relative_to(root.resolve()).as_posix()
+    rel_target = target.relative_to(root.resolve()).as_posix()
+    result = subprocess.run(
+        ["git", "mv", "--", rel_source, rel_target],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        source.rename(target)
+
+
 def _emit(payload: dict[str, object], *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=False))
@@ -1747,6 +1912,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_repo_audience.add_argument("--json", action="store_true")
     p_repo_audience.set_defaults(func=cmd_repo_audience)
 
+    p_repo_import = repo_sub.add_parser(
+        "import",
+        help="Move an existing wiki into the repository and register it.",
+        parents=[root_parent],
+    )
+    p_repo_import.add_argument("path", help="The wiki directory to import.")
+    p_repo_import.add_argument("--name", required=True)
+    p_repo_import.add_argument(
+        "--audience", action="append", default=[], metavar="TAG"
+    )
+    p_repo_import.add_argument("--title", default=None)
+    p_repo_import.add_argument(
+        "--path-in-repo",
+        default=None,
+        help="Destination, relative to the repo root (default wikis/<name>).",
+    )
+    p_repo_import.set_defaults(func=cmd_repo_import)
+
     p_sources = sub.add_parser(
         "sources",
         help="Inspect / maintain the source registry.",
@@ -1857,6 +2040,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit non-zero only for errors, not warnings. Warnings are still "
         "printed. Use in CI on a wiki that carries known warnings (orphans, "
         "dead slug mentions) you don't want to block on.",
+    )
+    p_lint.add_argument(
+        "--repo",
+        action="store_true",
+        help="Lint a multi-wiki repository: the registry plus every wiki.",
     )
     p_lint.set_defaults(func=cmd_lint)
 

@@ -536,8 +536,58 @@ agent = Agent(
 
 ---
 
+## Several wikis in one repository
+
+Some organisations hold material only part of the company may see. outmem
+separates that by **putting each audience in its own wiki**, inside one git
+repository.
+
+A wiki is the compartment. Within a wiki everything is open; a session is
+permitted a *set of wikis* up front, and every store it holds is one it may
+read in full. Nothing at read time decides what to hide — so there is no
+filtering code, and no filtering bug.
+
+```yaml
+# wikis.yaml, at the repository root
+tags:
+  everyone: {description: "All employees"}
+  legal:    {description: "Legal counsel"}
+wikis:
+  open:  {path: wikis/open,  title: "Handbook", audience: [everyone]}
+  legal: {path: wikis/legal, title: "Legal",    audience: [legal]}
+```
+
+```bash
+outmem repo init  --root /srv/memory
+outmem repo add   open  --root /srv/memory --audience everyone
+outmem repo tags  --root /srv/memory --json   # provision your user DB from this
+```
+
+```python
+from outmem.repo import Repo
+from outmem.adapters.wikiset import wikiset_read_tools
+
+repo  = Repo.open("/srv/memory")
+wikis = repo.wikiset(audience=tags_for(current_user))   # open core + compartments
+agent = Agent("anthropic:claude-sonnet-5", tools=wikiset_read_tools(wikis))
+```
+
+Your application maps its authenticated user to audience tags; outmem does one
+set-overlap test on names, once, before a store exists. The model then sees one
+knowledge base, with page names qualified `wiki/slug`.
+
+This assumes outmem runs server-side and your users cannot read the repository
+— that is what makes choosing a wiki genuine access control rather than a
+display convention. Contract, host integration and gotchas in
+[`docs/multi-wiki.md`](docs/multi-wiki.md).
+
+---
+
 ## Where to go next
 
+- [`docs/multi-wiki.md`](docs/multi-wiki.md) — several wikis in one
+  repository: audience tags, host integration, what crosses a wiki
+  boundary and what does not.
 - [`docs/cli.md`](docs/cli.md) — every subcommand with examples.
 - [`docs/search.md`](docs/search.md) — the search & retrieval workflow:
   `search_wiki` (strategy-driven) + `grep_wiki` (literal), and the

@@ -386,3 +386,174 @@ class TestPreCommitHookAcrossWikis:
 
         assert _cmd_reindex_staged_repo(store.root) == 0
         assert "handbook" in (store.wiki_path / "index.md").read_text(encoding="utf-8")
+
+
+class TestRegistryLint:
+    """Both failures here are silent by construction.
+
+    A wiki nobody can reach and a tag nobody can be granted produce no
+    error anywhere — the content is simply gone, and the first sign is
+    somebody asking why the assistant has never heard of the handbook.
+    """
+
+    def _kinds(self, root: Path) -> set[str]:
+        from outmem.repo import lint_registry
+
+        return {kind for _sev, kind, _msg in lint_registry(root)}
+
+    def test_a_clean_repository_reports_nothing(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        assert self._kinds(repo) == set()
+
+    def test_a_listed_wiki_with_no_directory(self, repo: Path) -> None:
+        # `wikis/open` and `wikis/legal` exist but were never scaffolded
+        # in this fixture path, so name a wiki that truly is not there.
+        (repo / "wikis.yaml").write_text(
+            REGISTRY + "  ghost: {path: wikis/ghost, audience: [legal]}\n",
+            encoding="utf-8",
+        )
+        assert "registry-missing-wiki" in self._kinds(repo)
+
+    def test_an_audience_tag_no_tags_block_declares(self, repo: Path) -> None:
+        (repo / "wikis.yaml").write_text(
+            "tags: {everyone: {}}\n"
+            "wikis:\n"
+            "  open: {path: wikis/open, audience: [everyone]}\n"
+            "  hr:   {path: wikis/hr, audience: [people-team]}\n",
+            encoding="utf-8",
+        )
+        (repo / "wikis" / "hr").mkdir(parents=True)
+        WikiStore.init(repo / "wikis" / "hr")
+        assert "registry-undeclared-tag" in self._kinds(repo)
+
+    def test_a_declared_tag_no_wiki_uses(self, repo: Path) -> None:
+        (repo / "wikis.yaml").write_text(
+            REGISTRY.replace("tags:", "tags:\n  ghost: {description: unused}"),
+            encoding="utf-8",
+        )
+        assert "registry-unused-tag" in self._kinds(repo)
+
+    def test_a_wiki_with_no_audience(self, repo: Path) -> None:
+        (repo / "wikis.yaml").write_text(
+            REGISTRY + "  orphan: {path: wikis/orphan, audience: []}\n",
+            encoding="utf-8",
+        )
+        (repo / "wikis" / "orphan").mkdir(parents=True)
+        WikiStore.init(repo / "wikis" / "orphan")
+        assert "registry-unreachable-wiki" in self._kinds(repo)
+
+    def test_a_wiki_shaped_directory_nobody_listed(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        # Unreachable, and worse: a commit made in it would start its own
+        # repository rather than joining this one.
+        (repo / "wikis" / "stray").mkdir(parents=True)
+        WikiStore.init(repo / "wikis" / "stray")
+        assert "registry-unlisted-wiki" in self._kinds(repo)
+
+    def test_a_directory_that_is_not_a_wiki_is_ignored(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        (repo / "wikis" / "notes").mkdir(parents=True)
+        (repo / "wikis" / "notes" / "README.md").write_text("hi", encoding="utf-8")
+        assert "registry-unlisted-wiki" not in self._kinds(repo)
+
+
+class TestCrossWikiLinkLint:
+    def test_a_link_into_another_wiki_is_its_own_finding(
+        self, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        # "That page does not exist" is true but unhelpful: the page
+        # usually does exist, in a wiki this one cannot link into.
+        from outmem.lint import lint_wiki
+
+        openw, legal = wiki_pair
+        legal.write_page("nda", title="NDA", body="Legal.\n")
+        openw.write_page("a", title="A", body="See [[legal/nda]].\n")
+        report = lint_wiki(
+            openw.wiki_path,
+            log_dir=openw.log_path,
+            sources_dir=openw.sources_path,
+            sources_local_dir=openw.sources_local_path,
+            repo_root=openw.repo,
+        )
+        kinds = {f.kind for f in report.findings}
+        assert "cross-wiki-wikilink" in kinds
+        assert "broken-wikilink" not in kinds
+
+    def test_an_ordinary_typo_is_still_a_broken_link(
+        self, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        from outmem.lint import lint_wiki
+
+        openw, _legal = wiki_pair
+        openw.write_page("a", title="A", body="See [[pricng]].\n")
+        report = lint_wiki(
+            openw.wiki_path,
+            log_dir=openw.log_path,
+            sources_dir=openw.sources_path,
+            sources_local_dir=openw.sources_local_path,
+            repo_root=openw.repo,
+        )
+        kinds = {f.kind for f in report.findings}
+        assert "broken-wikilink" in kinds
+        assert "cross-wiki-wikilink" not in kinds
+
+
+class TestRepoImport:
+    def test_a_wiki_from_elsewhere_is_copied_and_registered(
+        self, repo: Path, tmp_path: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        from outmem.cli.__main__ import main
+        from outmem.repo import Repo
+
+        outside = WikiStore.init(tmp_path / "elsewhere")
+        outside.write_page("legacy", title="Legacy", body="Old content.\n")
+
+        assert main(
+            ["repo", "import", str(outside.root), "--root", str(repo),
+             "--name", "legacy", "--audience", "legal"]
+        ) == 0
+        imported = Repo.open(repo).wiki_as_operator("legacy")
+        assert imported.read("legacy").body.strip() == "Old content."
+        assert imported.repo == repo
+        # It joined this repository rather than bringing its own.
+        assert not (imported.root / ".git").exists()
+
+    def test_the_registry_move_is_committed(
+        self, repo: Path, tmp_path: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        outside = WikiStore.init(tmp_path / "elsewhere")
+        outside.write_page("legacy", title="Legacy", body="Old.\n")
+        main(["repo", "import", str(outside.root), "--root", str(repo),
+              "--name", "legacy", "--audience", "legal"])
+        assert "repo: import legacy" in _log(repo, "--format=%s")
+
+    def test_a_directory_that_is_not_a_wiki_is_refused(
+        self, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        (tmp_path / "junk").mkdir()
+        assert main(
+            ["repo", "import", str(tmp_path / "junk"), "--root", str(repo),
+             "--name", "junk"]
+        ) == 1
+        assert "does not look like a wiki" in capsys.readouterr().err
+
+    def test_an_existing_name_is_refused(
+        self, repo: Path, tmp_path: Path,
+        wiki_pair: tuple[WikiStore, WikiStore],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        outside = WikiStore.init(tmp_path / "elsewhere")
+        assert main(
+            ["repo", "import", str(outside.root), "--root", str(repo),
+             "--name", "legal"]
+        ) == 1
+        assert "already registered" in capsys.readouterr().err

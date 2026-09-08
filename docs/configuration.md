@@ -304,3 +304,47 @@ GPG signing is **off** for agent commits in v0.1 (spec §12). Outmem's
 `commit_as` sets `-c commit.gpgsign=false` per commit; your global
 `commit.gpgsign=true` is not affected (it just doesn't apply to the
 agent's commits). Re-enabling signing is a v0.2 deferral.
+
+---
+
+## `wikis.yaml` — several wikis in one repository
+
+A *multi-wiki repository* holds several wikis side by side and declares them in
+a `wikis.yaml` at its root. Each wiki keeps its own `config.yaml`; this file
+sits above them all and says which wikis exist and who may open each.
+
+```yaml
+version: 1
+
+tags:                                     # the declared vocabulary
+  everyone: {description: "All employees"}
+  legal:    {description: "Legal counsel"}
+  exec:     {description: "Executive team"}
+
+wikis:
+  open:  {path: wikis/open,  title: "Handbook", audience: [everyone]}
+  legal: {path: wikis/legal, title: "Legal",    audience: [legal, exec]}
+```
+
+| Key | Meaning |
+|---|---|
+| `version` | Registry format version. `1` today. |
+| `tags` | The declared audience vocabulary, `name: {description}`. Provision your user database against this. |
+| `wikis.<name>.path` | Directory relative to the repository root. Defaults to `wikis/<name>`. |
+| `wikis.<name>.title` | Human-readable name for catalogues and pickers. |
+| `wikis.<name>.audience` | Tags that reach this wiki. **One shared tag is enough.** |
+
+Wiki names are slug-like — lowercase letters, digits, `.`, `_`, `-` — because
+they appear in commit subjects (`legal/ compact: nda`) and as slug qualifiers
+(`legal/nda`).
+
+A tag used in an `audience:` but absent from `tags:` makes its wiki *silently
+unreachable*: nobody can be granted a tag nobody knows exists. `outmem lint
+--repo` reports it as an error, along with wikis nothing reaches and
+wiki-shaped directories the registry never listed.
+
+The file is committed by `outmem repo init` / `repo add`. It has to be: outmem
+reads it from the working tree, so untracked it would not survive a clone and
+every wiki would look standalone.
+
+See [`multi-wiki.md`](multi-wiki.md) for the full picture.

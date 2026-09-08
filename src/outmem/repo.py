@@ -553,3 +553,110 @@ class Repo:
             tags=tuple(self._catalogue_tags(names, include_unused=include_unused)),
             wikis=wikis,
         )
+
+
+# ---------------------------------------------------------------------------
+# Registry lint
+#
+# Both failures these look for are silent by construction. A wiki nobody can
+# reach and a tag nobody can be granted produce no error anywhere — the
+# content is simply gone, and the first sign is somebody asking why the
+# assistant has never heard of the HR handbook.
+# ---------------------------------------------------------------------------
+
+
+def lint_registry(root: Path) -> list[tuple[str, str, str]]:
+    """Check a repository's ``wikis.yaml``.
+
+    Returns ``(severity, kind, message)`` triples — plain tuples rather
+    than :class:`outmem.lint.LintFinding`, which is anchored to a path
+    inside one wiki and has nowhere to put a repository-level problem.
+    """
+    registry = load_registry(root)
+    if registry is None:
+        return [
+            (
+                "error",
+                "registry-missing",
+                f"{root} has no {REGISTRY_FILENAME}.",
+            )
+        ]
+    out: list[tuple[str, str, str]] = []
+    declared = set(registry.tags)
+    used: set[str] = set()
+
+    for name, entry in registry.wikis.items():
+        used |= entry.audience
+        path = registry.path_of(name)
+        if not path.is_dir():
+            out.append(
+                (
+                    "error",
+                    "registry-missing-wiki",
+                    f"wiki {name!r} is listed but {entry.path} does not exist.",
+                )
+            )
+        if not entry.audience:
+            out.append(
+                (
+                    "warning",
+                    "registry-unreachable-wiki",
+                    f"wiki {name!r} declares no audience — nobody can open it.",
+                )
+            )
+        for tag in sorted(entry.audience - declared):
+            out.append(
+                (
+                    "error",
+                    "registry-undeclared-tag",
+                    f"wiki {name!r} lists audience tag {tag!r}, which no "
+                    "`tags:` entry declares — nobody can be granted a tag "
+                    "nobody knows exists, so the wiki is unreachable.",
+                )
+            )
+
+    for tag in sorted(declared - used):
+        out.append(
+            (
+                "warning",
+                "registry-unused-tag",
+                f"tag {tag!r} is declared but no wiki lists it — anyone "
+                "granted it gains nothing.",
+            )
+        )
+
+    for path in sorted(_wiki_shaped_dirs(root)):
+        rel = path.relative_to(root).as_posix()
+        if registry.name_at(path) is None:
+            out.append(
+                (
+                    "warning",
+                    "registry-unlisted-wiki",
+                    f"{rel} looks like a wiki but no {REGISTRY_FILENAME} "
+                    "entry names it — it is unreachable, and commits made "
+                    "in it would start their own repository.",
+                )
+            )
+    return out
+
+
+def _wiki_shaped_dirs(root: Path) -> list[Path]:
+    """Directories under ``root`` that look like a wiki root.
+
+    "Looks like" is `config.yaml` beside a `wiki/pages/` directory —
+    what `outmem init` produces. Only one level under `wikis/` and one
+    under the root itself are searched; a deep walk of a repository with
+    thousands of pages costs more than this check is worth.
+    """
+    candidates: list[Path] = []
+    for parent in (root, root / "wikis"):
+        if not parent.is_dir():
+            continue
+        for child in parent.iterdir():
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            if (child / "config.yaml").is_file() and (
+                child / "wiki" / "pages"
+            ).is_dir():
+                candidates.append(child)
+    return candidates

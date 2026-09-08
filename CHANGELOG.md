@@ -3,6 +3,97 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.17.0
+
+**Multi-wiki.** Several wikis in one git repository, one per audience.
+A wiki is the compartment: within it everything is open, and separation
+comes from which wiki a request opens rather than from filtering what a
+shared corpus returns. Full contract and host-integration guide in
+[`docs/multi-wiki.md`](docs/multi-wiki.md).
+
+### Removed — breaking
+
+- **Restricted content (`restricted:`) is gone.** Per-item labels gated
+  audiences inside one wiki; every read path filtered on
+  `labels(item) <= mode`. It worked, but its value was entirely
+  conditional on being correct, and reaching correct took four
+  adversarial review rounds and ~29 fixes — every one of them a
+  *filtering* bug, some path that returned content, identity or
+  existence without consulting the mode. Under separation nothing
+  decides what to hide, so nothing can decide wrong, and keeping the
+  label machinery alongside would be an access-control surface
+  maintained for no reader.
+
+  Gone with it: the `restricted:` block in `config.yaml`, the
+  `restricted:` frontmatter field, `WikiStore.as_viewer`, `Grants`,
+  `restrict_page` / `restrict_source` / `compartment_hint`, `outmem
+  restrict` and `outmem sources restrict`, the `restricted` column in
+  `.sources.db`, the six `restricted-*` lint kinds, and the
+  `log/<label-set>/` partitions.
+
+  **If you use `restricted:`**, split the wiki by hand before upgrading
+  — one wiki per label — or stay on 0.16.1. There is no automatic
+  split: collapsing a label lattice into a partition is lossy, since a
+  page labelled `{hr, legal}` has no single home.
+
+### Added
+
+- **`wikis.yaml`** — a repository registry declaring the wikis and the
+  audience tags that reach them. A tag is opaque to outmem: the host
+  maps its authenticated user to a set of tags and hands them in, and
+  outmem does one set-overlap test on names, once, before a store
+  exists.
+- **`outmem.repo.Repo`** — `wiki(name, *, audience)`,
+  `wikiset(audience=…)`, and the separately named `wiki_as_operator`.
+  No accessor returns every wiki without an argument. A name an
+  audience does not reach fails with the message an unknown name does.
+- **Discovery** — `Repo.tags()`, `catalogue()`, `catalogue_for()` and
+  `reconcile()`, plus `outmem repo tags --json` and `repo list --json`,
+  emitting a versioned payload a provisioning script can read without
+  importing Python. The host's user table stores *tags*, never wiki
+  names, so wikis can be renamed or moved without touching a user
+  record.
+- **`outmem.wikiset.WikiSet`** — reads several wikis as one. Names come
+  back qualified `wiki/slug`; a bare slug resolves in wiki order and
+  reports what it shadowed. `outmem.adapters.wikiset.wikiset_read_tools`
+  is the matching PydanticAI palette. Reads federate; writes name one
+  wiki.
+- **`outmem repo init` / `add` / `list` / `tags` / `audience` /
+  `import`**, and `--wiki NAME` alongside `--root` on every subcommand.
+- **`outmem lint --repo`** — the registry plus every wiki. Five new
+  registry checks and `cross-wiki-wikilink`.
+
+### Changed
+
+- **`WikiStore.root` is split into `root` (content) and `repo` (git).**
+  They are the same directory for a standalone wiki, and every existing
+  wiki is unaffected — the pre-0.16 test suite passes unedited, which is
+  the evidence. `repo_prefix` is the wiki's location inside its
+  repository, applied in exactly one place so one wiki cannot name
+  another's files.
+- **Commit subjects carry the wiki** in a multi-wiki repository:
+  `legal/ compact: nda`. A standalone wiki is unchanged.
+- **Finding the repository is opt-in.** outmem does not walk up looking
+  for `.git`; an ancestor is accepted only when its `wikis.yaml` lists
+  the directory. A wiki inside an unrelated repository behaves exactly
+  as before.
+
+### Fixed
+
+- **Stage-and-commit is serialised across the repository** with an
+  `fcntl.flock`. A commit is two operations with the shared git index
+  between them, and `WikiStore._write_lock` is per-store and
+  per-process. Measured on three processes writing into three wikis of
+  one repository: two to four commits per run carried another wiki's
+  paths, and one or two pages `write_page` reported as written were
+  absent from HEAD. This also hardens the pre-existing single-wiki
+  multi-process case.
+- **`resolve_source` canonicalises its path.** The tree-prefix strip was
+  textual, so `sources/../../wiki/sources/<rel>` resolved to a real file
+  under a key the registry never held — one file reachable under two
+  spellings with rows under only one. (Found during the restricted-
+  content work and kept; it is independent of labels.)
+
 ## 0.16.1
 
 Fixes to the restricted-content boundary shipped in 0.16.0, found by
