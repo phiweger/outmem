@@ -23,7 +23,14 @@ import yaml
 from outmem.cli._common import agent_identity, base_root, status
 from outmem.config import DEFAULT_BRANCH
 from outmem.exceptions import OutmemError
-from outmem.repo import REGISTRY_FILENAME, Repo, is_wiki_root, load_registry
+from outmem.repo import (
+    REGISTRY_FILENAME,
+    Registry,
+    Repo,
+    is_wiki_root,
+    load_registry,
+    validate_wiki_path,
+)
 from outmem.store import WikiStore, ensure_gitignored
 
 # Plain on purpose. `repo add` round-trips this file through the YAML
@@ -78,7 +85,7 @@ def _has_comments(text: str) -> bool:
     return raw > inside(yaml.safe_load(text))
 
 
-def _refuse_rewrite(registry_path: Path, name: str) -> int:
+def _refuse_rewrite(registry_path: Path, name: str, *, then: str) -> int:
     """The registry is hand-maintained; say so and stop, changing nothing.
 
     ``wikis.yaml`` is the one file in the system a person is meant to
@@ -91,8 +98,7 @@ def _refuse_rewrite(registry_path: Path, name: str) -> int:
     print(
         f"outmem: {registry_path} has comments that a rewrite would drop, so "
         f"it was left alone. Add an entry for {name!r} under `wikis:` by hand "
-        f"(and any new tags under `tags:`), then run `outmem repo add {name}` "
-        "again to scaffold it.",
+        f"(and any new tags under `tags:`), then run `{then}` again.",
         file=sys.stderr,
     )
     return 1
@@ -104,27 +110,35 @@ def _save_raw(registry_path: Path, raw: dict[str, object]) -> None:
     )
 
 
-def _require_registry(root: Path) -> Path | None:
-    registry_path = root / REGISTRY_FILENAME
-    if registry_path.is_file():
-        return registry_path
-    print(
-        f"outmem: {root} is not a multi-wiki repository — run `outmem repo init` first.",
-        file=sys.stderr,
-    )
-    return None
+def _open_registry(root: Path) -> Registry | None:
+    """The parsed registry, or ``None`` after telling the user there is none."""
+    registry = load_registry(root)
+    if registry is None:
+        print(
+            f"outmem: {root} is not a multi-wiki repository — run `outmem repo init` first.",
+            file=sys.stderr,
+        )
+    return registry
 
 
 def _register_entry(
     raw: dict[str, object], *, name: str, rel: str, title: str | None, audience: list[str]
-) -> None:
-    """Add a wiki entry (and any new tags) to the loaded registry."""
+) -> dict[str, object]:
+    """Add a wiki entry (and any new tags) to the loaded registry.
+
+    Returns the ``wikis`` mapping the entry went into, so a caller that
+    has to undo the write can. The shape checks cannot fail for a file
+    `load_registry` just accepted; they are here so a surprise is an
+    `OutmemError` with a location rather than an `AssertionError`.
+    """
     wikis = raw.setdefault("wikis", {})
     tags = raw.setdefault("tags", {})
-    assert isinstance(wikis, dict) and isinstance(tags, dict)
+    if not isinstance(wikis, dict) or not isinstance(tags, dict):
+        raise OutmemError(f"{REGISTRY_FILENAME}: `wikis` and `tags` must be mappings.")
     for tag in audience:
         tags.setdefault(tag, {"description": ""})
     wikis[name] = {"path": rel, "title": title or name, "audience": list(audience)}
+    return wikis
 
 
 def _commit_registry(root: Path, *, paths: list[str], subject: str) -> None:
@@ -220,22 +234,24 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
     add by hand instead.
     """
     root = base_root(args)
-    registry_path = _require_registry(root)
-    if registry_path is None:
+    registry = _open_registry(root)
+    if registry is None:
         return 1
-    registry = load_registry(root)
-    assert registry is not None
+    registry_path = root / REGISTRY_FILENAME
     if args.name in registry.wikis:
-        return _scaffold_listed(root, registry, args)
+        return _scaffold_listed(registry, args)
 
+    # Validate the flag before anything touches disk. Acting first and
+    # letting the parser reject the entry afterwards created the directory
+    # *outside* the repository and only then rolled the entry back.
+    rel = validate_wiki_path(args.path or f"wikis/{args.name}", context="--path")
     text = registry_path.read_text(encoding="utf-8")
     if _has_comments(text):
-        return _refuse_rewrite(registry_path, args.name)
+        return _refuse_rewrite(registry_path, args.name, then=f"outmem repo add {args.name}")
     raw = _parse_raw(registry_path, text)
-    wikis = raw.setdefault("wikis", {})
-    assert isinstance(wikis, dict)
-    rel = args.path or f"wikis/{args.name}"
-    _register_entry(raw, name=args.name, rel=rel, title=args.title, audience=args.audience)
+    wikis = _register_entry(
+        raw, name=args.name, rel=rel, title=args.title, audience=args.audience
+    )
     # Write the registry BEFORE scaffolding: `WikiStore.init` discovers its
     # repository by looking itself up here, and an unlisted directory would
     # nest a `.git` inside the repo instead of joining it.
@@ -261,11 +277,8 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
     return 0
 
 
-def _scaffold_listed(root: Path, registry: object, args: argparse.Namespace) -> int:
+def _scaffold_listed(registry: Registry, args: argparse.Namespace) -> int:
     """``repo add`` for a name the registry already carries: scaffold only."""
-    from outmem.repo import Registry
-
-    assert isinstance(registry, Registry)
     if args.audience or args.title or args.path:
         print(
             f"outmem: wiki {args.name!r} is already listed in {REGISTRY_FILENAME}; "
@@ -302,22 +315,29 @@ def cmd_repo_import(args: argparse.Namespace) -> int:
     from outmem.git_ops import is_git_repo
 
     root = base_root(args)
-    registry_path = _require_registry(root)
-    if registry_path is None:
+    registry = _open_registry(root)
+    if registry is None:
         return 1
+    registry_path = root / REGISTRY_FILENAME
     source = Path(args.path).expanduser().resolve()
     if not is_wiki_root(source):
         print(f"outmem: {source} does not look like a wiki (no config.yaml).", file=sys.stderr)
         return 1
-    registry = load_registry(root)
-    assert registry is not None
+    # Everything that can refuse, refuses here — before the move. Refusing
+    # afterwards left the wiki relocated (outside the repository, for a
+    # bad `--path-in-repo`) with an entry that no longer parsed.
+    wanted = (
+        validate_wiki_path(args.path_in_repo, context="--path-in-repo")
+        if args.path_in_repo
+        else None
+    )
     listed = args.name in registry.wikis
     text = registry_path.read_text(encoding="utf-8")
     if listed:
         # The registry is the source of truth: the wiki goes where the
         # entry says, and the entry is not rewritten.
         entry = registry.wikis[args.name]
-        if args.audience or args.title or (args.path_in_repo and args.path_in_repo != entry.path):
+        if args.audience or args.title or (wanted is not None and wanted != entry.path):
             print(
                 f"outmem: wiki {args.name!r} is already listed in {REGISTRY_FILENAME}; "
                 "its audience, title and path come from there.",
@@ -326,11 +346,13 @@ def cmd_repo_import(args: argparse.Namespace) -> int:
             return 1
         rel = entry.path
     else:
-        # Decide *before* moving anything: refusing after the move would
-        # leave the wiki relocated and unregistered.
         if _has_comments(text):
-            return _refuse_rewrite(registry_path, args.name)
-        rel = args.path_in_repo or f"wikis/{args.name}"
+            return _refuse_rewrite(
+                registry_path,
+                args.name,
+                then=f"outmem repo import {args.path} --name {args.name}",
+            )
+        rel = wanted or f"wikis/{args.name}"
     target = root / rel
     if target.exists():
         print(f"outmem: {target} already exists.", file=sys.stderr)
