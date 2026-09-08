@@ -1589,7 +1589,8 @@ def lint_repository(root: Path) -> LintReport:
             registry_finding(
                 "registry-missing-wiki",
                 Severity.ERROR,
-                f"wiki {name!r} is listed but {entry.path} does not exist.",
+                f"wiki {name!r} is listed but {entry.path} does not exist. "
+                f"Scaffold it with `outmem repo add {name}`.",
             )
         elif not is_wiki_root(path):
             # A listed directory that is not a wiki. Checking only for
@@ -1600,8 +1601,8 @@ def lint_repository(root: Path) -> LintReport:
                 "registry-not-a-wiki",
                 Severity.ERROR,
                 f"wiki {name!r} is listed but {entry.path} is not a wiki "
-                "(no config.yaml). Scaffold it with `outmem init`, or drop "
-                "the entry.",
+                f"(no config.yaml). Scaffold it with `outmem repo add {name}`, "
+                "or drop the entry.",
             )
         if not entry.audience:
             registry_finding(
