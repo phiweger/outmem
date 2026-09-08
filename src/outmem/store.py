@@ -22,7 +22,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from outmem._store import import_vault as _import
@@ -100,7 +100,7 @@ from outmem.index import (
     index_page_text,
     navigate_index,
 )
-from outmem.repo import find_repo_root
+from outmem.repo import find_repo_root, qualify_subject
 from outmem.search import DEFAULT_RESULT_BYTES, SearchResult, rg_available, search
 from outmem.slug import PAGES_DIR, relpath_to_slug, slug_to_relpath, validate_slug
 from outmem.sources import (
@@ -197,6 +197,9 @@ class WikiStoreConfig:
     # config by hand and it defaults to ``root``, which is the
     # single-wiki behaviour.
     repo: Path | None = None
+    # Registry name of this wiki within its repository — ``None`` for a
+    # standalone wiki, which has nothing to distinguish it from.
+    wiki_name: str | None = None
     outmem: OutmemConfig = field(default_factory=OutmemConfig)
     agent_identity: AgentIdentity = field(default_factory=AgentIdentity)
     remote: str = DEFAULT_REMOTE
@@ -299,10 +302,11 @@ def _config_from_yaml(
             email=yaml_cfg.agent.email,
         )
 
-    repo, _prefix = find_repo_root(root)
+    repo, _prefix, wiki_name = find_repo_root(root)
     return WikiStoreConfig(
         root=root,
         repo=repo,
+        wiki_name=wiki_name,
         outmem=yaml_cfg,
         agent_identity=agent_identity,
         remote=remote or yaml_cfg.remote.name,
@@ -326,6 +330,7 @@ class WikiStore:
         # one git will accept.
         self.repo = Path(config.repo) if config.repo is not None else self.root
         self.repo_prefix = _repo_prefix(self.root, self.repo)
+        self.wiki_name = config.wiki_name
         self.wiki_path = self.root / config.wiki_dir
         self.pages_path = self.wiki_path / PAGES_DIR
         self.log_path = self.root / config.log_dir
@@ -485,7 +490,7 @@ class WikiStore:
         # that repository's history rather than starting one of its own —
         # a nested `.git` would make its commits invisible to the repo
         # that contains it.
-        repo, _prefix = find_repo_root(root)
+        repo, _prefix, _name = find_repo_root(root)
         if repo == root:
             init_repo(root, initial_branch=branch or DEFAULT_BRANCH)
         # Seed config before resolving it so the yaml exists for read.
@@ -2079,9 +2084,31 @@ class WikiStore:
     def _repo_relpath(self, rel: str) -> str:
         """A wiki-relative path as git sees it, from the repository root.
 
-        A no-op for a standalone wiki, where the two roots coincide.
+        Refuses anything that would leave the wiki. Several wikis share
+        one index and one history, so a path that escapes is a store
+        staging another wiki's files — and the guard sits here, at the
+        one place paths cross into git, rather than at each of the eight
+        callers that would each have to remember.
+
+        A no-op in effect for a standalone wiki, where the two roots
+        coincide and the prefix is empty.
         """
+        path = PurePosixPath(rel)
+        if path.is_absolute() or ".." in path.parts:
+            raise OutmemError(
+                f"refusing to stage {rel!r}: commit paths are relative to "
+                f"the wiki at {self.root} and may not leave it."
+            )
         return f"{self.repo_prefix}{rel}" if self.repo_prefix else rel
+
+    def stage(self, paths: Sequence[str]) -> None:
+        """``git add`` wiki-relative paths, without committing.
+
+        The pre-commit hook needs this: the human's commit *is* the
+        commit, so derived artefacts are staged into it rather than
+        committed on their own.
+        """
+        add(self.repo, [self._repo_relpath(p) for p in paths])
 
     def _commit_paths(self, paths: Sequence[str], *, subject: str) -> str:
         if self.config.read_only:
@@ -2106,7 +2133,7 @@ class WikiStore:
         add(self.repo, [self._repo_relpath(p) for p in commit_paths])
         sha = commit_as(
             self.repo,
-            message=subject,
+            message=qualify_subject(subject, self.wiki_name),
             author_name=self.config.agent_identity.name,
             author_email=self.config.agent_identity.email,
         )

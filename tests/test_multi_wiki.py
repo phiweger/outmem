@@ -103,7 +103,7 @@ class TestOptInDiscovery:
         notes = project / "notes"
         notes.mkdir()
 
-        found, prefix = find_repo_root(notes)
+        found, prefix, _name = find_repo_root(notes)
         assert found == notes
         assert prefix == ""
 
@@ -113,7 +113,7 @@ class TestOptInDiscovery:
         # `wikis.yaml` exists, but says nothing about this directory.
         stray = repo / "wikis" / "scratch"
         stray.mkdir()
-        found, prefix = find_repo_root(stray)
+        found, prefix, _name = find_repo_root(stray)
         assert found == stray
         assert prefix == ""
 
@@ -123,7 +123,7 @@ class TestOptInDiscovery:
         # A listing is about the directory, not the spelling used to
         # reach it.
         detour = repo / "wikis" / "legal" / ".." / "open"
-        found, prefix = find_repo_root(detour)
+        found, prefix, _name = find_repo_root(detour)
         assert found == repo
         assert prefix == "wikis/open/"
 
@@ -242,3 +242,147 @@ class TestRegistryParsing:
         (tmp_path / "wikis.yaml").write_text(body, encoding="utf-8")
         with pytest.raises(OutmemError):
             load_registry(tmp_path)
+
+
+class TestPathContainment:
+    """One index, one history — a store may only stage its own subtree."""
+
+    def test_a_path_leaving_the_wiki_is_refused(
+        self, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        openw, legal = wiki_pair
+        legal.write_page("nda", title="NDA", body="Legal.\n")
+        with pytest.raises(OutmemError, match="may not leave it"):
+            openw._commit_paths(
+                ["../legal/wiki/pages/nda.md"], subject="steal: nda"
+            )
+
+    def test_without_the_guard_one_wiki_could_rewrite_anothers_page(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        # This is what the guard is for, stated as the attack: git
+        # normalises `..` in a pathspec and stages the result happily, so
+        # the open wiki can edit legal's page on disk and commit it under
+        # its own name. Nothing downstream would notice — the commit is
+        # well-formed and even carries `open/` as its qualifier.
+        openw, legal = wiki_pair
+        legal.write_page("nda", title="NDA", body="Legal.\n")
+        (legal.pages_path / "nda.md").write_text(
+            "---\ntitle: NDA\n---\n\nTampered.\n", encoding="utf-8"
+        )
+        with pytest.raises(OutmemError, match="may not leave it"):
+            openw._commit_paths(
+                ["../legal/wiki/pages/nda.md"], subject="tamper"
+            )
+        # The tampering is still on disk — the guard stops the commit, not
+        # the filesystem — but it never entered the history.
+        assert "Tampered." not in _log(repo, "-p", "--format=%s")
+
+    def test_an_absolute_path_is_refused(
+        self, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        openw, _legal = wiki_pair
+        with pytest.raises(OutmemError, match="may not leave it"):
+            openw._commit_paths(["/etc/passwd"], subject="steal: passwd")
+
+    def test_the_guard_holds_on_a_standalone_wiki_too(self, tmp_path: Path) -> None:
+        # The prefix is empty here, so there is no translation to get
+        # wrong — and the guard still refuses, because "relative to this
+        # wiki" is the contract either way.
+        store = WikiStore.init(tmp_path / "solo")
+        with pytest.raises(OutmemError, match="may not leave it"):
+            store._commit_paths(["../elsewhere.md"], subject="x")
+
+
+class TestCommitSubjects:
+    def test_subjects_name_the_wiki_they_belong_to(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        openw, legal = wiki_pair
+        openw.write_page("pricing", title="Pricing", body="Open.\n")
+        legal.write_page("nda", title="NDA", body="Legal.\n")
+        subjects = _log(repo, "--format=%s").splitlines()
+        assert "open/ compact: pricing" in subjects
+        assert "legal/ compact: nda" in subjects
+
+    def test_a_standalone_wiki_keeps_bare_subjects(self, tmp_path: Path) -> None:
+        store = WikiStore.init(tmp_path / "solo")
+        store.write_page("pricing", title="Pricing", body="Body.\n")
+        assert "compact: pricing" in _log(store.repo, "--format=%s").splitlines()
+
+    def test_the_qualifier_round_trips(self) -> None:
+        from outmem.repo import qualify_subject, split_subject
+
+        assert split_subject(qualify_subject("compact: nda", "legal")) == (
+            "legal",
+            "compact: nda",
+        )
+        assert split_subject(qualify_subject("compact: nda", None)) == (
+            None,
+            "compact: nda",
+        )
+
+    def test_a_handwritten_subject_is_left_alone(self) -> None:
+        from outmem.repo import split_subject
+
+        # `fix: docs` is not a wiki name, so this is not a qualifier.
+        assert split_subject("fix: docs/ typo") == (None, "fix: docs/ typo")
+
+    def test_slug_extraction_survives_the_qualifier(self) -> None:
+        from outmem.cli.__main__ import _slugs_from_commits
+
+        assert _slugs_from_commits(("legal/ compact: nda", "open/ extend: pricing")) == [
+            "nda",
+            "pricing",
+        ]
+
+
+class TestPreCommitHookAcrossWikis:
+    """One hook per clone, and a commit may span several wikis."""
+
+    def _stage_page(self, repo: Path, wiki: str, slug: str, body: str) -> None:
+        rel = f"wikis/{wiki}/wiki/pages/{slug}.md"
+        path = repo / rel
+        path.write_text(body, encoding="utf-8")
+        _run_git(["add", "--", rel], cwd=repo)
+
+    def test_each_wiki_indexes_its_own_staged_pages(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        from outmem.cli.__main__ import _cmd_reindex_staged_repo
+
+        openw, legal = wiki_pair
+        self._stage_page(
+            repo, "open", "handbook", "---\ntitle: Handbook\n---\n\nOpen.\n"
+        )
+        self._stage_page(repo, "legal", "nda", "---\ntitle: NDA\n---\n\nLegal.\n")
+
+        assert _cmd_reindex_staged_repo(repo) == 0
+
+        # Each wiki's index.md lists its own page and only its own.
+        open_index = (openw.wiki_path / "index.md").read_text(encoding="utf-8")
+        legal_index = (legal.wiki_path / "index.md").read_text(encoding="utf-8")
+        assert "handbook" in open_index and "nda" not in open_index
+        assert "nda" in legal_index and "handbook" not in legal_index
+
+    def test_the_repo_root_is_not_scaffolded_into_a_wiki(self, repo: Path) -> None:
+        from outmem.cli.__main__ import _cmd_reindex_staged_repo
+
+        # The hook runs at the top of the working tree, which in a
+        # multi-wiki repo is not a wiki. Opening a store there would
+        # create `wiki/`, `log/` and a `config.yaml` beside `wikis.yaml`.
+        _cmd_reindex_staged_repo(repo)
+        assert not (repo / "wiki").exists()
+        assert not (repo / "config.yaml").exists()
+        assert not (repo / "log").exists()
+
+    def test_a_standalone_wiki_still_reindexes(self, tmp_path: Path) -> None:
+        from outmem.cli.__main__ import _cmd_reindex_staged_repo
+
+        store = WikiStore.init(tmp_path / "solo")
+        page = store.pages_path / "handbook.md"
+        page.write_text("---\ntitle: Handbook\n---\n\nBody.\n", encoding="utf-8")
+        _run_git(["add", "--", "wiki/pages/handbook.md"], cwd=store.root)
+
+        assert _cmd_reindex_staged_repo(store.root) == 0
+        assert "handbook" in (store.wiki_path / "index.md").read_text(encoding="utf-8")

@@ -37,6 +37,7 @@ this file is derived from the wiki's contents.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,6 +51,11 @@ REGISTRY_FILENAME = "wikis.yaml"
 # deeply than this inside its repo is possible but not a layout outmem
 # creates, and an unbounded walk on a broken path is worth avoiding.
 _MAX_WALK_UP = 8
+
+# A wiki name appears in commit subjects (``legal/ write: nda``) and, later,
+# as the qualifier on a slug (``legal/nda``). Both need it to contain no
+# whitespace and no ``/``, so the grammar stays unambiguous in both places.
+_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -164,8 +170,13 @@ def _parse_wikis(path: Path, block: object) -> dict[str, WikiEntry]:
         raise _fail(path, "`wikis` must be a mapping of wiki name to settings.")
     out: dict[str, WikiEntry] = {}
     for name, settings in block.items():
-        if not isinstance(name, str) or not name:
-            raise _fail(path, f"wiki names must be non-empty strings, got {name!r}.")
+        if not isinstance(name, str) or not _NAME_RE.match(name):
+            raise _fail(
+                path,
+                f"wiki name {name!r} must be lowercase letters, digits, "
+                "`.`, `_` or `-`, starting with a letter or digit — it "
+                "appears in commit subjects and as a slug qualifier.",
+            )
         if not isinstance(settings, dict):
             raise _fail(path, f"wiki {name!r} must map to a mapping.")
         rel = settings.get("path", f"wikis/{name}")
@@ -194,13 +205,15 @@ def _parse_wikis(path: Path, block: object) -> dict[str, WikiEntry]:
     return out
 
 
-def find_repo_root(wiki_root: Path) -> tuple[Path, str]:
-    """The git repository ``wiki_root`` commits into, and its prefix within it.
+def find_repo_root(wiki_root: Path) -> tuple[Path, str, str | None]:
+    """The git repository ``wiki_root`` commits into, its prefix, and its name.
 
-    Returns ``(repo_root, prefix)``, where ``prefix`` is the wiki's
+    Returns ``(repo_root, prefix, name)``. ``prefix`` is the wiki's
     location relative to the repo as a POSIX string ending in ``/`` — or
     ``""`` when the wiki *is* the repo, which is every standalone wiki
-    and therefore the overwhelmingly common case.
+    and therefore the overwhelmingly common case. ``name`` is the
+    registry name, or ``None`` for a standalone wiki, which has none:
+    there is nothing to distinguish it from.
 
     Discovery is deliberately not "walk up until you find ``.git``". A
     wiki that happens to sit inside an unrelated repository
@@ -214,11 +227,41 @@ def find_repo_root(wiki_root: Path) -> tuple[Path, str]:
     try:
         start = wiki_root.resolve()
     except OSError:  # pragma: no cover — unreadable path
-        return wiki_root, ""
+        return wiki_root, "", None
     for ancestor in list(start.parents)[:_MAX_WALK_UP]:
         registry = load_registry(ancestor)
         if registry is None:
             continue
-        if registry.name_at(start) is not None:
-            return ancestor, f"{start.relative_to(ancestor).as_posix()}/"
-    return wiki_root, ""
+        name = registry.name_at(start)
+        if name is not None:
+            return ancestor, f"{start.relative_to(ancestor).as_posix()}/", name
+    return wiki_root, "", None
+
+
+def qualify_subject(subject: str, wiki_name: str | None) -> str:
+    """Tag a commit subject with the wiki it belongs to.
+
+    ``legal/ write: nda``. Several wikis share one history, so a bare
+    ``write: nda`` in ``git log --oneline`` no longer says which wiki
+    moved. A standalone wiki has no name and keeps its subjects exactly
+    as they were.
+    """
+    return f"{wiki_name}/ {subject}" if wiki_name else subject
+
+
+def split_subject(subject: str) -> tuple[str | None, str]:
+    """Inverse of :func:`qualify_subject` — ``(wiki_name, rest)``.
+
+    Lives next to its inverse because the two have to agree: the
+    steering path recovers the item a commit is about by matching the
+    verb at the front of the subject, and a qualifier it does not know
+    to strip makes every commit in a multi-wiki repo unrecognisable.
+
+    A subject that does not carry a qualifier comes back ``(None,
+    subject)`` unchanged, which is both the standalone case and any
+    commit a human wrote by hand.
+    """
+    head, sep, rest = subject.partition("/ ")
+    if sep and _NAME_RE.match(head):
+        return head, rest
+    return None, subject

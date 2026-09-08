@@ -32,6 +32,7 @@ from outmem import __version__
 from outmem._progress import report_progress
 from outmem.config import SEMANTIC_INDEX_PAGES, SEMANTIC_UNAVAILABLE_HELP
 from outmem.exceptions import OutmemError
+from outmem.repo import load_registry, split_subject
 from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
 from outmem.store import AgentIdentity, WikiStore
 
@@ -312,15 +313,21 @@ def cmd_reindex(args: argparse.Namespace) -> int:
     # `reindex` is the opt-in that *builds* the semantic index — no
     # availability gate (it creates the db). The `outmem[semantic]` extra
     # missing surfaces as an OutmemError below.
+    # `--staged` runs from the pre-commit hook, whose working directory is
+    # the top of the repository. In a multi-wiki repo that is NOT a wiki, so
+    # it is dispatched before any store is opened — opening one there would
+    # scaffold a spurious wiki at the repository root.
+    if args.staged:
+        return _cmd_reindex_staged_repo(
+            _resolve_root(args), pages_only=args.pages_only
+        )
     store = _open_store(args)
     # Apply the scope override once, up front, so EVERY branch below honours
-    # it — including `--path` and `--staged`, which don't go through
-    # reindex_all. load_for_index reads the same setting, so a scoped run
-    # can't re-add sources through an incremental path either.
+    # it — including `--path`, which doesn't go through reindex_all.
+    # load_for_index reads the same setting, so a scoped run can't re-add
+    # sources through an incremental path either.
     if args.pages_only:
         store.config.outmem.semantic.index = SEMANTIC_INDEX_PAGES
-    if args.staged:
-        return _cmd_reindex_staged(store)
 
     try:
         if args.path:
@@ -371,6 +378,44 @@ def cmd_reindex(args: argparse.Namespace) -> int:
     return _report_dropped_pages(summary.get("dropped_paths") or [])
 
 
+def _cmd_reindex_staged_repo(root: Path, *, pages_only: bool = False) -> int:
+    """Pre-commit entry point: sync every wiki with staged changes.
+
+    ``.git/hooks`` is per-clone and there is exactly one hook, so in a
+    multi-wiki repository a single commit can carry files from several
+    wikis. Staged paths are read once at the repository root and each
+    wiki reindexes its own.
+
+    Never blocks the commit: a wiki that fails to open is reported and
+    skipped, on the same principle as the per-file error handling below.
+    """
+    registry = load_registry(root)
+    if registry is None or not registry.wikis:
+        # A standalone wiki — the root *is* the wiki. Unchanged behaviour.
+        try:
+            store = WikiStore.open(root, agent_identity=_agent_identity())
+        except OutmemError as exc:
+            print(f"outmem: {exc}", file=sys.stderr)
+            return 0
+        if pages_only:
+            store.config.outmem.semantic.index = SEMANTIC_INDEX_PAGES
+        return _cmd_reindex_staged(store)
+
+    for name in registry.wikis:
+        wiki_root = registry.path_of(name)
+        if not wiki_root.is_dir():
+            continue
+        try:
+            store = WikiStore.open(wiki_root, agent_identity=_agent_identity())
+        except OutmemError as exc:
+            print(f"outmem: skipping wiki {name!r}: {exc}", file=sys.stderr)
+            continue
+        if pages_only:
+            store.config.outmem.semantic.index = SEMANTIC_INDEX_PAGES
+        _cmd_reindex_staged(store)
+    return 0
+
+
 def _cmd_reindex_staged(store: WikiStore) -> int:
     """Sync derived artefacts to staged changes (pre-commit hook).
 
@@ -386,15 +431,25 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
     should not block commits over indexing issues.
     """
     from outmem.frontmatter import repair_wiki_page
-    from outmem.git_ops import add as git_add
     from outmem.git_ops import staged_changes
     from outmem.index import INDEX_FILENAME
 
     try:
-        added, deleted = staged_changes(store.repo)
+        staged_added, staged_deleted = staged_changes(store.repo)
     except OutmemError as exc:
         print(f"outmem: {exc}", file=sys.stderr)
         return 0  # do not block the commit
+
+    # `staged_changes` reports paths from the repository root; everything
+    # below works in wiki-relative terms. Narrowing here is also what keeps
+    # one wiki from reindexing another's files when a commit spans both.
+    def _mine(paths: list[str]) -> list[str]:
+        prefix = store.repo_prefix
+        if not prefix:
+            return paths
+        return [p[len(prefix) :] for p in paths if p.startswith(prefix)]
+
+    added, deleted = _mine(staged_added), _mine(staged_deleted)
 
     index_rel = f"{store.config.wiki_dir}/{INDEX_FILENAME}"
 
@@ -430,7 +485,7 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
             continue
         page_path.write_text(fixed, encoding="utf-8")
         try:
-            git_add(store.root, [rel])
+            store.stage([rel])
         except OutmemError as exc:
             print(f"outmem: could not re-stage repaired {rel}: {exc}", file=sys.stderr)
         else:
@@ -451,7 +506,7 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
     db_path = store.root / db_rel
     if db_path.exists():
         try:
-            git_add(store.root, [db_rel])
+            store.stage([db_rel])
         except OutmemError as exc:
             print(f"outmem: could not stage {db_rel}: {exc}", file=sys.stderr)
 
@@ -464,7 +519,7 @@ def _cmd_reindex_staged(store: WikiStore) -> int:
     if touched_wiki:
         try:
             store.rebuild_index(commit=False)
-            git_add(store.root, [index_rel])
+            store.stage([index_rel])
         except OutmemError as exc:
             print(f"outmem: rebuilding index failed: {exc}", file=sys.stderr)
 
@@ -983,9 +1038,14 @@ def _slugs_from_commits(subjects: tuple[str, ...]) -> list[str]:
     """Extract slugs from ``compact: <slug>`` / ``extend: <slug>`` commits.
 
     ``log:`` subjects are skipped — they don't produce pages.
+
+    A subject from a multi-wiki repository carries the wiki it belongs
+    to (``legal/ compact: nda``); the qualifier is stripped first, or
+    every verb in such a repo would go unrecognised.
     """
     slugs: list[str] = []
-    for subj in subjects:
+    for raw in subjects:
+        _wiki, subj = split_subject(raw)
         for prefix in ("compact: ", "extend: ", "append: "):
             if subj.startswith(prefix):
                 slug = subj[len(prefix) :].strip()
