@@ -20,6 +20,10 @@ outmem on their behalf. The repository is dark to them, so the process
 boundary is real and filtering at the store layer is genuine access
 control rather than a display convention.
 
+Keep the repository in the deployed copy — see
+[Keep the wiki's `.git`](#keep-the-wikis-git) below for what stripping
+it costs.
+
 ```python
 store = WikiStore.open("/srv/wiki")               # server-side, full access
 view  = store.as_viewer(mode={"hr"}, grants=g)    # per request
@@ -373,16 +377,28 @@ rows written by hand or by an older build.
 
 The label index is cached against HEAD, because every outmem write
 produces a commit and a moved HEAD is therefore exactly the
-invalidation signal. A deployment that strips `.git` — a depth-1
-export, a read-only mount — has no commit to key that on, so the index
-falls back to a short time-based cache and outmem logs a warning
-saying so.
+invalidation signal.
 
-That fallback is correct for the shape it is meant for: a wiki with no
-repository cannot be written through outmem at all, since every write
-path commits. But keeping `.git` is strictly better, and cheap — a
-depth-1 clone of a markdown wiki is a few megabytes, against a cache
-that has to guess when to expire.
+A deployment that strips `.git` — a depth-1 export, a read-only mount —
+has no commit to key that on. outmem falls back to a **5-second**
+time-based cache and logs a warning naming the cause. That fallback is
+correct for the shape it is meant for: a wiki with no repository cannot
+be written through outmem at all, since every write path commits, so
+the corpus only changes when something outside the process replaces it
+— which in practice means a redeploy and a restart.
+
+What it costs is bounded staleness. A label change made outside the
+process can take up to five seconds to be seen, where a wiki with a
+repository sees it on the next commit. A change to a source's labels is
+picked up immediately either way, since the registry file's fingerprint
+is part of the token. And a page that appears on disk while the cache
+is warm is *hidden* rather than served, because its labels are unknown
+— the fail-closed rule, applied to time.
+
+Keeping `.git` is strictly better and cheap: a depth-1 clone of a
+markdown wiki is a few megabytes, against a cache that has to guess
+when to expire. Strip it and you are trading a known invalidation
+signal for a timer.
 
 ## Rolling it out
 

@@ -144,8 +144,11 @@ contract, threat boundary and rollout order in
   strips the repository had no token and rebuilt constantly — measured
   on 1200 pages at 648 ms per check against 0.10 ms with a repo, and
   silent. Such a wiki cannot be written through outmem anyway (every
-  write path commits), so it now uses a short time-based cache and says
-  so once. Keeping `.git` remains strictly better and costs a few MB.
+  write path commits), so it now uses a 5-second cache and says so once,
+  naming the cause. The cost is bounded staleness: a label change made
+  outside the process can take that long to be seen, where a repository
+  shows it on the next commit. Keeping `.git` remains strictly better
+  and costs a few MB.
 - **`add_source` takes the write lock**, like every other
   commit-producing path. The registry was already safe across processes
   — SQLite serialises the writers — but the git half was not: two

@@ -32,6 +32,7 @@ import contextlib
 import logging
 import posixpath
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -56,10 +57,11 @@ class LabelIndex:
     usually the invalidation signal — but see :attr:`registries` for the
     writes that produce none.
 
-    ``None`` means the repo had no commits when this was built, so there
-    is no token and the index must not be cached. That state is rare (a
-    wiki with nothing committed) and rebuilding is merely slower, where
-    caching against a token that cannot change would be wrong.
+    ``None`` means there was no reachable HEAD — a wiki with no commits
+    yet, or a deployment that stripped ``.git``. There is no token to
+    compare, so :meth:`LabelCache._without_head` falls back to a short
+    time-based cache instead; rebuilding on every check turned out to
+    cost 648 ms per call on 1200 pages.
     """
 
     registries: tuple[tuple[int, int], ...] = ()
@@ -177,10 +179,10 @@ def _warn_headless_once(store: WikiStore) -> None:
     _warned_headless.add(key)
     log.warning(
         "%s has restriction labels but no reachable git HEAD, so the label "
-        "index cannot be cached against a commit. Falling back to a %.0fs "
-        "cache; visibility checks will be slower and a change made outside "
-        "this process can take that long to be seen. Keep the wiki's .git "
-        "directory (a depth-1 clone is enough) to remove both.",
+        "index cannot be keyed on a commit. Falling back to a %.0fs cache: a "
+        "label change made outside this process can take that long to be "
+        "seen. Keep the wiki's .git directory (a depth-1 clone is enough) "
+        "and the index is invalidated by the commit instead.",
         store.root,
         _HEADLESS_TTL_SECONDS,
     )
@@ -202,11 +204,6 @@ def _release_registries(store: WikiStore) -> None:
             with contextlib.suppress(Exception):
                 handle.close()
             setattr(store, attr, None)
-
-
-#: An index for a wiki that declares no labels. Everything is open, and
-#: every lookup is a dict miss on an empty dict.
-EMPTY = LabelIndex(head=())
 
 
 def registry_stamp(store: WikiStore) -> tuple[tuple[int, int], ...]:
@@ -235,9 +232,15 @@ def head_stamp(store: WikiStore) -> tuple[object, ...]:
     to know only whether HEAD *moved*, and ``.git/HEAD`` plus the ref it
     names answer that from two ``stat`` calls.
 
-    Falls back to the subprocess for anything unusual (a worktree, a
-    packed ref this cannot see), so the token is never weaker than it
-    was — only cheaper in the common case.
+    Returns ``(None,)`` when there is no repository at all, without
+    asking git — the fallback below spawns a process, and on a
+    directory with no ``.git`` that process *fails*, once per
+    visibility check.
+
+    Falls back to the subprocess for anything unusual that does have a
+    repository (a worktree whose ``.git`` is a file, a packed ref this
+    cannot see), so the token is never weaker than it was — only
+    cheaper in the common case.
     """
     git_dir = store.root / ".git"
     if not git_dir.exists():
@@ -462,29 +465,28 @@ class LabelCache:
         a non-git directory in a long-lived process sees their change
         within a bounded window rather than never.
         """
-        import time
-
-        now = time.monotonic()
-        cached = self._index
-        if (
-            cached is not None
-            and cached.registries == stamp
-            and now - self._headless_built_at < _HEADLESS_TTL_SECONDS
-        ):
-            return cached
+        if self._headless_is_fresh(stamp):
+            return self._index  # type: ignore[return-value]
         with self._lock:
-            cached = self._index
-            if (
-                cached is not None
-                and cached.registries == stamp
-                and now - self._headless_built_at < _HEADLESS_TTL_SECONDS
-            ):
-                return cached
+            # Re-checked inside the lock against a FRESH clock read: a
+            # thread that waited here may have waited past the TTL, and
+            # deciding on the reading it took before the wait would let
+            # it serve an index it had just established was too old.
+            if self._headless_is_fresh(stamp):
+                return self._index  # type: ignore[return-value]
             _warn_headless_once(store)
             built = build(store, None)
             self._index = built
             self._headless_built_at = time.monotonic()
             return built
+
+    def _headless_is_fresh(self, stamp: tuple[tuple[int, int], ...]) -> bool:
+        cached = self._index
+        return (
+            cached is not None
+            and cached.registries == stamp
+            and time.monotonic() - self._headless_built_at < _HEADLESS_TTL_SECONDS
+        )
 
     def note_registry_write(self, store: WikiStore) -> None:
         """Record that this process just wrote a registry itself.

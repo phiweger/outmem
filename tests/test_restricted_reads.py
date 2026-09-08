@@ -1167,6 +1167,25 @@ class TestSteeringSubjectsForSourceRestrictions:
         assert any("alice-severance" in s for s in hr_subjects)
 
 
+def _count_corpus_walks(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Count every full parse of ``wiki/pages/``, wherever it is reached
+    from. Returns a live counter."""
+    from outmem import index as index_mod
+
+    counter = {"n": 0}
+    real = index_mod.load_editorial_pages
+
+    def counted(*args, **kwargs):  # type: ignore[no-untyped-def]
+        counter["n"] += 1
+        return real(*args, **kwargs)
+
+    # Patched at the source module, not where the label index imports
+    # it: that import is function-local, and patching there would only
+    # cover the one call site rather than the cost itself.
+    monkeypatch.setattr(index_mod, "load_editorial_pages", counted)
+    return counter
+
+
 class TestAWikiWithNoGitDirectory:
     """A deployment that strips `.git` — a depth-1 export, a read-only
     mount — has no commit to key the label cache on.
@@ -1197,26 +1216,51 @@ class TestAWikiWithNoGitDirectory:
             mode={"hr"}, grants=Grants.reader("hr")
         ).list_slugs()
 
-    def test_the_index_is_not_rebuilt_on_every_check(
+    def test_the_corpus_is_not_walked_on_every_check(
         self, headless: WikiStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from outmem._store import labels as labels_mod
+        """Counted at the walk itself, not at `build`.
 
+        `build` is today's only caller, but the cost being guarded
+        against is the walk — parsing every page's frontmatter — and a
+        future path that reaches it another way would reintroduce the
+        cliff while a `build`-shaped assertion stayed green.
+        """
+        walks = _count_corpus_walks(monkeypatch)
         view = headless.as_viewer()
-        view.list_slugs()  # first build
+        view.list_slugs()  # the one build this is allowed
+        before = walks["n"]
 
-        builds = {"n": 0}
-        real = labels_mod.build
-
-        def counted(*a, **k):  # type: ignore[no-untyped-def]
-            builds["n"] += 1
-            return real(*a, **k)
-
-        monkeypatch.setattr(labels_mod, "build", counted)
         for _ in range(20):
             view.exists("glossary")
             view.list_slugs()
-        assert builds["n"] == 0, f"rebuilt {builds['n']} times inside the TTL"
+            view.read("glossary")
+        assert walks["n"] == before, (
+            f"walked the corpus {walks['n'] - before} times across 60 checks; "
+            "this is the 648ms-per-call cliff coming back"
+        )
+
+    def test_a_wiki_with_a_repo_does_not_walk_per_check_either(
+        self, store: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same guarantee on the ordinary path, so the headless one
+        is not the only shape anybody checks."""
+        walks = _count_corpus_walks(monkeypatch)
+        view = store.as_viewer()
+        view.list_slugs()
+        before = walks["n"]
+        for _ in range(20):
+            view.exists("glossary")
+            view.list_slugs()
+        assert walks["n"] == before
+
+    def test_a_commit_still_rebuilds_it(self, store: WikiStore) -> None:
+        """The other half: caching that never expires is not caching,
+        it is a stale answer."""
+        view = store.as_viewer()
+        assert "later" not in view.list_slugs()
+        store.write_page("later", title="L", body="Text.\n")
+        assert "later" in view.list_slugs()
 
     def test_no_git_subprocess_is_spawned_per_check(
         self, headless: WikiStore, monkeypatch: pytest.MonkeyPatch
@@ -1235,6 +1279,47 @@ class TestAWikiWithNoGitDirectory:
         view.exists("glossary")
         view.list_slugs()
 
+    def test_the_cache_expires(
+        self, headless: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The TTL is the whole concession that makes caching without a
+        token defensible, and nothing was checking it held.
+
+        Both halves in one: a page the index has not seen is denied
+        while the cache is warm (fail-closed, since its labels are
+        unknown), and appears once the cache expires. A window, not a
+        wall.
+        """
+        from outmem._store import labels as labels_mod
+
+        view = headless.as_viewer()
+        view.list_slugs()  # warm
+
+        (headless.pages_path / "arrived.md").write_text(
+            "---\ntitle: Arrived\nslug: arrived\n---\n\nOut-of-band.\n"
+        )
+        assert "arrived" not in view.list_slugs(), "warm cache should not see it"
+
+        monkeypatch.setattr(labels_mod, "_HEADLESS_TTL_SECONDS", 0.0)
+        assert "arrived" in view.list_slugs(), "expired cache should pick it up"
+
+    def test_a_registry_write_expires_it_without_waiting(
+        self, headless: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The registry stamp is checked alongside the clock, so a
+        source change does not have to sit out the TTL."""
+        from outmem.sources import REGISTRY_FILENAME
+
+        view = headless.as_viewer()
+        view.list_sources()
+        walks = _count_corpus_walks(monkeypatch)
+
+        registry = headless.sources_path / REGISTRY_FILENAME
+        registry.write_bytes(registry.read_bytes() + b"\x00")
+
+        view.list_sources()
+        assert walks["n"] == 1, "a moved registry stamp should rebuild at once"
+
     def test_it_says_so(
         self, headless: WikiStore, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -1248,6 +1333,11 @@ class TestAWikiWithNoGitDirectory:
             headless.as_viewer().list_slugs()
         assert "no reachable git HEAD" in caplog.text
         assert ".git" in caplog.text  # names the fix
+        # The cost is staleness, not speed — after the subprocess fix
+        # the headless path is marginally the faster of the two, and a
+        # message claiming otherwise would send a reader hunting the
+        # wrong thing.
+        assert "slower" not in caplog.text
 
     def test_a_wiki_with_a_repo_does_not_warn(
         self, store: WikiStore, caplog: pytest.LogCaptureFixture
