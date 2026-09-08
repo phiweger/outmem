@@ -3,6 +3,36 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.17.4
+
+A review round over 0.17.3.
+
+### Fixed
+
+- **`repo import --path-in-repo ../x` bricked the registry.** The path
+  was acted on before the parser got to reject it: the wiki was copied
+  *outside* the repository, the entry was written, `git add` refused,
+  and nothing rolled back — so `wikis.yaml` no longer parsed and every
+  command on the repository failed until somebody edited the file by
+  hand. `repo add --path ../x` had the milder version: a directory
+  created outside the repository, then the entry rolled back.
+
+  Both commands now validate the path first, with the one rule the
+  parser uses (`validate_wiki_path`, shared), so a value the registry
+  would reject can never be written or acted on. Nothing touches disk
+  until everything that can refuse has had its chance.
+- **The refusal for a commented registry told `repo import` users to run
+  `repo add`**, which would not have done what they wanted. It names the
+  command that was run.
+
+### Changed
+
+- `repo add` and `repo import` check for the registry once, through the
+  parser, rather than testing for the file and then parsing it; the
+  `assert`-based narrowing in those paths is gone in favour of errors
+  that survive `python -O`. A listed name's `--path-in-repo` is compared
+  after normalisation, so `./wikis/legal/` and `wikis/legal` agree.
+
 ## 0.17.3
 
 ### Fixed

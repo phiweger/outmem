@@ -170,6 +170,34 @@ def _parse_tags(path: Path, block: object) -> dict[str, str]:
     return out
 
 
+def validate_wiki_path(rel: object, *, context: str) -> str:
+    """Normalise a registry ``path`` value, or raise.
+
+    Relative, non-empty, no ``..`` — inside the repository. Returned in
+    POSIX form with ``./`` and a trailing ``/`` stripped, which is what
+    the registry stores and what :meth:`Registry.name_at` compares.
+
+    Shared by the parser and by the commands that *write* entries, so a
+    value the parser would reject can never be written first — or acted
+    on first. Before this was one rule, ``repo add --path ../x`` created
+    the directory outside the repository and only then failed to load
+    what it had written.
+    """
+    if not isinstance(rel, str):
+        raise OutmemError(f"{context}: `path` must be a string, got {rel!r}.")
+    parts = Path(rel).parts
+    # `.` and `` both normalise to no parts and would name the repository
+    # root itself — a wiki that is its own repository is a standalone
+    # wiki, not an entry, and `find_repo_root` walks *parents* so it could
+    # never be found anyway.
+    if not parts or Path(rel).is_absolute() or ".." in parts:
+        raise OutmemError(
+            f"{context}: `path` must be a relative directory inside the "
+            f"repository, got {rel!r}."
+        )
+    return Path(*parts).as_posix()
+
+
 def _parse_wikis(path: Path, block: object) -> dict[str, WikiEntry]:
     if block is None:
         return {}
@@ -187,21 +215,12 @@ def _parse_wikis(path: Path, block: object) -> dict[str, WikiEntry]:
             )
         if not isinstance(settings, dict):
             raise _fail(path, f"wiki {name!r} must map to a mapping.")
-        rel = settings.get("path", f"wikis/{name}")
-        if not isinstance(rel, str):
-            raise _fail(path, f"wiki {name!r}: `path` must be a string.")
-        parts = Path(rel).parts
-        # `.` and `` both normalise to no parts and would name the
-        # repository root itself — a wiki that is its own repository is
-        # a standalone wiki, not an entry here, and `find_repo_root`
-        # walks *parents* so it could never be found anyway.
-        if not parts or Path(rel).is_absolute() or ".." in parts:
-            raise _fail(
-                path,
-                f"wiki {name!r}: `path` must be a relative directory inside "
-                f"the repository, got {rel!r}.",
+        try:
+            normalised = validate_wiki_path(
+                settings.get("path", f"wikis/{name}"), context=f"wiki {name!r}"
             )
-        normalised = Path(*parts).as_posix()
+        except OutmemError as exc:
+            raise _fail(path, str(exc)) from None
         if normalised in claimed:
             # Two names for one directory: `name_at` would return whichever
             # came first and the other wiki would silently be that one.

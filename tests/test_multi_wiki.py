@@ -971,3 +971,97 @@ class TestHandMaintainedRegistry:
             if f.kind == "registry-missing-wiki"
         ]
         assert messages and all("outmem repo add" in m for m in messages)
+
+
+class TestPathsAreValidatedBeforeAnythingHappens:
+    """A `--path` the parser would reject must be refused up front.
+
+    Acting first and letting the parser reject the entry afterwards created
+    a directory *outside* the repository (`repo add`) or copied a whole wiki
+    there and left `wikis.yaml` unparseable (`repo import`).
+    """
+
+    @pytest.fixture
+    def plain(self, tmp_path: Path) -> Path:
+        from outmem.cli.__main__ import main
+
+        root = tmp_path / "mem"
+        assert main(["repo", "init", "--root", str(root)]) == 0
+        return root
+
+    @pytest.mark.parametrize("bad", ["../escaped", "/abs/olute", ".", "a/../../b"])
+    def test_add_refuses_an_escaping_path_and_creates_nothing(
+        self, plain: Path, tmp_path: Path, bad: str
+    ) -> None:
+        from outmem.cli.__main__ import main
+        from outmem.repo import load_registry
+
+        before = (plain / "wikis.yaml").read_bytes()
+        assert main(["repo", "add", "x", "--root", str(plain), "--path", bad]) == 1
+        assert (plain / "wikis.yaml").read_bytes() == before
+        assert not (tmp_path / "escaped").exists()
+        assert not (plain / "wikis" / "x").exists()
+        assert load_registry(plain) is not None  # still parses
+
+    def test_import_refuses_an_escaping_path_before_moving(
+        self, plain: Path, tmp_path: Path
+    ) -> None:
+        from outmem.cli.__main__ import main
+        from outmem.repo import load_registry
+
+        outside = WikiStore.init(tmp_path / "elsewhere")
+        outside.write_page("x", title="X", body="Body.\n")
+        before = (plain / "wikis.yaml").read_bytes()
+        assert main(
+            ["repo", "import", str(outside.root), "--root", str(plain),
+             "--name", "x", "--path-in-repo", "../escaped"]
+        ) == 1
+        assert (plain / "wikis.yaml").read_bytes() == before
+        assert not (tmp_path / "escaped").exists()
+        assert outside.root.is_dir()
+        # The old failure mode: an entry written that no longer parsed.
+        assert load_registry(plain) is not None
+
+    def test_import_of_a_listed_name_accepts_the_same_path_spelled_differently(
+        self, commented: Path, tmp_path: Path
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        outside = WikiStore.init(tmp_path / "old-legal")
+        assert main(
+            ["repo", "import", str(outside.root), "--root", str(commented),
+             "--name", "legal", "--path-in-repo", "./wikis/legal/"]
+        ) == 0
+
+    def test_import_refusal_names_the_import_command(
+        self, commented: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Telling somebody who ran `repo import` to run `repo add` next
+        # sends them to a command that would not do what they wanted.
+        from outmem.cli.__main__ import main
+
+        outside = WikiStore.init(tmp_path / "elsewhere")
+        main(["repo", "import", str(outside.root), "--root", str(commented), "--name", "hr"])
+        err = capsys.readouterr().err
+        assert "outmem repo import" in err and "--name hr" in err
+        assert "repo add hr" not in err
+
+    def test_add_scaffolds_a_listed_but_hollow_directory(self, commented: Path) -> None:
+        # Listed, directory exists, but nobody ran init in it — the state
+        # `registry-not-a-wiki` reports. `repo add` is the documented fix.
+        from outmem.cli.__main__ import main
+        from outmem.repo import is_wiki_root
+
+        (commented / "wikis" / "legal").mkdir(parents=True)
+        assert not is_wiki_root(commented / "wikis" / "legal")
+        assert main(["repo", "add", "legal", "--root", str(commented)]) == 0
+        assert is_wiki_root(commented / "wikis" / "legal")
+        assert not (commented / "wikis" / "legal" / ".git").exists()
+
+    @pytest.fixture
+    def commented(self, tmp_path: Path) -> Path:
+        root = tmp_path / "hand"
+        root.mkdir()
+        _run_git(["init", "--initial-branch", "main"], cwd=root)
+        _commit(root, file="wikis.yaml", content=COMMENTED, message="hand-written registry")
+        return root
