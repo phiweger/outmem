@@ -415,6 +415,68 @@ by prefixing with the parent directory (`projects/alpha.md` + `clients/alpha.md`
 don't exist in the import are left as-is; run `outmem lint` after to
 surface them.
 
+## Multi-wiki repositories
+
+Several wikis in one git repository, one per audience. Full picture in
+[`multi-wiki.md`](multi-wiki.md).
+
+```bash
+outmem repo init  --root /srv/memory              # git repo + wikis.yaml
+outmem repo add   legal --root /srv/memory \
+                  --audience legal --audience exec --title "Legal"
+outmem repo import /srv/old-hr --root /srv/memory --name hr --audience hr
+```
+
+Every ordinary subcommand takes `--wiki NAME`, with `--root` (or the cwd)
+pointing at the *repository* rather than a wiki:
+
+```bash
+echo "..." | outmem write nda --root /srv/memory --wiki legal --title "NDA"
+outmem read nda --root /srv/memory --wiki legal
+```
+
+### Inspecting audiences
+
+```bash
+outmem repo list  --root /srv/memory              # wikis, tags, page counts
+outmem repo list  --root /srv/memory --audience everyone
+outmem repo tags  --root /srv/memory              # the declared vocabulary
+outmem repo tags  --root /srv/memory --json       # provision your user DB
+outmem repo audience --root /srv/memory --tags hr,everyone
+```
+
+`repo tags --json` emits a versioned payload — `{"version": 1, "tags": [...],
+"wikis": [...]}` — that a provisioning script can read without importing
+Python. `repo audience` answers "why can't Sam see the HR wiki?" in one
+command, and names any tag the user holds that no wiki declares.
+
+`repo list` and `repo tags` without `--audience` are the **admin** view: they
+name every wiki and every tag. `--audience` narrows to what those tags reach,
+which is what belongs in front of an end user — a wiki's name, and a tag's,
+can itself be the sensitive part.
+
+### Linting a repository
+
+```bash
+outmem lint --repo --root /srv/memory
+```
+
+Checks `wikis.yaml`, then every wiki. Registry findings:
+
+| Kind | Severity |
+|---|---|
+| `registry-missing-wiki` — listed, no directory | error |
+| `registry-not-a-wiki` — listed, directory exists, not a wiki | error |
+| `registry-undeclared-tag` — an `audience` tag no `tags:` entry declares | error |
+| `registry-unreachable-wiki` — empty `audience` | warning |
+| `registry-unused-tag` — declared, nothing lists it | warning |
+| `registry-unlisted-wiki` — a wiki-shaped directory the registry omits | warning |
+
+Plus `cross-wiki-wikilink` (error) on any `[[other-wiki/page]]`, since
+wikilinks do not cross a wiki boundary.
+
+Exit codes match `outmem lint`: `0` clean, `1` warnings, `2` errors.
+
 ## Lint
 
 ```bash

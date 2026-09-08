@@ -34,14 +34,14 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from outmem.completeness import find_elision_markers, find_tool_sentinels
-from outmem.exceptions import FrontmatterError, OutmemError
+from outmem.exceptions import OutmemError
 from outmem.frontmatter import ProvenanceEntry, parse_wiki_page
 from outmem.git_ops import tracked_paths_under
 from outmem.index import (
@@ -51,7 +51,6 @@ from outmem.index import (
     load_page_text,
     render_index,
 )
-from outmem.restricted import RestrictedSettings
 from outmem.slug import (
     PAGES_DIR,
     extract_slug_references,
@@ -123,7 +122,6 @@ def lint_wiki(
     sources_local_dir: Path | None = None,
     repo_root: Path | None = None,
     indexed_paths: Iterable[str] | None = None,
-    restricted: RestrictedSettings | None = None,
 ) -> LintReport:
     """Run every static check against ``wiki_dir``.
 
@@ -140,12 +138,6 @@ def lint_wiki(
     library caller can run the page-level checks without paying for a
     git invocation or a vector-store open; the CLI passes them, so the
     checks run wherever a user would actually look.
-
-    ``restricted`` enables the access-control checks. They are worth
-    stating only because something verifies them — the same reason the
-    tracked/local containment checks exist — and every one of them
-    catches a way for restricted content to become visible without
-    anybody editing a label.
     """
     report = LintReport()
 
@@ -190,16 +182,6 @@ def lint_wiki(
         wiki_dir_name=wiki_dir.name,
         report=report,
     )
-    _check_restrictions(
-        pages,
-        wiki_dir=wiki_dir,
-        pages_dir=pages_dir,
-        log_dir=log_dir,
-        sources_dir=sources_dir,
-        sources_local_dir=sources_local_dir,
-        settings=restricted,
-        report=report,
-    )
 
     return report
 
@@ -226,10 +208,6 @@ class _LoadedPage:
     # `omitted:` entries — content the author says the page deliberately
     # leaves out. Round-trips through `extra`, so it needs no schema.
     omitted: tuple[str, ...] = ()
-    # Explicit `restricted:` labels, as written. The store resolves the
-    # effective set (path rules, source inheritance); lint checks what a
-    # person actually typed against what the config declares.
-    restricted: tuple[str, ...] = ()
 
 
 def _load_pages(
@@ -311,7 +289,6 @@ def _load_pages(
             aliases=tuple(frontmatter.aliases),
             body_line_offset=len(raw.splitlines()) - len(body.splitlines()),
             omitted=_declared_omissions(frontmatter.extra.get("omitted")),
-            restricted=tuple(frontmatter.restricted),
         )
     return pages
 
@@ -613,14 +590,47 @@ def _check_wikilinks(
                 )
                 continue
             if target not in known:
+                # `[[legal/nda]]` is a link reaching for another wiki.
+                # Reported as its own kind because "that page does not
+                # exist" is true but unhelpful: the page usually does
+                # exist, in a wiki this one cannot link into, and the
+                # author needs to hear that rather than go looking for a
+                # typo. Wikilinks are wiki-local — a link is a claim that
+                # every reader of this page can follow it, and readers of
+                # two wikis are not the same set of people.
+                kind = (
+                    "cross-wiki-wikilink"
+                    if _looks_cross_wiki(target)
+                    else "broken-wikilink"
+                )
+                message = (
+                    f"[[{target}]] points into another wiki — wikilinks do "
+                    "not cross a wiki boundary. Cite a shared source, or "
+                    "restate what you need in this wiki."
+                    if kind == "cross-wiki-wikilink"
+                    else f"[[{target}]] refers to a page that does not exist"
+                )
                 report.findings.append(
                     LintFinding(
-                        kind="broken-wikilink",
+                        kind=kind,
                         severity=Severity.ERROR,
                         path=page.rel_path,
-                        message=f"[[{target}]] refers to a page that does not exist",
+                        message=message,
                     )
                 )
+
+
+def _looks_cross_wiki(target: str) -> bool:
+    """True when a wikilink target is spelled ``<wiki>/<slug>``.
+
+    A slug cannot contain ``/`` — the hierarchy separator is ``:`` — so a
+    target with one is either a wiki qualifier or a path someone pasted,
+    and both are worth saying more about than "does not exist".
+    """
+    from outmem.wikiset import split_qualified
+
+    wiki, slug = split_qualified(target)
+    return bool(wiki) and bool(slug)
 
 
 def _check_unchained_source_versions(
@@ -1500,414 +1510,3 @@ def format_report(report: LintReport) -> str:
             lines.append(f"  [{finding.severity.value}] {where}: {finding.message}")
         lines.append("")
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Restricted content
-#
-# The store enforces the rules; these verify that the corpus on disk
-# still satisfies them. Every check below catches a way for restricted
-# content to become visible without anybody editing a label — which is
-# exactly the class of failure a boundary maintained at write time
-# cannot notice about content that was already there.
-# ---------------------------------------------------------------------------
-
-
-def _check_restrictions(
-    pages: dict[str, _LoadedPage],
-    *,
-    wiki_dir: Path,
-    pages_dir: Path,
-    log_dir: Path | None,
-    sources_dir: Path | None,
-    sources_local_dir: Path | None,
-    settings: RestrictedSettings | None,
-    report: LintReport,
-) -> None:
-    if settings is None or not settings.enabled:
-        return
-
-    source_labels = _registry_labels(
-        sources_dir, sources_local_dir, settings, report, wiki_dir.name
-    )
-    effective: dict[str, frozenset[str]] = {}
-
-    for slug, page in sorted(pages.items()):
-        declared = frozenset(page.restricted)
-        unknown = settings.undeclared(declared)
-        if unknown:
-            report.findings.append(
-                LintFinding(
-                    kind="restricted-label-unknown",
-                    severity=Severity.ERROR,
-                    path=page.rel_path,
-                    message=(
-                        f"page carries restriction label(s) "
-                        f"{', '.join(sorted(unknown))} that are not declared "
-                        "under `restricted.labels` in config.yaml. A label "
-                        "nobody can hold hides this page from everyone, "
-                        "including whoever it was meant for."
-                    ),
-                )
-            )
-        labels = settings.resolve(declared) | settings.labels_for_slug(slug)
-        for entry in page.provenance:
-            ref = provenance_ref(entry)
-            if ref is not None:
-                labels |= _source_labels_for(source_labels, ref)
-        effective[slug] = labels
-
-    _check_restricted_provenance(pages, source_labels, settings, report)
-    _check_restricted_links(pages, effective, report)
-    _check_restricted_mentions(pages, effective, report)
-    _check_unreadable_frontmatter(pages_dir, wiki_dir, report)
-    # Closure holds for pages because the write path enforces it. The
-    # other two trees hold text too, and a slug written into either of
-    # them discloses exactly as much — so they are verified rather than
-    # assumed.
-    _check_restricted_tree_references(
-        effective,
-        settings=settings,
-        log_dir=log_dir,
-        sources_dir=sources_dir,
-        sources_local_dir=sources_local_dir,
-        source_labels=source_labels,
-        report=report,
-    )
-
-
-def _registry_labels(
-    sources_dir: Path | None,
-    sources_local_dir: Path | None,
-    settings: RestrictedSettings,
-    report: LintReport,
-    wiki_dir_name: str = "wiki",
-) -> dict[str, frozenset[str]]:
-    """Source labels by citation path, plus the chain-consistency check.
-
-    Reads the registries directly rather than through a store: lint is a
-    static check over a directory and must keep working for a caller
-    that has not opened one.
-    """
-    from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR, SourceRegistry
-
-    out: dict[str, frozenset[str]] = {}
-    chains: dict[str, dict[str, frozenset[str]]] = {}
-    for directory, prefix in (
-        (sources_dir, SOURCES_DIR),
-        (sources_local_dir, SOURCES_LOCAL_DIR),
-    ):
-        if directory is None or not directory.is_dir():
-            continue
-        try:
-            registry = SourceRegistry.load(directory)
-        except OutmemError:
-            continue
-        for entry in registry.entries.values():
-            labels = settings.resolve(entry.restricted) | settings.labels_for_source(
-                entry.rel_path
-            )
-            out[f"{prefix}/{entry.rel_path}"] = labels
-            out.setdefault(entry.rel_path, frozenset())
-            out[entry.rel_path] |= labels
-            out[f"{wiki_dir_name}/{prefix}/{entry.rel_path}"] = labels
-            if entry.document_key:
-                chains.setdefault(entry.document_key, {})[entry.rel_path] = labels
-
-    for key, versions in sorted(chains.items()):
-        distinct = {frozenset(v) for v in versions.values()}
-        if len(distinct) > 1:
-            shown = "; ".join(
-                f"{path} → [{', '.join(sorted(labels)) or 'open'}]"
-                for path, labels in sorted(versions.items())
-            )
-            report.findings.append(
-                LintFinding(
-                    kind="restricted-chain-inconsistent",
-                    severity=Severity.ERROR,
-                    path=f"document_key:{key}",
-                    message=(
-                        f"versions of {key!r} carry different restriction "
-                        f"labels ({shown}). `outmem stale` points pages at the "
-                        "current version, so an open head silently "
-                        "declassifies a restricted document. Re-label the "
-                        "odd one out with `outmem ingest --restricted`."
-                    ),
-                )
-            )
-    return out
-
-
-def _source_labels_for(
-    source_labels: dict[str, frozenset[str]], ref: str
-) -> frozenset[str]:
-    """Labels for a cited source, under any spelling that names it.
-
-    The store resolves a citation against the filesystem; lint has no
-    store, so it normalises the text the same way. Keying on the literal
-    string is how a page citing ``sources/./<rel>`` came to be hidden by
-    the store and reported clean by the check whose whole job is to
-    notice exactly that.
-    """
-    import posixpath
-
-    cleaned = posixpath.normpath(ref.replace("\\", "/")).lstrip("/")
-    for candidate in (ref, cleaned):
-        if candidate in source_labels:
-            return source_labels[candidate]
-    for key, labels in source_labels.items():
-        if cleaned.endswith("/" + key) or cleaned == key:
-            return labels
-    return frozenset()
-
-
-def _check_restricted_provenance(
-    pages: dict[str, _LoadedPage],
-    source_labels: dict[str, frozenset[str]],
-    settings: RestrictedSettings,
-    report: LintReport,
-) -> None:
-    """A page must carry at least the labels of every source it cites.
-
-    Inheritance means the store computes this, so a violation here is a
-    page whose *declared* labels understate what it is made of — which
-    matters because a human reading the frontmatter would conclude the
-    page is open, and because the declared value is what survives if the
-    source registry is ever rebuilt.
-    """
-    for slug, page in sorted(pages.items()):
-        declared = settings.resolve(frozenset(page.restricted))
-        declared |= settings.labels_for_slug(slug)
-        for entry in page.provenance:
-            ref = provenance_ref(entry)
-            if ref is None:
-                continue
-            needed = _source_labels_for(source_labels, ref)
-            missing = needed - declared
-            if missing:
-                report.findings.append(
-                    LintFinding(
-                        kind="restricted-provenance-violation",
-                        severity=Severity.ERROR,
-                        path=page.rel_path,
-                        message=(
-                            f"cites {ref}, which is restricted to "
-                            f"[{', '.join(sorted(needed))}], but the page "
-                            f"declares [{', '.join(sorted(declared)) or 'open'}]. "
-                            "A source's path embeds its filename, so the "
-                            "citation itself is disclosure. Add the label with "
-                            f"`outmem restrict {slug} "
-                            f"{' '.join(f'--label {m}' for m in sorted(needed))}`."
-                        ),
-                    )
-                )
-
-
-def _check_restricted_links(
-    pages: dict[str, _LoadedPage],
-    effective: dict[str, frozenset[str]],
-    report: LintReport,
-) -> None:
-    """Closure: if you can see a page, you can see everything it links to.
-
-    Filtering the page list achieves nothing if a visible page's body
-    contains ``[[hr:severance-policy]]`` — reading the visible page
-    hands over the slug.
-    """
-    for slug, page in sorted(pages.items()):
-        mine = effective.get(slug, frozenset())
-        for target in sorted(set(page.outbound_links)):
-            if target not in effective:
-                continue  # dangling; `dead-wikilink` covers it
-            theirs = effective[target]
-            if not theirs <= mine:
-                report.findings.append(
-                    LintFinding(
-                        kind="restricted-link-violation",
-                        severity=Severity.ERROR,
-                        path=page.rel_path,
-                        message=(
-                            f"links to [[{target}]], which is restricted to "
-                            f"[{', '.join(sorted(theirs))}], but this page is "
-                            f"[{', '.join(sorted(mine)) or 'open'}]. Anyone who "
-                            "can read this page learns the restricted slug. "
-                            "Remove the link, or restrict this page too "
-                            f"(`outmem restrict {slug} "
-                            f"{' '.join(f'--label {m}' for m in sorted(theirs - mine))}`)."
-                        ),
-                    )
-                )
-
-
-def _check_restricted_mentions(
-    pages: dict[str, _LoadedPage],
-    effective: dict[str, frozenset[str]],
-    report: LintReport,
-) -> None:
-    """A restricted slug written as prose in a less-restricted page.
-
-    A warning, not an error, and deliberately so: prose cannot be
-    rewritten mechanically, and the same token may be an ordinary word.
-    But an unlinked mention discloses exactly as much as a link does,
-    and nothing else in the system would ever notice it.
-    """
-    for slug, page in sorted(pages.items()):
-        mine = effective.get(slug, frozenset())
-        linked = set(page.outbound_links)
-        for match in _SLUG_TOKEN_RE.finditer(page.body):
-            token = match.group(0)
-            if token in linked or token == slug:
-                continue
-            theirs = effective.get(token)
-            if theirs and not theirs <= mine:
-                report.findings.append(
-                    LintFinding(
-                        kind="restricted-slug-mentioned",
-                        severity=Severity.WARNING,
-                        path=page.rel_path,
-                        line=page.body_line_offset
-                        + page.body[: match.start()].count("\n")
-                        + 1,
-                        message=(
-                            f"mentions the restricted slug {token!r} as prose. "
-                            "It is not a link, so nothing rewrites or filters "
-                            "it, and every reader of this page learns the name."
-                        ),
-                    )
-                )
-                break  # one finding per page is enough to send someone looking
-
-
-def _check_unreadable_frontmatter(
-    pages_dir: Path, wiki_dir: Path, report: LintReport
-) -> None:
-    """Pages whose frontmatter will not parse are hidden from everyone.
-
-    ``frontmatter-invalid`` already reports the parse failure. This
-    restates it in access-control terms because the consequence is
-    different in kind: with restrictions on, such a page is denied to
-    every mode including its intended audience, so it is not merely
-    malformed — it is *gone* until somebody fixes it.
-    """
-    if not pages_dir.is_dir():
-        return
-    for path in editorial_pages(pages_dir):
-        rel_path = path.relative_to(pages_dir)
-        try:
-            # The same contract every other reader uses, `fallback_slug`
-            # included. Without it a page that omits `slug:` — legal,
-            # and served happily by the store — was reported here as
-            # "denied to every mode", which was simply false.
-            load_page_text(
-                path.read_text(encoding="utf-8"),
-                fallback_slug=relpath_to_slug(rel_path),
-            )
-        except FrontmatterError:
-            rel = f"{wiki_dir.name}/{PAGES_DIR}/{rel_path.as_posix()}"
-            report.findings.append(
-                LintFinding(
-                    kind="restricted-frontmatter-unparseable",
-                    severity=Severity.ERROR,
-                    path=rel,
-                    message=(
-                        "frontmatter does not parse, so this page's "
-                        "restriction labels cannot be read. It is therefore "
-                        "denied to every mode — including the one it was "
-                        "written for — until the frontmatter is fixed."
-                    ),
-                )
-            )
-
-
-def _check_restricted_tree_references(
-    effective: dict[str, frozenset[str]],
-    *,
-    settings: RestrictedSettings,
-    log_dir: Path | None,
-    sources_dir: Path | None,
-    sources_local_dir: Path | None,
-    source_labels: dict[str, frozenset[str]],
-    report: LintReport,
-) -> None:
-    """Closure over ``log/`` and the source trees, not just ``wiki/pages/``.
-
-    A restricted slug named in an open log entry, or in an open source
-    document, discloses exactly what one named in an open page does —
-    and until this check existed, only the page was looked at. The write
-    path now refuses both for a session, but neither covers what an
-    operator wrote by hand or what a source arrived carrying, which is
-    the case lint is here for.
-
-    Reported as a WARNING for the same reason
-    ``restricted-slug-mentioned`` is: a log entry is a historical record
-    and a source is frozen bytes, so neither can simply be rewritten,
-    and the fix is a judgement (redact, relabel the file, or accept).
-    """
-    for path, labels, kind in _restricted_tree_files(
-        settings=settings,
-        log_dir=log_dir,
-        sources_dir=sources_dir,
-        sources_local_dir=sources_local_dir,
-        source_labels=source_labels,
-    ):
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        named = {ref.slug for ref in extract_slug_references(text)}
-        exceeding = sorted(
-            slug
-            for slug in named
-            if slug in effective and not effective[slug] <= labels
-        )
-        if not exceeding:
-            continue
-        shown = ", ".join(exceeding[:3]) + (
-            f", … ({len(exceeding)} total)" if len(exceeding) > 3 else ""
-        )
-        report.findings.append(
-            LintFinding(
-                kind="restricted-slug-mentioned",
-                severity=Severity.WARNING,
-                path=str(path),
-                message=(
-                    f"this {kind} is [{', '.join(sorted(labels)) or 'open'}] but "
-                    f"names restricted page(s): {shown}. Every reader of the "
-                    f"{kind} learns those slugs."
-                ),
-            )
-        )
-
-
-def _restricted_tree_files(
-    *,
-    settings: RestrictedSettings,
-    log_dir: Path | None,
-    sources_dir: Path | None,
-    sources_local_dir: Path | None,
-    source_labels: dict[str, frozenset[str]],
-) -> Iterator[tuple[Path, frozenset[str], str]]:
-    """``(file, its labels, what to call it)`` for every log and source."""
-    from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
-
-    if log_dir is not None and log_dir.is_dir():
-        for path in sorted(log_dir.rglob("*.md")):
-            rel = path.relative_to(log_dir)
-            # `log/<date>.md` is the open partition; `log/<labels>/<date>.md`
-            # carries the compartment that wrote it.
-            partition = rel.parts[0] if len(rel.parts) > 1 else ""
-            labels = settings.mode_from_log_dirname(partition)
-            yield path, (labels if labels is not None else frozenset()), "log entry"
-
-    for directory, prefix in (
-        (sources_dir, SOURCES_DIR),
-        (sources_local_dir, SOURCES_LOCAL_DIR),
-    ):
-        if directory is None or not directory.is_dir():
-            continue
-        for path in sorted(directory.rglob("*")):
-            if not path.is_file() or path.name.startswith("."):
-                continue
-            key = path.relative_to(directory).as_posix()
-            labels = source_labels.get(f"{prefix}/{key}", frozenset())
-            yield path, labels, "source"

@@ -32,7 +32,7 @@ an orphan.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -207,9 +207,7 @@ def alias_index(pages_dir: Path) -> dict[str, str]:
     return out
 
 
-def render_index(
-    pages_dir: Path, *, include: Callable[[str], bool] | None = None
-) -> str:
+def render_index(pages_dir: Path) -> str:
     """Build the index.md content from the current state of ``pages_dir``.
 
     Walks ``*.md`` files under ``pages_dir`` recursively, parses each
@@ -217,25 +215,14 @@ def render_index(
     whose frontmatter won't parse is logged at WARNING and left out, so
     the index renders against a partially-broken wiki without crashing —
     but never drops a page without saying so.
-
-    ``include`` filters by slug. Used to render the catalogue for one
-    viewer rather than for the wiki: an index is a list of every slug
-    there is, which makes the on-disk file the one page that would hand
-    a reader the names of everything hidden from them. A filtered
-    render also suppresses the "left out" warnings for pages the caller
-    was never going to be shown.
     """
     pages, failures = load_editorial_pages(pages_dir)
     for failure in failures:
-        if include is not None and not include(failure.slug):
-            continue
         log.warning(
             "index: %s left out of index.md — %s", failure.slug, failure.error
         )
     entries: list[tuple[str, str]] = []
     for page in pages:
-        if include is not None and not include(page.slug):
-            continue
         line = f"- [[{page.slug}]] — {page.frontmatter.title}"
         if page.frontmatter.tags:
             line += f" ({', '.join(page.frontmatter.tags)})"

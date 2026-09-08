@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from outmem._store.sources import resolve_source
 from outmem.exceptions import OutmemError
 from outmem.sources import (
     REGISTRY_FILENAME,
@@ -661,3 +662,54 @@ class TestSourcesLocal:
         # The frozen bytes still say the old name; that's the whole point
         # of recording the mapping rather than rewriting the source.
         assert [r.token for r in refs] == ["abx:penicillin"]
+
+
+# ---------------------------------------------------------------------------
+# Path canonicalisation
+# ---------------------------------------------------------------------------
+
+
+class TestSourcePathCanonicalisation:
+    """``resolve_source`` keys the registry off a *canonical* remainder.
+
+    The tree-prefix strip is textual, so a caller can spell a real source
+    as ``sources/../../wiki/sources/<rel>`` and the OS walks it right back
+    into the tree. Resolving in one place means the whole system — the
+    registry, provenance, citations — agrees on one key per file, and a
+    path that escapes the tree is refused rather than silently reachable.
+    """
+
+    def _ingest(self, tmp_path: Path) -> tuple[WikiStore, str]:
+        store = WikiStore.init(tmp_path / "w")
+        doc = tmp_path / "memo.md"
+        doc.write_text("Memo body.\n", encoding="utf-8")
+        entry = store.add_source(doc)
+        return store, entry.rel_path
+
+    def test_a_dotdot_spelling_resolves_to_the_same_key(self, tmp_path: Path) -> None:
+        store, rel = self._ingest(tmp_path)
+        direct = store.get_source(f"sources/{rel}")
+        assert direct is not None
+
+        detour = store.get_source(f"sources/../../wiki/sources/{rel}")
+        assert detour is not None
+        # One file, one key — not two spellings with rows under only one.
+        assert detour.rel_path == direct.rel_path == rel
+
+    def test_resolve_source_canonicalises_the_remainder(self, tmp_path: Path) -> None:
+        store, rel = self._ingest(tmp_path)
+        resolved = resolve_source(store, f"sources/../../wiki/sources/{rel}")
+        assert resolved is not None
+        tree, remainder = resolved
+        assert tree.name == "sources"
+        # The remainder is the registry's key, not the spelling handed in.
+        assert remainder == rel
+
+    def test_resolve_source_refuses_a_path_escaping_the_tree(
+        self, tmp_path: Path
+    ) -> None:
+        store, _rel = self._ingest(tmp_path)
+        # A real file, reachable on disk by walking out of the tree — and
+        # still not a source, because it is not *in* the tree.
+        assert (store.sources_path / ".." / "AGENTS.md").is_file()
+        assert resolve_source(store, "sources/../AGENTS.md") is None

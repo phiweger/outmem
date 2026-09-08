@@ -536,58 +536,59 @@ agent = Agent(
 
 ---
 
-## Restricted content — serving one wiki to people with different access
+## Several wikis in one repository
 
-Some wikis hold material only part of the organisation may see. outmem
-gates that **deterministically**, at the store layer, before anything
-becomes prompt text — nothing in the enforcement path depends on a model
-behaving correctly.
+Some organisations hold material only part of the company may see. outmem
+separates that by **putting each audience in its own wiki**, inside one git
+repository.
 
-Content is open by default; a wiki that declares no labels is unaffected.
+A wiki is the compartment. Within a wiki everything is open; a session is
+permitted a *set of wikis* up front, and every store it holds is one it may
+read in full. Nothing at read time decides what to hide — so there is no
+filtering code, and no filtering bug.
 
 ```yaml
-# config.yaml
-restricted:
-  labels: [hr, legal]      # the declared vocabulary
-  paths: {"hr:*": [hr]}    # safety net: anything under hr: is restricted
-  sources: {"hr/*": [hr]}  # ...and anything ingested into hr/
+# wikis.yaml, at the repository root
+tags:
+  everyone: {description: "All employees"}
+  legal:    {description: "Legal counsel"}
+wikis:
+  open:  {path: wikis/open,  title: "Handbook", audience: [everyone]}
+  legal: {path: wikis/legal, title: "Legal",    audience: [legal]}
 ```
 
 ```bash
-# Label a document at the moment you are holding it. Every page ever
-# compiled from it inherits the label.
-outmem ingest severance-plan.md --into hr --restricted hr
+outmem repo init  --root /srv/memory
+outmem repo add   open  --root /srv/memory --audience everyone
+outmem repo tags  --root /srv/memory --json   # provision your user DB from this
 ```
 
 ```python
-from outmem.restricted import Grants
-from outmem.adapters.pydantic_ai import wiki_read_tools
+from outmem.repo import Repo
+from outmem.adapters.wikiset import wikiset_read_tools
 
-store = WikiStore.open("/srv/wiki")                     # operator, unfiltered
-view  = store.as_viewer(                                # per request
-    mode={"hr"},                                        # this session's scope
-    grants=Grants.reader("hr"),                         # what the user may see
-)
-tools = wiki_read_tools(view)                           # the model never sees `store`
+repo = Repo.open("/srv/memory")
+with repo.wikiset(audience=tags_for(current_user)) as wikis:   # open core + compartments
+    agent = Agent("anthropic:claude-sonnet-5", tools=wikiset_read_tools(wikis))
+    ...
 ```
 
-An item is visible when its labels are a subset of the session's mode,
-so open-by-default falls out of the subset relation rather than being a
-special case. A write requires labels *equal* to the mode, which
-confines whatever a session read to the compartment it read from. A
-hidden page answers exactly as a nonexistent one does — a
-distinguishable error would be an existence oracle.
+Your application maps its authenticated user to audience tags; outmem does one
+set-overlap test on names, once, before a store exists. The model then sees one
+knowledge base, with page names qualified `wiki/slug`.
 
-Assumes outmem runs server-side against a repository users cannot clone.
-The threat boundary, what is explicitly *not* protected, and a rollout
-order whose first four steps are safe to run while still serving the
-unrestricted store are in
-[`docs/restricted-content.md`](docs/restricted-content.md).
+This assumes outmem runs server-side and your users cannot read the repository
+— that is what makes choosing a wiki genuine access control rather than a
+display convention. Contract, host integration and gotchas in
+[`docs/multi-wiki.md`](docs/multi-wiki.md).
 
 ---
 
 ## Where to go next
 
+- [`docs/multi-wiki.md`](docs/multi-wiki.md) — several wikis in one
+  repository: audience tags, host integration, what crosses a wiki
+  boundary and what does not.
 - [`docs/cli.md`](docs/cli.md) — every subcommand with examples.
 - [`docs/search.md`](docs/search.md) — the search & retrieval workflow:
   `search_wiki` (strategy-driven) + `grep_wiki` (literal), and the
@@ -595,9 +596,6 @@ unrestricted store are in
 - [`docs/sources.md`](docs/sources.md) — the two source trees, what
   `--local` is for, and the guarantees around material you may read
   but not redistribute.
-- [`docs/restricted-content.md`](docs/restricted-content.md) — access
-  control for a served wiki: restriction labels, grants and session
-  mode, and why nothing in the enforcement path depends on a model.
 - [`docs/python-api.md`](docs/python-api.md) — `WikiStore` + the
   PydanticAI adapter + the standalone agent runtime.
 - [`docs/growing-the-wiki.md`](docs/growing-the-wiki.md) — reading

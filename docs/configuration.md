@@ -255,40 +255,6 @@ Note `retrieval.semantic_top_k` is distinct from `semantic.top_k` (which
 governs the `find_similar` tool): `search_wiki` with a `semantic`/`hyde`
 strategy uses `retrieval.semantic_top_k`.
 
-## `restricted:` — access control for a served wiki
-
-Absent by default, and a wiki that declares no labels behaves exactly
-as it did before this block existed.
-
-```yaml
-restricted:
-  labels: [hr, legal, board]     # the declared vocabulary
-  paths:                          # safety net for pages
-    "hr:*": [hr]
-  sources:                        # safety net for ingested documents
-    "hr/*": [hr]
-```
-
-`labels` is the whole vocabulary. A label used anywhere but absent from
-it hides its content from **everyone**, including the people it was
-meant for; `outmem lint` reports that as an error.
-
-`paths` and `sources` are safety nets, not the primary mechanism —
-explicit `restricted:` frontmatter and `outmem ingest --restricted` are.
-They exist because explicit labels can be forgotten: a new page under
-`hr:` is restricted whether or not anyone edited its frontmatter. A
-pattern ending `:*` or `/*` covers the bare prefix too, so `hr:*`
-includes the namespace root page `hr`.
-
-**This block is deliberately not forgiving.** Every other setting here
-degrades a feature when it is wrong; this one degrades a boundary. A
-malformed block refuses to open the wiki rather than falling back to
-defaults, and unparseable YAML in a `config.yaml` carrying a
-top-level `restricted:` key is fatal — otherwise a syntax error would drop
-the whole file and open the wiki with access control silently off.
-
-Full contract in [`restricted-content.md`](restricted-content.md).
-
 ## Sample `.env`
 
 ```dotenv
@@ -338,3 +304,47 @@ GPG signing is **off** for agent commits in v0.1 (spec §12). Outmem's
 `commit_as` sets `-c commit.gpgsign=false` per commit; your global
 `commit.gpgsign=true` is not affected (it just doesn't apply to the
 agent's commits). Re-enabling signing is a v0.2 deferral.
+
+---
+
+## `wikis.yaml` — several wikis in one repository
+
+A *multi-wiki repository* holds several wikis side by side and declares them in
+a `wikis.yaml` at its root. Each wiki keeps its own `config.yaml`; this file
+sits above them all and says which wikis exist and who may open each.
+
+```yaml
+version: 1
+
+tags:                                     # the declared vocabulary
+  everyone: {description: "All employees"}
+  legal:    {description: "Legal counsel"}
+  exec:     {description: "Executive team"}
+
+wikis:
+  open:  {path: wikis/open,  title: "Handbook", audience: [everyone]}
+  legal: {path: wikis/legal, title: "Legal",    audience: [legal, exec]}
+```
+
+| Key | Meaning |
+|---|---|
+| `version` | Registry format version. `1` today. |
+| `tags` | The declared audience vocabulary, `name: {description}`. Provision your user database against this. |
+| `wikis.<name>.path` | Directory relative to the repository root. Defaults to `wikis/<name>`. |
+| `wikis.<name>.title` | Human-readable name for catalogues and pickers. |
+| `wikis.<name>.audience` | Tags that reach this wiki. **One shared tag is enough.** |
+
+Wiki names are slug-like — lowercase letters, digits, `.`, `_`, `-` — because
+they appear in commit subjects (`legal/ compact: nda`) and as slug qualifiers
+(`legal/nda`).
+
+A tag used in an `audience:` but absent from `tags:` makes its wiki *silently
+unreachable*: nobody can be granted a tag nobody knows exists. `outmem lint
+--repo` reports it as an error, along with wikis nothing reaches and
+wiki-shaped directories the registry never listed.
+
+The file is committed by `outmem repo init` / `repo add`. It has to be: outmem
+reads it from the working tree, so untracked it would not survive a clone and
+every wiki would look standalone.
+
+See [`multi-wiki.md`](multi-wiki.md) for the full picture.

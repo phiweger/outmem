@@ -24,19 +24,26 @@ from outmem.git_ops import CommitInfo, log_for_paths, log_since
 from outmem.slug import PAGES_DIR, slug_to_relpath, validate_slug
 
 
-def _slug_relpath(wiki_dir: str, slug: str) -> str:
-    """Repo-relative path string for ``slug`` under ``wiki_dir/pages/``."""
-    return f"{wiki_dir}/{PAGES_DIR}/{slug_to_relpath(slug).as_posix()}"
+def _slug_relpath(wiki_dir: str, slug: str, prefix: str = "") -> str:
+    """Repo-relative path string for ``slug`` under ``wiki_dir/pages/``.
+
+    ``prefix`` is the wiki's location inside its repository (``""`` for a
+    standalone wiki), because ``git log`` pathspecs are resolved from the
+    repository root, not from the wiki.
+    """
+    return f"{prefix}{wiki_dir}/{PAGES_DIR}/{slug_to_relpath(slug).as_posix()}"
 
 
-def page_history(repo_path: Path, slug: str, *, wiki_dir: str = "wiki") -> list[CommitInfo]:
+def page_history(
+    repo_path: Path, slug: str, *, wiki_dir: str = "wiki", prefix: str = ""
+) -> list[CommitInfo]:
     """List every commit that touched the page for ``slug``, newest first.
 
     Uses ``--follow`` so renames are tracked. The slug is validated for
     safety before becoming a path component.
     """
     validate_slug(slug)
-    return log_since(repo_path, paths=[_slug_relpath(wiki_dir, slug)])
+    return log_since(repo_path, paths=[_slug_relpath(wiki_dir, slug, prefix)])
 
 
 def topic_evolution(
@@ -46,6 +53,7 @@ def topic_evolution(
     wiki_dir: str = "wiki",
     include_log: bool = True,
     log_dir: str = "log",
+    prefix: str = "",
 ) -> str:
     """Return the chronological diff stream across the given wiki pages.
 
@@ -63,9 +71,9 @@ def topic_evolution(
     paths: list[str] = []
     for slug in slugs:
         validate_slug(slug)
-        paths.append(_slug_relpath(wiki_dir, slug))
+        paths.append(_slug_relpath(wiki_dir, slug, prefix))
     if include_log:
-        paths.append(f"{log_dir}/")
+        paths.append(f"{prefix}{log_dir}/")
 
     # ``git log --follow`` only accepts a single pathspec. When the caller
     # asks for evolution across multiple paths we drop ``--follow`` (the

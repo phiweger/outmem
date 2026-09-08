@@ -164,7 +164,7 @@ async def ask(
         with suppress(OutmemError):
             store.pull()
 
-    head_before = head_or_none(store.root)
+    head_before = head_or_none(store.repo)
 
     agent = build_agent(store, model=model, **opts.agent_kwargs)
     try:
@@ -191,7 +191,7 @@ async def ask(
         # into the user-visible message so the failure is debuggable —
         # the bare PydanticAI message ("Tool 'X' exceeded max retries")
         # says nothing about WHAT was wrong with the arguments.
-        head_after_failure = head_or_none(store.root)
+        head_after_failure = head_or_none(store.repo)
         partial_commits = _new_agent_commits(head_before, head_after_failure, store)
         detail = format_validation_detail(exc)
         raise WritebackError(
@@ -211,7 +211,7 @@ async def ask(
             ", ".join(truncated_writes),
         )
 
-    head_after = head_or_none(store.root)
+    head_after = head_or_none(store.repo)
     commits = _new_agent_commits(head_before, head_after, store)
 
     if not commits:
@@ -297,7 +297,7 @@ def _new_agent_commits(
         return []
     agent_email = store.config.agent_identity.email
     range_spec = head_after if head_before is None else f"{head_before}..{head_after}"
-    return log_range(store.root, range_spec=range_spec, author=agent_email)
+    return log_range(store.repo, range_spec=range_spec, author=agent_email)
 
 
 def _push_with_retry(store: WikiStore) -> _PushOutcome:
@@ -316,7 +316,7 @@ def _push_with_retry(store: WikiStore) -> _PushOutcome:
     user that the writeback raced with another author (spec §9:
     re-read affected file).
     """
-    if not has_remote(store.root, remote=store.config.remote):
+    if not has_remote(store.repo, remote=store.config.remote):
         log.info(
             "no '%s' remote configured; local commits are the writeback",
             store.config.remote,

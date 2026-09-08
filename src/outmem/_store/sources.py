@@ -8,14 +8,13 @@ methods, which forward here.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from outmem.exceptions import OutmemError
-from outmem.restricted import normalise_labels
 from outmem.slug import extract_slug_references
 from outmem.sources import (
     REGISTRY_FILENAME,
@@ -174,26 +173,6 @@ def _ambiguous_identity_error(
     return OutmemError("\n".join(lines))
 
 
-def _ingest_labels(
-    store: WikiStore, rel_path: str, explicit: Iterable[str] | None
-) -> frozenset[str]:
-    """Labels for a source being ingested: explicit ``--restricted`` plus
-    whatever ``restricted.sources`` path rules match, unioned.
-
-    The union is the fail-safe direction, and it is why the path rule is
-    worth having at all: an operator who drops a file into ``hr/`` and
-    forgets the flag still gets a restricted source. Explicit labels are
-    validated against the declared set here — this is a person choosing a
-    label with the document in front of them, which is the moment a typo
-    is cheap to fix.
-    """
-    settings = store.restrictions
-    chosen = normalise_labels(explicit)
-    if chosen:
-        settings.check_declared(chosen)
-    return chosen | settings.labels_for_source(rel_path)
-
-
 def add_source(
     store: WikiStore,
     source: str | Path,
@@ -203,7 +182,6 @@ def add_source(
     as_key: str | None = None,
     local: bool = False,
     commit: bool = True,
-    restricted: Iterable[str] | None = None,
 ) -> SourceEntry:
     source_path = Path(source).expanduser()
     if local:
@@ -222,7 +200,6 @@ def add_source(
     # relative/absolute mix makes `distinguishing_segment` diverge at the
     # root and propose a name that distinguishes nothing.
     origin = str(source_path.resolve())
-    labels = _ingest_labels(store, rel_path, restricted)
 
     existing = registry.entries.get(rel_path)
     if existing and existing.sha256 == sha:
@@ -230,25 +207,6 @@ def add_source(
         # explicit `--as` still has to land, because "re-ingest with
         # `--as <name>`" is exactly what `sources backfill` tells the
         # operator to do about an ambiguous group.
-        #
-        # Labels land here too, for the same reason: re-ingesting the
-        # same bytes with `--restricted hr` is how an operator corrects a
-        # source they should have labelled the first time. Widening only
-        # — `set_restricted` refuses to drop a label without the
-        # privileged path.
-        if labels and not labels <= existing.restricted:
-            registry.set_restricted(rel_path, existing.restricted | labels)
-            # HEAD is the label index's validity token, and a local-tree
-            # ingest commits nothing — so re-ingesting with `--restricted`,
-            # the documented way to correct a mislabelled source, would
-            # land on disk and never reach a live view. Say so directly.
-            store._label_cache.invalidate()
-            store._label_cache.note_registry_write(store)
-            if commit and tree.tracked:
-                store._commit_paths(
-                    [tree.repo_registry_relpath],
-                    subject=f"restrict: {rel_path}",
-                )
         if as_key is None:
             return replace(existing, local=not tree.tracked)
         return replace(
@@ -274,7 +232,6 @@ def add_source(
             # A *derived* key that is already taken is unresolvable; a
             # declared one means "supersede that".
             derived_key=as_key is None,
-            restricted=labels,
         )
     except DocumentKeyConflict as conflict:
         _unlink_orphan(dest, tree.path)
@@ -285,9 +242,6 @@ def add_source(
     # the returned copy so the caller's `citation_path` is right without
     # a second lookup.
     entry = replace(entry, local=not tree.tracked)
-    if labels:
-        store._label_cache.invalidate()
-        store._label_cache.note_registry_write(store)
     record_source_refs(store, rel_path, tree)
     # A local ingest has nothing to commit: both the file and its
     # registry live inside the gitignored tree. Committing here would be
@@ -413,17 +367,17 @@ def _canonical_within(tree: SourceTree, remainder: str) -> str | None:
     """``remainder`` as the registry would key it, or ``None`` if it
     points outside the tree.
 
-    The prefix strip above is textual, so a caller can hand in
-    ``sources/../../wiki/sources/<rel>`` and the OS will walk it right
-    back into the tree — a real file, reached under a key the registry
-    has never held. Returning the *unnormalised* remainder was how
-    `read_source` came to serve a restricted file: every label lookup
-    keys on what this function returns, and it was returning a spelling
-    no label was ever stored under.
+    The prefix strip in :func:`split_tree_prefix` is textual, so a caller
+    can hand in ``sources/../../wiki/sources/<rel>`` and the OS will walk
+    it right back into the tree — a real file, reached under a key the
+    registry has never held. Every per-source lookup (provenance,
+    citations, ingestion state) is keyed on what this function returns,
+    so returning the unnormalised spelling meant one file could be
+    reached under two keys, only one of which had rows.
 
-    Resolving here rather than at each call site means the canonical
-    form is what the whole system agrees on, and a path that escapes the
-    tree is refused rather than silently reachable.
+    Resolving here rather than at each call site means the canonical form
+    is what the whole system agrees on, and a path that escapes the tree
+    is refused rather than silently reachable.
     """
     try:
         resolved = (tree.path / remainder).resolve()
