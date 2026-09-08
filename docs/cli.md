@@ -118,7 +118,7 @@ Because the path embeds the content hash, a *revised* document lands at a new
 path and looks like an unrelated source. `--as` gives it a name that survives
 the revision, so the new version **supersedes** the old one instead of
 accumulating beside it. Nothing is deleted — the old file, its sha and its
-ingestion history stay put, which is exactly what [`outmem stale`](#staleness)
+ingestion history stay put, which is exactly what [`outmem stale`](#staleness--pages-citing-a-superseded-source)
 needs to find the pages compacted from a version that is no longer current.
 
 When you omit `--as`, outmem derives the name from the path — and **refuses the
