@@ -1683,6 +1683,15 @@ class WikiStore:
             if not topic.strip():
                 raise OutmemError("append_log: topic must be non-empty.")
             self._require_write_grant()
+            if self._mode is not None:
+                # Closure applies to a log entry exactly as it does to a
+                # page: the entry is an item, its labels are the
+                # partition it lands in, and a `[[slug]]` in its body is
+                # a reference. Without this an open session could write
+                # `[[hr:severance]]` into the open log, where every open
+                # reader can grep it — the same disclosure the page
+                # check refuses, through a file type it did not cover.
+                self._check_closure(content, self._mode, self._labels())
             ts = ensure_utc(when) if when else utc_now()
             log_date = ts.date()
             partition = mode_dirname(self._mode or ())

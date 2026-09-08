@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -194,6 +194,7 @@ def lint_wiki(
         pages,
         wiki_dir=wiki_dir,
         pages_dir=pages_dir,
+        log_dir=log_dir,
         sources_dir=sources_dir,
         sources_local_dir=sources_local_dir,
         settings=restricted,
@@ -1517,6 +1518,7 @@ def _check_restrictions(
     *,
     wiki_dir: Path,
     pages_dir: Path,
+    log_dir: Path | None,
     sources_dir: Path | None,
     sources_local_dir: Path | None,
     settings: RestrictedSettings | None,
@@ -1559,6 +1561,19 @@ def _check_restrictions(
     _check_restricted_links(pages, effective, report)
     _check_restricted_mentions(pages, effective, report)
     _check_unreadable_frontmatter(pages_dir, wiki_dir, report)
+    # Closure holds for pages because the write path enforces it. The
+    # other two trees hold text too, and a slug written into either of
+    # them discloses exactly as much — so they are verified rather than
+    # assumed.
+    _check_restricted_tree_references(
+        effective,
+        settings=settings,
+        log_dir=log_dir,
+        sources_dir=sources_dir,
+        sources_local_dir=sources_local_dir,
+        source_labels=source_labels,
+        report=report,
+    )
 
 
 def _registry_labels(
@@ -1802,3 +1817,97 @@ def _check_unreadable_frontmatter(
                     ),
                 )
             )
+
+
+def _check_restricted_tree_references(
+    effective: dict[str, frozenset[str]],
+    *,
+    settings: RestrictedSettings,
+    log_dir: Path | None,
+    sources_dir: Path | None,
+    sources_local_dir: Path | None,
+    source_labels: dict[str, frozenset[str]],
+    report: LintReport,
+) -> None:
+    """Closure over ``log/`` and the source trees, not just ``wiki/pages/``.
+
+    A restricted slug named in an open log entry, or in an open source
+    document, discloses exactly what one named in an open page does —
+    and until this check existed, only the page was looked at. The write
+    path now refuses both for a session, but neither covers what an
+    operator wrote by hand or what a source arrived carrying, which is
+    the case lint is here for.
+
+    Reported as a WARNING for the same reason
+    ``restricted-slug-mentioned`` is: a log entry is a historical record
+    and a source is frozen bytes, so neither can simply be rewritten,
+    and the fix is a judgement (redact, relabel the file, or accept).
+    """
+    for path, labels, kind in _restricted_tree_files(
+        settings=settings,
+        log_dir=log_dir,
+        sources_dir=sources_dir,
+        sources_local_dir=sources_local_dir,
+        source_labels=source_labels,
+    ):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        named = {ref.slug for ref in extract_slug_references(text)}
+        exceeding = sorted(
+            slug
+            for slug in named
+            if slug in effective and not effective[slug] <= labels
+        )
+        if not exceeding:
+            continue
+        shown = ", ".join(exceeding[:3]) + (
+            f", … ({len(exceeding)} total)" if len(exceeding) > 3 else ""
+        )
+        report.findings.append(
+            LintFinding(
+                kind="restricted-slug-mentioned",
+                severity=Severity.WARNING,
+                path=str(path),
+                message=(
+                    f"this {kind} is [{', '.join(sorted(labels)) or 'open'}] but "
+                    f"names restricted page(s): {shown}. Every reader of the "
+                    f"{kind} learns those slugs."
+                ),
+            )
+        )
+
+
+def _restricted_tree_files(
+    *,
+    settings: RestrictedSettings,
+    log_dir: Path | None,
+    sources_dir: Path | None,
+    sources_local_dir: Path | None,
+    source_labels: dict[str, frozenset[str]],
+) -> Iterator[tuple[Path, frozenset[str], str]]:
+    """``(file, its labels, what to call it)`` for every log and source."""
+    from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
+
+    if log_dir is not None and log_dir.is_dir():
+        for path in sorted(log_dir.rglob("*.md")):
+            rel = path.relative_to(log_dir)
+            # `log/<date>.md` is the open partition; `log/<labels>/<date>.md`
+            # carries the compartment that wrote it.
+            partition = rel.parts[0] if len(rel.parts) > 1 else ""
+            labels = settings.mode_from_log_dirname(partition)
+            yield path, (labels if labels is not None else frozenset()), "log entry"
+
+    for directory, prefix in (
+        (sources_dir, SOURCES_DIR),
+        (sources_local_dir, SOURCES_LOCAL_DIR),
+    ):
+        if directory is None or not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            key = path.relative_to(directory).as_posix()
+            labels = source_labels.get(f"{prefix}/{key}", frozenset())
+            yield path, labels, "source"

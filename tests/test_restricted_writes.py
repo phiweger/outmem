@@ -675,3 +675,58 @@ def test_a_hidden_page_blocks_its_slug_generically(store: WikiStore) -> None:
     with pytest.raises(OutmemError) as caught:
         view.write_page("hr:severance", title="Mine", body="Text.\n")
     assert "Twelve weeks" not in str(caught.value)
+
+
+class TestClosureCoversLogEntries:
+    """A log entry is an item: its labels are the partition it lands in,
+    and a `[[slug]]` in its body is a reference like any other.
+
+    Without this an open session could write `[[hr:severance]]` into the
+    open log, where every open reader can grep it — the same disclosure
+    the page check refuses, through a file type it did not cover. The
+    log is also where mandatory writeback pushes an agent when nothing
+    else was warranted, so it is not a rare path.
+    """
+
+    def test_an_open_session_cannot_name_a_restricted_page(
+        self, open_writer: WikiStore
+    ) -> None:
+        with pytest.raises(RestrictionError, match="outside this session"):
+            open_writer.append_log(topic="t", content="See [[hr:severance]].\n")
+
+    def test_nor_can_one_compartment_name_another(
+        self, store: WikiStore
+    ) -> None:
+        """The sibling case — the one that matters most, since neither
+        compartment is a superset of the other."""
+        store.write_page(
+            "legal:case", title="C", body="A case.\n", extra={"restricted": ["legal"]}
+        )
+        hr = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        with pytest.raises(RestrictionError):
+            hr.append_log(topic="t", content="See [[legal:case]].\n")
+
+    def test_a_compartment_may_name_its_own_pages(self, hr: WikiStore) -> None:
+        hr.append_log(topic="t", content="Reviewed [[hr:severance]].\n")
+        assert hr.search("Reviewed", scope="log").hits
+
+    def test_and_may_name_open_ones(self, hr: WikiStore) -> None:
+        """Linking up is always safe: everyone who can read the HR log
+        can already read the glossary."""
+        hr.append_log(topic="t", content="See [[glossary]].\n")
+        assert hr.search("glossary", scope="log").hits
+
+    def test_an_open_session_may_name_open_pages(
+        self, open_writer: WikiStore
+    ) -> None:
+        open_writer.append_log(topic="t", content="See [[glossary]].\n")
+        assert open_writer.search("glossary", scope="log").hits
+
+    def test_a_dangling_link_passes(self, open_writer: WikiStore) -> None:
+        open_writer.append_log(topic="t", content="See [[no:such:page]].\n")
+
+    def test_the_operator_is_not_gated(self, store: WikiStore) -> None:
+        """The bare store has no mode; `outmem lint` is what reports a
+        cross-border mention it writes."""
+        store.append_log(topic="t", content="See [[hr:severance]].\n")
+        assert store.search("severance", scope="log").hits

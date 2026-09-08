@@ -344,3 +344,72 @@ class TestCliRunsThem:
 
         assert main(["lint", "--root", str(root)]) == 2
         assert "restricted-link-violation" in capsys.readouterr().out
+
+
+class TestClosureCoversTheOtherTrees:
+    """Closure was enforced and verified for `wiki/pages/` only.
+
+    A restricted slug named in an open log entry, or in an open source
+    document, discloses exactly what one named in an open page does —
+    and `log/` and `sources/` hold text too. The write path refuses both
+    for a session now; lint is what covers what an operator wrote by
+    hand and what a source arrived carrying.
+    """
+
+    def test_an_open_log_entry_naming_a_restricted_slug(
+        self, store: WikiStore
+    ) -> None:
+        store.write_page(
+            "hr:pay", title="P", body="Bands.\n", extra={"restricted": ["hr"]}
+        )
+        store.append_log(topic="t", content="Gap: nothing covers [[hr:pay]].\n")
+        findings = [
+            f for f in _run(store).findings if f.kind == "restricted-slug-mentioned"
+        ]
+        assert findings
+        assert "log entry" in findings[0].message
+
+    def test_an_open_source_naming_a_restricted_slug(
+        self, store: WikiStore, tmp_path: Path
+    ) -> None:
+        store.write_page(
+            "hr:pay", title="P", body="Bands.\n", extra={"restricted": ["hr"]}
+        )
+        doc = tmp_path / "public-note.md"
+        doc.write_text("Background. See [[hr:pay]] for detail.\n")
+        store.add_source(doc)
+        findings = [
+            f for f in _run(store).findings if f.kind == "restricted-slug-mentioned"
+        ]
+        assert any("source" in f.message for f in findings)
+
+    def test_a_log_entry_in_the_matching_partition_is_clean(
+        self, store: WikiStore
+    ) -> None:
+        """The compartment's own log may name its own pages."""
+        from outmem.restricted import Grants
+
+        store.write_page(
+            "hr:pay", title="P", body="Bands.\n", extra={"restricted": ["hr"]}
+        )
+        hr = store.as_viewer(mode={"hr"}, grants=Grants.writer("hr"))
+        hr.append_log(topic="t", content="Reviewed [[hr:pay]].\n")
+        assert "restricted-slug-mentioned" not in _kinds(_run(store))
+
+    def test_an_open_log_naming_an_open_page_is_clean(
+        self, store: WikiStore
+    ) -> None:
+        store.write_page("glossary", title="G", body="Terms.\n")
+        store.append_log(topic="t", content="Updated [[glossary]].\n")
+        assert "restricted-slug-mentioned" not in _kinds(_run(store))
+
+    def test_a_restricted_source_may_name_its_own_compartment(
+        self, store: WikiStore, tmp_path: Path
+    ) -> None:
+        store.write_page(
+            "hr:pay", title="P", body="Bands.\n", extra={"restricted": ["hr"]}
+        )
+        doc = tmp_path / "hr-note.md"
+        doc.write_text("See [[hr:pay]].\n")
+        store.add_source(doc, restricted=["hr"])
+        assert "restricted-slug-mentioned" not in _kinds(_run(store))

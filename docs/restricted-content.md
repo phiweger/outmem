@@ -233,13 +233,28 @@ see everything it points at. Filtering the page list achieves nothing if
 an open page's body contains `[[hr:severance-policy]]`, because reading
 the open page hands over the slug.
 
-Each of the three kinds of reference is held to it by a different
-mechanism. **Wikilinks** are checked in the body at write time.
-**Provenance** is covered by inheritance: citing a restricted source
-raises the page's own labels, so a page can never end up below what it
-cites. **Aliases** cannot break it because an alias derives its labels
-from the page it resolves to, and never from or onto a name a live page
-already occupies.
+Each kind of reference is held to it by a different mechanism.
+**Wikilinks** are checked in the body at write time — in pages and in
+log entries alike, since a log entry is an item too and its labels are
+the partition it lands in. **Provenance** is covered by inheritance:
+citing a restricted source raises the page's own labels, so a page can
+never end up below what it cites. **Aliases** cannot break it because an
+alias derives its labels from the page it resolves to, and never from or
+onto a name a live page already occupies.
+
+Note that closure runs between *sibling* compartments, not just between
+restricted and open. Neither `hr` nor `legal` is a subset of the other,
+so a page or log entry in one may not name an item in the other — only
+items it is itself a superset of, which in practice means its own
+compartment and open content.
+
+`outmem lint` verifies the same invariant over content already on disk,
+across all three trees: `restricted-link-violation` for pages, and
+`restricted-slug-mentioned` for a slug named in prose, in a log entry,
+or inside a source document. The last two are warnings rather than
+errors — a log entry is a historical record and a source is frozen
+bytes, so neither can simply be rewritten, and the fix is a judgement
+(redact it, relabel the file, or accept it).
 
 **Per-mode logs.** A restricted session writes `log/<label-set>/<date>.md`
 rather than `log/<date>.md`. The log is otherwise an open file and

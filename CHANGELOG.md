@@ -126,7 +126,14 @@ contract, threat boundary and rollout order in
   longer told to call tools it does not have.
 - **A restricted session writes `log/<label-set>/<date>.md`.** The open
   mode is unpartitioned, so a wiki with no restrictions has nothing to
-  migrate.
+  migrate. Log entries are held to closure like pages are: a `[[slug]]`
+  in an entry may not name an item more restricted than the partition
+  it lands in.
+- **`outmem lint` checks closure across all three trees.** A restricted
+  slug named in an open log entry or inside an open source document
+  discloses exactly what one named in an open page does, and only the
+  page was being looked at. Reported as a warning, since a log entry is
+  a historical record and a source is frozen bytes.
 - **`store.corpus_token()` and the label index read HEAD from
   `.git/HEAD` rather than by forking `git rev-parse`.** A visibility
   check on a view was paying ~2 ms of subprocess per call; it is now
