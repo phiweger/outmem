@@ -3,6 +3,59 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.16.1
+
+Fixes to the restricted-content boundary shipped in 0.16.0, found by
+adversarial review and by a deployment report. **Upgrade if you use
+`restricted:`** — one of these is a fail-open.
+
+### Fixed
+
+- **A source restricted by another process could stay readable
+  indefinitely** on a wiki with no `.git`. `SourceRegistry` holds an
+  in-memory snapshot taken at load, and the code path that serves such a
+  wiki was missing the step that drops that snapshot before rebuilding
+  the label index — so it re-read the labels this process saw last time
+  and cached them under the *new* fingerprint, which meant it never
+  healed. An open view both listed the source and read its bytes. Wikis
+  with a repository were never affected.
+- **Closure now covers log entries and source documents, not just
+  pages.** A restricted slug named in an open log entry discloses
+  exactly what one named in an open page does, and `append_log` was not
+  checking. It is checked at write time now, against the labels of the
+  partition the entry lands in, and `outmem lint` verifies the same
+  invariant across all three trees — reported as a warning, since a log
+  entry is a historical record and a source is frozen bytes.
+- **A crash under concurrent reads** on a wiki with no `.git`: the
+  cache's fast path could return `None` into a visibility check when
+  another thread invalidated the index between the check and the read.
+
+### Performance
+
+- **A wiki with no `.git` no longer rebuilds the label index on every
+  visibility check.** The index is keyed on HEAD, so a deployment that
+  strips the repository had no token and rebuilt constantly — measured
+  on 1200 pages at 648 ms per check against 0.10 ms with a repo, and
+  entirely silent. It now caches for 5 seconds and says so once, naming
+  the cause; when the window elapses it stats the page tree before
+  parsing it, so a corpus that never changes costs one cheap walk per
+  window rather than a full parse forever. Source labels can still move
+  without a commit and are caught by the registry fingerprint rather
+  than the clock. Keeping `.git` in the deployed copy remains strictly
+  better and costs a few MB — a depth-1 clone is enough.
+- **Packed refs and worktrees are off the subprocess path.** 0.16.0
+  read HEAD from `.git/HEAD` but fell back to `git rev-parse` for both
+  shapes — 2.1 ms per visibility check against 0.08 ms — and `git gc
+  --auto` packs refs on any long-lived server-side repository, moving it
+  there without anybody choosing it.
+
+### Changed
+
+- **The "no reachable HEAD" warning says which case it is.** A `.git`
+  directory with no HEAD, an unreadable HEAD, and a branch with no
+  commits were all told to keep their `.git` while `.git` was sitting
+  right there.
+
 ## 0.16.0
 
 **Restricted content.** Some wikis hold material only part of an
@@ -126,34 +179,12 @@ contract, threat boundary and rollout order in
   longer told to call tools it does not have.
 - **A restricted session writes `log/<label-set>/<date>.md`.** The open
   mode is unpartitioned, so a wiki with no restrictions has nothing to
-  migrate. Log entries are held to closure like pages are: a `[[slug]]`
-  in an entry may not name an item more restricted than the partition
-  it lands in.
-- **`outmem lint` checks closure across all three trees.** A restricted
-  slug named in an open log entry or inside an open source document
-  discloses exactly what one named in an open page does, and only the
-  page was being looked at. Reported as a warning, since a log entry is
-  a historical record and a source is frozen bytes.
+  migrate.
 - **`store.corpus_token()` and the label index read HEAD from
   `.git/HEAD` rather than by forking `git rev-parse`.** A visibility
   check on a view was paying ~2 ms of subprocess per call; it is now
   two `stat`s. Unusual repository shapes (worktrees, packed refs) still
   fall back to git, so the token is never weaker — only cheaper.
-- **A wiki with no `.git` no longer rebuilds the label index on every
-  visibility check.** The index is keyed on HEAD, so a deployment that
-  strips the repository had no token and rebuilt constantly — measured
-  on 1200 pages at 648 ms per check against 0.10 ms with a repo, and
-  silent. Such a wiki cannot be written through outmem anyway (every
-  *page* write commits), so it now uses a 5-second cache and says so
-  once, naming the cause. When the window elapses it stats the page tree
-  before parsing it, so a corpus that never changes costs one cheap walk
-  per window rather than a full parse forever. Source labels can still
-  move without a commit and are caught by the registry fingerprint, not
-  the clock. Keeping `.git` remains strictly better and costs a few MB.
-- **Packed refs and worktrees no longer cost a subprocess per visibility
-  check.** `git gc --auto` packs refs on any long-lived server-side
-  repository, which silently moved it onto a `git rev-parse` per call
-  (28x slower); a worktree, whose `.git` is a file, did the same.
 - **`add_source` takes the write lock**, like every other
   commit-producing path. The registry was already safe across processes
   — SQLite serialises the writers — but the git half was not: two
