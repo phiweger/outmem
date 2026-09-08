@@ -567,9 +567,10 @@ outmem repo tags  --root /srv/memory --json   # provision your user DB from this
 from outmem.repo import Repo
 from outmem.adapters.wikiset import wikiset_read_tools
 
-repo  = Repo.open("/srv/memory")
-wikis = repo.wikiset(audience=tags_for(current_user))   # open core + compartments
-agent = Agent("anthropic:claude-sonnet-5", tools=wikiset_read_tools(wikis))
+repo = Repo.open("/srv/memory")
+with repo.wikiset(audience=tags_for(current_user)) as wikis:   # open core + compartments
+    agent = Agent("anthropic:claude-sonnet-5", tools=wikiset_read_tools(wikis))
+    ...
 ```
 
 Your application maps its authenticated user to audience tags; outmem does one

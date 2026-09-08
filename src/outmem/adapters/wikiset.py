@@ -124,17 +124,26 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
             case_insensitive: Match without regard to case.
         """
         try:
-            hits = wikis.search(pattern, case_insensitive=case_insensitive)
+            result = wikis.search(pattern, case_insensitive=case_insensitive)
         except OutmemError as exc:
             return f"(search failed: {exc})"
-        if not hits:
-            return f"(no matches for {pattern!r} in: {', '.join(wikis.names)})"
         lines = [
             f"{h.wiki}/{h.hit.path}:{h.hit.line_number}: {h.hit.text.rstrip()}"
-            for h in hits
+            for h in result.hits
             if h.hit.is_match
         ]
-        return "\n".join(lines) if lines else f"(no matches for {pattern!r})"
+        if not lines:
+            return f"(no matches for {pattern!r} in: {', '.join(wikis.names)})"
+        if result.truncated:
+            # Never let a clipped result read as a complete one. The model
+            # will otherwise conclude the wiki holds nothing more and stop
+            # looking.
+            where = ", ".join(result.truncated)
+            lines.append(
+                f"(results from {where} were truncated at the output cap — "
+                "narrow the pattern)"
+            )
+        return "\n".join(lines)
 
     def search_wiki(question: str, k: int = 5) -> str:
         """Meaning-based search across every wiki in this session.

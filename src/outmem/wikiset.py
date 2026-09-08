@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from outmem.exceptions import OutmemError
+from outmem.search import DEFAULT_RESULT_BYTES
 
 if TYPE_CHECKING:
     from outmem.search import SearchHit
@@ -71,6 +72,20 @@ class QualifiedMatch:
     @property
     def rel_path(self) -> str:
         return f"{self.wiki}{QUALIFIER}{self.match.rel_path}"
+
+
+@dataclass(frozen=True)
+class FederatedSearch:
+    """Merged search results, and which wikis had to clip theirs.
+
+    `truncated` is a tuple of wiki names rather than a bool because the
+    answer "some of this is missing" is only actionable if you know
+    *where* from — and a single wiki hitting its output cap must not make
+    the whole result look clipped.
+    """
+
+    hits: tuple[QualifiedHit, ...]
+    truncated: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -202,21 +217,57 @@ class WikiSet:
 
     # -- retrieval -----------------------------------------------------
 
-    def search(self, pattern: str, **kwargs: object) -> list[QualifiedHit]:
+    def search(
+        self,
+        pattern: str,
+        *,
+        scope: str = "wiki",
+        case_insensitive: bool = False,
+        fixed_strings: bool = False,
+        context: int = 0,
+        max_bytes: int = DEFAULT_RESULT_BYTES,
+        max_hits: int | None = None,
+    ) -> FederatedSearch:
         """Fan a literal/regex search across the set.
 
         Results come back in wiki order with their hits in each wiki's own
         order. `rg` scores nothing, so there is no cross-wiki ranking
         question here — that arrives with the semantic leg below.
+
+        The per-wiki output cap applies per wiki, so any of them can clip
+        independently. Which ones did is reported rather than folded into
+        a single flag: a partial result that looks complete is worse than
+        no result, and the caller needs to know which wiki to narrow.
+
+        The keyword arguments mirror :meth:`outmem.store.WikiStore.search`
+        and are spelled out rather than forwarded as ``**kwargs`` — this
+        is a public surface, and a typo'd keyword should be a type error
+        here, not a ``TypeError`` from inside a loop over three wikis.
         """
-        out: list[QualifiedHit] = []
+        hits: list[QualifiedHit] = []
+        clipped: list[str] = []
         for name, store in self._stores.items():
-            result = store.search(pattern, **kwargs)  # type: ignore[arg-type]
-            out.extend(QualifiedHit(wiki=name, hit=h) for h in result.hits)
-        return out
+            result = store.search(
+                pattern,
+                scope=scope,
+                case_insensitive=case_insensitive,
+                fixed_strings=fixed_strings,
+                context=context,
+                max_bytes=max_bytes,
+                max_hits=max_hits,
+            )
+            hits.extend(QualifiedHit(wiki=name, hit=h) for h in result.hits)
+            if result.truncated:
+                clipped.append(name)
+        return FederatedSearch(hits=tuple(hits), truncated=tuple(clipped))
 
     def semantic_find_similar(
-        self, text: str, *, top_k: int | None = None, **kwargs: object
+        self,
+        text: str,
+        *,
+        top_k: int | None = None,
+        threshold: float | None = None,
+        exclude_slug: str | None = None,
     ) -> list[QualifiedMatch]:
         """Nearest chunks across the set, best first.
 
@@ -230,7 +281,10 @@ class WikiSet:
         merged: list[QualifiedMatch] = []
         for name, store in self._stores.items():
             for match in store.semantic_find_similar(
-                text, top_k=top_k, **kwargs  # type: ignore[arg-type]
+                text,
+                top_k=top_k,
+                threshold=threshold,
+                exclude_slug=exclude_slug,
             ):
                 merged.append(QualifiedMatch(wiki=name, match=match))
         merged.sort(key=lambda m: m.match.similarity, reverse=True)
@@ -239,3 +293,30 @@ class WikiSet:
     def semantic_available(self) -> bool:
         """True if any wiki in the set has a semantic index."""
         return any(s.semantic_available() for s in self._stores.values())
+
+    # -- lifecycle -----------------------------------------------------
+
+    def close(self) -> None:
+        """Release every store's SQLite handles.
+
+        Each store opens the vector store and both source registries
+        lazily and holds them. Dropping a set does *not* release them
+        promptly: the objects sit in reference cycles, so they survive
+        until the cycle collector runs. Measured over twenty
+        open-and-drop cycles on three wikis, six connections were open at
+        the end and `gc.collect()` took it back to zero — bounded, but by
+        the collector's schedule rather than by anything the caller
+        controls.
+
+        Closing makes it deterministic, which is what a server wants.
+        Build a set once per audience and keep it, or use it as a context
+        manager.
+        """
+        for store in self._stores.values():
+            store.close()
+
+    def __enter__(self) -> WikiSet:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()

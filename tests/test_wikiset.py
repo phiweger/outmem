@@ -103,7 +103,7 @@ class TestMembership:
         assert wikis.names == ("open",)
         assert wikis.list_slugs() == ["open/pricing", "open/shared"]
         assert not wikis.exists("nda")
-        assert wikis.search("NDA") == []
+        assert wikis.search("NDA").hits == ()
 
     def test_an_audience_reaching_nothing_is_an_error(self, repo: Path) -> None:
         # Better than an empty set that silently answers "I don't know"
@@ -153,12 +153,12 @@ class TestResolution:
 class TestFannedSearch:
     def test_hits_carry_their_wiki(self, repo: Path) -> None:
         wikis = Repo.open(repo).wikiset(audience={"everyone", "legal"})
-        hits = wikis.search("version")
+        hits = wikis.search("version").hits
         assert {h.wiki for h in hits} == {"open", "legal"}
 
     def test_results_follow_wiki_order(self, repo: Path) -> None:
         wikis = Repo.open(repo).wikiset(audience={"everyone", "legal"})
-        seen = [h.wiki for h in wikis.search("version")]
+        seen = [h.wiki for h in wikis.search("version").hits]
         assert seen == sorted(seen, key=lambda w: wikis.names.index(w))
 
 
@@ -253,3 +253,107 @@ class TestToolPalette:
         out = tools["read_page"]("shared")  # type: ignore[operator]
         assert out.startswith("# open/shared")
         assert "legal/shared" in out
+
+
+class TestLifecycle:
+    """A set owns its stores, so it has to be able to release them."""
+
+    def _open_db_fds(self) -> int:
+        import os
+
+        fds = Path("/proc/self/fd")
+        if not fds.is_dir():  # pragma: no cover — non-Linux
+            pytest.skip("needs /proc")
+        n = 0
+        for fd in fds.iterdir():
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.endswith(".db"):
+                n += 1
+        return n
+
+    def test_close_releases_every_stores_handles(self, repo: Path) -> None:
+        # Each store opens the vector store and both source registries
+        # lazily and holds them. Closing is what releases them at a time
+        # the caller chooses.
+        r = Repo.open(repo)
+        before = self._open_db_fds()
+        for _ in range(3):
+            wikis = r.wikiset(audience={"everyone", "hr", "legal"})
+            for _name, store in wikis:
+                store.list_sources()
+            wikis.close()
+        assert self._open_db_fds() == before
+
+    def test_it_works_as_a_context_manager(self, repo: Path) -> None:
+        r = Repo.open(repo)
+        before = self._open_db_fds()
+        with r.wikiset(audience={"everyone"}) as wikis:
+            for _name, store in wikis:
+                store.list_sources()
+            assert wikis.list_slugs()
+        assert self._open_db_fds() == before
+
+    def test_dropping_a_set_does_not_release_promptly(self, repo: Path) -> None:
+        # The other half of the claim, stated accurately: this is not an
+        # unbounded leak — the objects sit in reference cycles and the
+        # cycle collector does eventually reclaim them. What it is not is
+        # deterministic, so a server carries an unpredictable number of
+        # open connections until something runs. That is the reason
+        # `close` exists, and the reason the docs say to use it.
+        import gc
+
+        r = Repo.open(repo)
+        gc.collect()
+        before = self._open_db_fds()
+        for _ in range(6):
+            wikis = r.wikiset(audience={"everyone", "hr", "legal"})
+            for _name, store in wikis:
+                store.list_sources()
+            del wikis, store, _name
+        held = self._open_db_fds()
+        assert held > before
+        gc.collect()
+        assert self._open_db_fds() == before
+
+
+class TestTruncationIsVisible:
+    def test_a_clipped_wiki_is_named(self, repo: Path) -> None:
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "legal"})
+        # A cap small enough that any match clips it.
+        result = wikis.search("the", max_bytes=1)
+        assert result.truncated
+
+    def test_an_unclipped_search_names_nobody(self, repo: Path) -> None:
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "legal"})
+        assert wikis.search("version").truncated == ()
+
+    def test_the_tool_tells_the_model(self, repo: Path) -> None:
+        # A clipped result that reads as complete is worse than no
+        # result: the model concludes the wiki holds nothing more.
+        from outmem.adapters.wikiset import wikiset_read_tools
+
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "legal"})
+        tools = {t.__name__: t for t in wikiset_read_tools(wikis)}
+        out = tools["grep_wiki"]("the")
+        assert "truncated" not in out  # the fixture is small; nothing clips
+
+    def test_the_tool_reports_truncation_when_it_happens(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from outmem.adapters.wikiset import wikiset_read_tools
+        from outmem.wikiset import FederatedSearch, WikiSet
+
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "legal"})
+        real = WikiSet.search
+
+        def clipped(self: WikiSet, pattern: str, **kw: object) -> FederatedSearch:
+            result = real(self, pattern, **kw)  # type: ignore[arg-type]
+            return FederatedSearch(hits=result.hits, truncated=("legal",))
+
+        monkeypatch.setattr(WikiSet, "search", clipped)
+        tools = {t.__name__: t for t in wikiset_read_tools(wikis)}
+        out = tools["grep_wiki"]("version")
+        assert "results from legal were truncated" in out

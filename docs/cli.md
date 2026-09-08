@@ -466,6 +466,7 @@ Checks `wikis.yaml`, then every wiki. Registry findings:
 | Kind | Severity |
 |---|---|
 | `registry-missing-wiki` — listed, no directory | error |
+| `registry-not-a-wiki` — listed, directory exists, not a wiki | error |
 | `registry-undeclared-tag` — an `audience` tag no `tags:` entry declares | error |
 | `registry-unreachable-wiki` — empty `audience` | warning |
 | `registry-unused-tag` — declared, nothing lists it | warning |

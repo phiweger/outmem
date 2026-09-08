@@ -433,7 +433,10 @@ def _cmd_reindex_staged_repo(root: Path, *, pages_only: bool = False) -> int:
             continue
         if pages_only:
             store.config.outmem.semantic.index = SEMANTIC_INDEX_PAGES
-        _cmd_reindex_staged(store)
+        try:
+            _cmd_reindex_staged(store)
+        finally:
+            store.close()
     return 0
 
 
@@ -642,14 +645,20 @@ def _cmd_lint_repo(args: argparse.Namespace) -> int:
         if not wiki_root.is_dir():
             continue  # already reported by lint_registry
         store = WikiStore.open(wiki_root, agent_identity=_agent_identity())
-        report = lint_wiki(
-            store.wiki_path,
-            log_dir=store.log_path,
-            sources_dir=store.sources_path,
-            sources_local_dir=store.sources_local_path,
-            repo_root=store.repo,
-            indexed_paths=_indexed_paths_or_none(store),
-        )
+        try:
+            report = lint_wiki(
+                store.wiki_path,
+                log_dir=store.log_path,
+                sources_dir=store.sources_path,
+                sources_local_dir=store.sources_local_path,
+                repo_root=store.repo,
+                indexed_paths=_indexed_paths_or_none(store),
+            )
+        finally:
+            # One store per wiki, each holding lazy SQLite handles. A
+            # repository with thirty wikis would otherwise keep ninety
+            # connections open for the length of the run.
+            store.close()
         if report.has_findings:
             print(f"# wiki: {name}")
             sys.stdout.write(format_report(report))

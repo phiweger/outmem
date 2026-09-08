@@ -125,6 +125,11 @@ content — its own history stays in its own repository. Merging two histories i
 `git subtree` / `git filter-repo` work, and `repo import` says so rather than
 pretending.
 
+A wiki inside the repository that still carries **its own `.git`** is refused:
+moving it would leave a nested repository, which git treats as a foreign
+checkout and will not stage. Remove that `.git` first — which discards that
+wiki's history, so it is your call, not the command's.
+
 ---
 
 ## Host integration
@@ -197,6 +202,22 @@ repo = Repo.open("/srv/memory")
 wikis = repo.wikiset(audience=tags_for(current_user))   # open core + compartments
 ```
 
+**Close what you open.** A `WikiSet` holds one `WikiStore` per wiki, and each
+opens SQLite handles lazily — the vector store and both source registries.
+Dropping the set does not release them promptly: they sit in reference cycles
+and survive until the cycle collector runs, so a busy server carries an
+unpredictable number of open connections rather than a bounded one. Closing
+makes it deterministic.
+
+```python
+with repo.wikiset(audience=tags_for(current_user)) as wikis:
+    ...
+# or: wikis.close()
+```
+
+Long-running servers usually want the other shape: build one set per distinct
+audience at startup and keep it, rather than one per request.
+
 `Repo.wiki(name, *, audience=…)` opens one. The audience argument is
 keyword-only and required; the unrestricted path is the separately named
 `Repo.wiki_as_operator(name)`, so reading the whole repository is something
@@ -224,6 +245,11 @@ The model sees one knowledge base. Page names come back qualified `wiki/slug`
 unambiguous. A bare slug resolves in wiki order and reports what it shadowed,
 so a reader who got the open version of a name two wikis share can ask for the
 other.
+
+Search results carry which wikis had to clip theirs at the output cap, and the
+tool passes that to the model: a partial result that reads as complete is worse
+than no result, because the model concludes the wiki holds nothing more and
+stops looking.
 
 Reads federate. **Writes do not** — "append this to the wiki" has no answer
 when there are three. A session that writes takes a single `WikiStore` and the
@@ -311,6 +337,7 @@ Checks the registry, then every wiki. Registry findings:
 | Kind | Severity | Meaning |
 |---|---|---|
 | `registry-missing-wiki` | error | listed in `wikis.yaml`, no directory |
+| `registry-not-a-wiki` | error | listed, directory exists, but it is not a wiki (no `config.yaml`) |
 | `registry-undeclared-tag` | error | an `audience` tag no `tags:` entry declares — the wiki is unreachable |
 | `registry-unreachable-wiki` | warning | a wiki with an empty `audience` |
 | `registry-unused-tag` | warning | a declared tag no wiki lists |
