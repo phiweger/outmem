@@ -1225,8 +1225,6 @@ class TestAWikiWithNoGitDirectory:
         `git rev-parse`, which on a directory with no `.git` *fails* —
         one failed subprocess per visibility check, to learn something a
         single `exists()` already answered."""
-        from outmem._store import labels as labels_mod
-
         view = headless.as_viewer()
         view.list_slugs()
         monkeypatch.setattr(
