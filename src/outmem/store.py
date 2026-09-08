@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from outmem._store import import_vault as _import
 from outmem._store import semantic as _semantic
 from outmem._store import sources as _sources
+from outmem._store.locking import repo_commit_lock
 from outmem._time import ensure_utc, utc_now
 
 if TYPE_CHECKING:
@@ -2130,13 +2131,20 @@ class WikiStore:
         # Translate to repo-relative here and nowhere else. Every caller
         # passes wiki-relative paths, so one wiki cannot name another's
         # files by construction rather than by each caller remembering.
-        add(self.repo, [self._repo_relpath(p) for p in commit_paths])
-        sha = commit_as(
-            self.repo,
-            message=qualify_subject(subject, self.wiki_name),
-            author_name=self.config.agent_identity.name,
-            author_email=self.config.agent_identity.email,
-        )
+        #
+        # Staging and committing are one operation across the repository,
+        # not two: between them the git index is shared state, and another
+        # process committing in the window carries these paths into *its*
+        # commit under its subject and author. `_write_lock` is per-store
+        # and per-process, so it cannot cover two wikis or two processes.
+        with repo_commit_lock(self.repo):
+            add(self.repo, [self._repo_relpath(p) for p in commit_paths])
+            sha = commit_as(
+                self.repo,
+                message=qualify_subject(subject, self.wiki_name),
+                author_name=self.config.agent_identity.name,
+                author_email=self.config.agent_identity.email,
+            )
         # Backlinks are HEAD-keyed; invalidate so the next reader rebuilds.
         self.backlinks_cache.invalidate()
         self._alias_map = None
