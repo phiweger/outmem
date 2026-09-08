@@ -29,6 +29,7 @@ Three sources of labels for a page (spec §5.1), unioned:
 from __future__ import annotations
 
 import contextlib
+import logging
 import posixpath
 import threading
 from dataclasses import dataclass, field
@@ -40,6 +41,8 @@ from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
 
 if TYPE_CHECKING:  # pragma: no cover
     from outmem.store import WikiStore
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -153,6 +156,36 @@ class LabelIndex:
         return out
 
 
+# How long a label index built without a reachable HEAD stays valid.
+# Only reached by a wiki whose `.git` is absent, which outmem cannot
+# write to anyway; see `LabelCache._without_head`.
+_HEADLESS_TTL_SECONDS = 5.0
+
+_warned_headless: set[str] = set()
+
+
+def _warn_headless_once(store: WikiStore) -> None:
+    """Say so, once per wiki per process.
+
+    The failure this replaces was silent: access control worked
+    perfectly and every tool call took most of a second, with nothing
+    anywhere saying why.
+    """
+    key = str(store.root)
+    if key in _warned_headless:
+        return
+    _warned_headless.add(key)
+    log.warning(
+        "%s has restriction labels but no reachable git HEAD, so the label "
+        "index cannot be cached against a commit. Falling back to a %.0fs "
+        "cache; visibility checks will be slower and a change made outside "
+        "this process can take that long to be seen. Keep the wiki's .git "
+        "directory (a depth-1 clone is enough) to remove both.",
+        store.root,
+        _HEADLESS_TTL_SECONDS,
+    )
+
+
 def _release_registries(store: WikiStore) -> None:
     """Close and drop both registry handles.
 
@@ -207,6 +240,13 @@ def head_stamp(store: WikiStore) -> tuple[object, ...]:
     was — only cheaper in the common case.
     """
     git_dir = store.root / ".git"
+    if not git_dir.exists():
+        # No repository at all — a depth-1 export, a read-only mount.
+        # Returning early matters: the fallback below shells out to `git
+        # rev-parse`, which on a directory with no `.git` *fails*, once
+        # per visibility check. A subprocess per call to learn something
+        # a single `exists()` already told us.
+        return (None,)
     head_file = git_dir / "HEAD"
     try:
         raw = head_file.read_text(encoding="utf-8").strip()
@@ -352,6 +392,7 @@ class LabelCache:
         self._index: LabelIndex | None = None
         self._lock = threading.Lock()
         self._handle_stamp: tuple[tuple[int, int], ...] | None = None
+        self._headless_built_at = float("-inf")
 
     def get(self, store: WikiStore) -> LabelIndex:
         # Deliberately NOT short-circuited on `restrictions.enabled`.
@@ -371,10 +412,7 @@ class LabelCache:
         head = head_stamp(store)
         stamp = registry_stamp(store)
         if head == (None,):
-            # No commit to key on. Rebuilding every time is correct and
-            # merely slow; caching against a token that never changes
-            # would be wrong.
-            return build(store, None)
+            return self._without_head(store, stamp)
         cached = self._index
         if cached is not None and (cached.head, cached.registries) == (head, stamp):
             return cached
@@ -401,6 +439,51 @@ class LabelCache:
                 self._handle_stamp = stamp
             built = build(store, head)
             self._index = built
+            return built
+
+    def _without_head(
+        self, store: WikiStore, stamp: tuple[tuple[int, int], ...]
+    ) -> LabelIndex:
+        """The index for a wiki with no reachable HEAD.
+
+        A deployment that strips ``.git`` — a depth-1 export, a
+        read-only mount — has no commit to key the cache on, and
+        rebuilding on every visibility check is an O(corpus) walk per
+        store call. Measured on 1200 pages: 648 ms against 0.10 ms with
+        a repo, which is not a slow path, it is a cliff, and a silent
+        one.
+
+        Such a wiki cannot be written through outmem at all — every
+        write path commits, and committing needs git — so the corpus
+        only changes when something outside the process replaces it,
+        which in practice means a redeploy and a restart. Caching is
+        therefore correct for that shape. The TTL is the concession to
+        the shape it is *not* correct for: somebody editing files under
+        a non-git directory in a long-lived process sees their change
+        within a bounded window rather than never.
+        """
+        import time
+
+        now = time.monotonic()
+        cached = self._index
+        if (
+            cached is not None
+            and cached.registries == stamp
+            and now - self._headless_built_at < _HEADLESS_TTL_SECONDS
+        ):
+            return cached
+        with self._lock:
+            cached = self._index
+            if (
+                cached is not None
+                and cached.registries == stamp
+                and now - self._headless_built_at < _HEADLESS_TTL_SECONDS
+            ):
+                return cached
+            _warn_headless_once(store)
+            built = build(store, None)
+            self._index = built
+            self._headless_built_at = time.monotonic()
             return built
 
     def note_registry_write(self, store: WikiStore) -> None:

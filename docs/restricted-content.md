@@ -369,6 +369,21 @@ pages at it. Ingest closes that at the cause — a new version inherits
 at least its predecessor's labels — and the check is the backstop for
 rows written by hand or by an older build.
 
+### Keep the wiki's `.git`
+
+The label index is cached against HEAD, because every outmem write
+produces a commit and a moved HEAD is therefore exactly the
+invalidation signal. A deployment that strips `.git` — a depth-1
+export, a read-only mount — has no commit to key that on, so the index
+falls back to a short time-based cache and outmem logs a warning
+saying so.
+
+That fallback is correct for the shape it is meant for: a wiki with no
+repository cannot be written through outmem at all, since every write
+path commits. But keeping `.git` is strictly better, and cheap — a
+depth-1 clone of a markdown wiki is a few megabytes, against a cache
+that has to guess when to expire.
+
 ## Rolling it out
 
 1. Declare the labels in `config.yaml`. Nothing changes yet: no content

@@ -139,6 +139,13 @@ contract, threat boundary and rollout order in
   check on a view was paying ~2 ms of subprocess per call; it is now
   two `stat`s. Unusual repository shapes (worktrees, packed refs) still
   fall back to git, so the token is never weaker — only cheaper.
+- **A wiki with no `.git` no longer rebuilds the label index on every
+  visibility check.** The index is keyed on HEAD, so a deployment that
+  strips the repository had no token and rebuilt constantly — measured
+  on 1200 pages at 648 ms per check against 0.10 ms with a repo, and
+  silent. Such a wiki cannot be written through outmem anyway (every
+  write path commits), so it now uses a short time-based cache and says
+  so once. Keeping `.git` remains strictly better and costs a few MB.
 - **`add_source` takes the write lock**, like every other
   commit-producing path. The registry was already safe across processes
   — SQLite serialises the writers — but the git half was not: two

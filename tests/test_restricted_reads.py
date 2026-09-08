@@ -1165,3 +1165,95 @@ class TestSteeringSubjectsForSourceRestrictions:
         ]
         assert not any("alice-severance" in s for s in open_subjects)
         assert any("alice-severance" in s for s in hr_subjects)
+
+
+class TestAWikiWithNoGitDirectory:
+    """A deployment that strips `.git` — a depth-1 export, a read-only
+    mount — has no commit to key the label cache on.
+
+    The first version of this rebuilt the index on every visibility
+    check. Measured on 1200 pages that was 648 ms against 0.10 ms with a
+    repo: not a slow path, a cliff, and a silent one. Such a wiki cannot
+    be written through outmem at all (every write path commits, and
+    committing needs git), so the corpus only changes when something
+    outside the process replaces it.
+    """
+
+    @pytest.fixture
+    def headless(self, store: WikiStore, tmp_path: Path) -> WikiStore:
+        import shutil
+
+        root = store.root
+        store.close()
+        shutil.rmtree(root / ".git")
+        return WikiStore.open(root)
+
+    def test_filtering_is_still_correct(self, headless: WikiStore) -> None:
+        """The point of the cache is speed; none of it may cost
+        correctness."""
+        assert "hr:severance" not in headless.as_viewer().list_slugs()
+        assert "glossary" in headless.as_viewer().list_slugs()
+        assert "hr:severance" in headless.as_viewer(
+            mode={"hr"}, grants=Grants.reader("hr")
+        ).list_slugs()
+
+    def test_the_index_is_not_rebuilt_on_every_check(
+        self, headless: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from outmem._store import labels as labels_mod
+
+        view = headless.as_viewer()
+        view.list_slugs()  # first build
+
+        builds = {"n": 0}
+        real = labels_mod.build
+
+        def counted(*a, **k):  # type: ignore[no-untyped-def]
+            builds["n"] += 1
+            return real(*a, **k)
+
+        monkeypatch.setattr(labels_mod, "build", counted)
+        for _ in range(20):
+            view.exists("glossary")
+            view.list_slugs()
+        assert builds["n"] == 0, f"rebuilt {builds['n']} times inside the TTL"
+
+    def test_no_git_subprocess_is_spawned_per_check(
+        self, headless: WikiStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second cliff under the first: `head_stamp` fell back to
+        `git rev-parse`, which on a directory with no `.git` *fails* —
+        one failed subprocess per visibility check, to learn something a
+        single `exists()` already answered."""
+        from outmem._store import labels as labels_mod
+
+        view = headless.as_viewer()
+        view.list_slugs()
+        monkeypatch.setattr(
+            type(headless),
+            "head",
+            lambda self: pytest.fail("shelled out to git without a repo"),
+        )
+        view.exists("glossary")
+        view.list_slugs()
+
+    def test_it_says_so(
+        self, headless: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The failure this replaces was silent: access control worked
+        perfectly and every call took most of a second, with nothing
+        anywhere saying why."""
+        from outmem._store import labels as labels_mod
+
+        labels_mod._warned_headless.discard(str(headless.root))
+        with caplog.at_level("WARNING", logger="outmem._store.labels"):
+            headless.as_viewer().list_slugs()
+        assert "no reachable git HEAD" in caplog.text
+        assert ".git" in caplog.text  # names the fix
+
+    def test_a_wiki_with_a_repo_does_not_warn(
+        self, store: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING", logger="outmem._store.labels"):
+            store.as_viewer().list_slugs()
+        assert "no reachable git HEAD" not in caplog.text
