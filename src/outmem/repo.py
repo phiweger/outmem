@@ -38,12 +38,17 @@ this file is derived from the wiki's contents.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from outmem.exceptions import OutmemError
+
+if TYPE_CHECKING:
+    from outmem.store import WikiStore
 
 REGISTRY_FILENAME = "wikis.yaml"
 
@@ -265,3 +270,267 @@ def split_subject(subject: str) -> tuple[str | None, str]:
     if sep and _NAME_RE.match(head):
         return head, rest
     return None, subject
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+#
+# The host's user database has to *name* the tags it assigns, so it needs to
+# enumerate the vocabulary rather than only filter with it. Everything here
+# is metadata about which wikis exist and who reaches them — never wiki
+# content — and it is what a provisioning flow reads.
+#
+# The host stores tags, never wiki names. The tag vocabulary is the stable
+# contract; wikis can be renamed, split, merged or moved underneath it
+# without touching a single user record.
+# ---------------------------------------------------------------------------
+
+# Bumped when the shape below changes incompatibly. Provisioning scripts in
+# other codebases read this payload, so it is a public interface.
+CATALOGUE_VERSION = 1
+
+
+@dataclass(frozen=True)
+class TagInfo:
+    """One declared audience tag, and which wikis it reaches."""
+
+    name: str
+    description: str
+    wikis: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "wikis": list(self.wikis),
+        }
+
+
+@dataclass(frozen=True)
+class WikiInfo:
+    """One wiki as the catalogue describes it."""
+
+    name: str
+    title: str
+    audience: tuple[str, ...]
+    pages: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "title": self.title,
+            "audience": list(self.audience),
+            "pages": self.pages,
+        }
+
+
+@dataclass(frozen=True)
+class Catalogue:
+    """What wikis exist and which tags reach them."""
+
+    version: int
+    tags: tuple[TagInfo, ...]
+    wikis: tuple[WikiInfo, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "tags": [t.as_dict() for t in self.tags],
+            "wikis": [w.as_dict() for w in self.wikis],
+        }
+
+
+@dataclass(frozen=True)
+class Reconciliation:
+    """Where the registry and the host's user table have drifted apart."""
+
+    unknown: tuple[str, ...]
+    unreachable: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "unknown": list(self.unknown),
+            "unreachable": list(self.unreachable),
+        }
+
+
+def _count_pages(wiki_root: Path) -> int:
+    """Editorial pages in a wiki, counted without opening a store.
+
+    A catalogue may cover dozens of wikis and is read by provisioning
+    code that wants a number, not a corpus — opening each wiki to get it
+    would mean a SQLite handle and a config parse per row.
+    """
+    pages = wiki_root / "wiki" / "pages"
+    if not pages.is_dir():
+        return 0
+    return sum(1 for p in pages.rglob("*.md") if p.is_file())
+
+
+class Repo:
+    """Several wikis in one repository, addressed by name.
+
+    Opening is deliberately narrow. There is no accessor that returns
+    every wiki without an argument: :meth:`wiki` takes the audience it
+    is opening on behalf of, and the unrestricted path is the separately
+    named :meth:`wiki_as_operator`. Getting the whole repository is
+    therefore something a caller says out loud, not something they reach
+    by passing the obvious argument.
+    """
+
+    def __init__(self, registry: Registry) -> None:
+        self.registry = registry
+        self.root = registry.root
+
+    @classmethod
+    def open(cls, path: str | Path) -> Repo:
+        """Open the multi-wiki repository rooted at ``path``."""
+        root = Path(path).expanduser()
+        registry = load_registry(root)
+        if registry is None:
+            raise OutmemError(
+                f"{root} is not a multi-wiki repository — no "
+                f"{REGISTRY_FILENAME}. Create one with `outmem repo init`."
+            )
+        return cls(registry)
+
+    # -- opening -------------------------------------------------------
+
+    def wikis_for(self, audience: Iterable[str]) -> list[str]:
+        """Names of the wikis an audience reaches, in declared order.
+
+        Reachability is a plain set overlap: one shared tag is enough. A
+        wiki declaring no audience is reachable by nobody, which
+        :meth:`reconcile` reports rather than leaving to be discovered.
+        """
+        held = frozenset(audience)
+        return [n for n, e in self.registry.wikis.items() if e.audience & held]
+
+    def wiki(
+        self, name: str, *, audience: Iterable[str], **kwargs: object
+    ) -> WikiStore:
+        """Open one wiki on behalf of an audience.
+
+        A name the audience does not reach fails exactly as an unknown
+        name does. The two are one message on purpose: a caller that can
+        tell them apart can enumerate the wikis it may not open, and a
+        wiki's *name* can itself be the sensitive part.
+        """
+        if name not in self.wikis_for(audience):
+            raise OutmemError(f"no such wiki: {name!r}")
+        return self._open(name, **kwargs)
+
+    def wiki_as_operator(self, name: str, **kwargs: object) -> WikiStore:
+        """Open one wiki with no audience check — maintenance and admin.
+
+        Named for what it is so that reaching for it is a decision.
+        """
+        if name not in self.registry.wikis:
+            raise OutmemError(f"no such wiki: {name!r}")
+        return self._open(name, **kwargs)
+
+    def _open(self, name: str, **kwargs: object) -> WikiStore:
+        from outmem.store import WikiStore as _WikiStore
+
+        path = self.registry.path_of(name)
+        if not path.is_dir():
+            raise OutmemError(
+                f"wiki {name!r} is listed in {REGISTRY_FILENAME} but "
+                f"{path} does not exist."
+            )
+        return _WikiStore.open(path, **kwargs)  # type: ignore[arg-type]
+
+    # -- discovery -----------------------------------------------------
+
+    def tags(self) -> list[TagInfo]:
+        """The declared vocabulary, with the wikis each tag reaches.
+
+        This is what a provisioning flow reads to populate its own
+        user-to-tag table.
+        """
+        return list(
+            self._catalogue_tags(set(self.registry.wikis), include_unused=True)
+        )
+
+    def catalogue(self) -> Catalogue:
+        """Every wiki and every tag — the provisioning and admin view."""
+        return self._catalogue(set(self.registry.wikis), include_unused=True)
+
+    def catalogue_for(self, audience: Iterable[str]) -> Catalogue:
+        """Only what this audience reaches.
+
+        Safe behind an end-user "which knowledge bases can I search?"
+        picker, where :meth:`catalogue` would not be: a wiki's name and
+        title are metadata, and a name can be the sensitive part.
+        """
+        return self._catalogue(
+            set(self.wikis_for(audience)), include_unused=False
+        )
+
+    def reconcile(self, assigned: Iterable[str]) -> Reconciliation:
+        """Compare the registry against the tags a host has actually assigned.
+
+        ``unknown`` are assigned tags no wiki declares — a stale grant or
+        a typo, whose symptom is a user silently getting nothing extra.
+        ``unreachable`` are wikis no assigned tag opens — content nobody
+        can see, which is how a compartment quietly dies.
+
+        Both failures are silent by nature, which is the reason to have a
+        call that goes looking for them.
+        """
+        held = frozenset(assigned)
+        declared = {t for e in self.registry.wikis.values() for t in e.audience}
+        declared |= set(self.registry.tags)
+        reachable = set(self.wikis_for(held))
+        return Reconciliation(
+            unknown=tuple(sorted(held - declared)),
+            unreachable=tuple(
+                n for n in self.registry.wikis if n not in reachable
+            ),
+        )
+
+    # -- internals -----------------------------------------------------
+
+    def _catalogue_tags(
+        self, names: set[str], *, include_unused: bool
+    ) -> list[TagInfo]:
+        used: dict[str, list[str]] = {}
+        for name in self.registry.wikis:
+            if name not in names:
+                continue
+            for tag in sorted(self.registry.wikis[name].audience):
+                used.setdefault(tag, []).append(name)
+        if include_unused:
+            # Declared-but-unused tags belong in the *admin* vocabulary:
+            # they are what a host provisions against, and one reaching
+            # nothing is a finding for `reconcile`, not a reason to hide
+            # it. They must not appear in an audience-filtered catalogue,
+            # where a tag name discloses as much as a wiki name — the
+            # existence of `project-atlas-acquisition` is the secret.
+            for tag in self.registry.tags:
+                used.setdefault(tag, [])
+        return [
+            TagInfo(
+                name=tag,
+                description=self.registry.tags.get(tag, ""),
+                wikis=tuple(used[tag]),
+            )
+            for tag in sorted(used)
+        ]
+
+    def _catalogue(self, names: set[str], *, include_unused: bool) -> Catalogue:
+        wikis = tuple(
+            WikiInfo(
+                name=name,
+                title=entry.title,
+                audience=tuple(sorted(entry.audience)),
+                pages=_count_pages(self.registry.path_of(name)),
+            )
+            for name, entry in self.registry.wikis.items()
+            if name in names
+        )
+        return Catalogue(
+            version=CATALOGUE_VERSION,
+            tags=tuple(self._catalogue_tags(names, include_unused=include_unused)),
+            wikis=wikis,
+        )

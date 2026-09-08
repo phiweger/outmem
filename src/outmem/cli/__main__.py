@@ -30,9 +30,13 @@ from typing import Any
 
 from outmem import __version__
 from outmem._progress import report_progress
-from outmem.config import SEMANTIC_INDEX_PAGES, SEMANTIC_UNAVAILABLE_HELP
+from outmem.config import (
+    DEFAULT_BRANCH,
+    SEMANTIC_INDEX_PAGES,
+    SEMANTIC_UNAVAILABLE_HELP,
+)
 from outmem.exceptions import OutmemError
-from outmem.repo import load_registry, split_subject
+from outmem.repo import REGISTRY_FILENAME, Repo, load_registry, split_subject
 from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
 from outmem.store import AgentIdentity, WikiStore
 
@@ -52,12 +56,29 @@ def _resolve_root(args: argparse.Namespace) -> Path:
     # clobber outer-level values), which means it's ABSENT from args rather
     # than None when unset — use getattr to handle both forms cleanly.
     root = getattr(args, "root", None)
-    if root:
-        return Path(root).expanduser()
-    env = os.environ.get("OUTMEM_PATH")
-    if env:
-        return Path(env).expanduser()
-    return Path.cwd()
+    base = (
+        Path(root).expanduser()
+        if root
+        else Path(os.environ.get("OUTMEM_PATH", "")).expanduser()
+        if os.environ.get("OUTMEM_PATH")
+        else Path.cwd()
+    )
+    wiki = getattr(args, "wiki", None)
+    if not wiki:
+        return base
+    # `--wiki` names a wiki inside a multi-wiki repository; `--root` (or the
+    # cwd) is then the repository rather than the wiki.
+    registry = load_registry(base)
+    if registry is None:
+        raise OutmemError(
+            f"--wiki {wiki!r} needs a multi-wiki repository, but {base} has "
+            f"no {REGISTRY_FILENAME}. Point --root at the repository, or "
+            "drop --wiki."
+        )
+    if wiki not in registry.wikis:
+        known = ", ".join(sorted(registry.wikis)) or "(none)"
+        raise OutmemError(f"no such wiki: {wiki!r}. Registered: {known}.")
+    return registry.path_of(wiki)
 
 
 def _agent_identity() -> AgentIdentity:
@@ -1034,6 +1055,222 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+_STARTER_REGISTRY = """\
+# Several wikis in one repository. A wiki is the unit of access: within
+# one, everything is open, and separation comes from which wiki a request
+# opens. Add wikis with `outmem repo add <name> --audience <tag>`.
+version: 1
+
+# The declared vocabulary. This is the contract with your user database:
+# store these tags against users, never wiki names, so a wiki can be
+# renamed or moved without touching a user record.
+tags: {}
+
+wikis: {}
+"""
+
+_REPO_GITIGNORE = """\
+# Created by outmem — repository-level state that is not part of any wiki.
+.outmem-repo/
+.env
+"""
+
+
+# ---------------------------------------------------------------------------
+# Multi-wiki repositories
+# ---------------------------------------------------------------------------
+
+
+def _repo_root(args: argparse.Namespace) -> Path:
+    """The repository a `repo` subcommand acts on — --root, or the cwd."""
+    root = getattr(args, "root", None)
+    if root:
+        return Path(root).expanduser()
+    env = os.environ.get("OUTMEM_PATH")
+    return Path(env).expanduser() if env else Path.cwd()
+
+
+def _commit_registry(root: Path, *, paths: list[str], subject: str) -> None:
+    """Commit the registry itself.
+
+    Unlike a wiki's scaffold — which `outmem init` leaves untracked for
+    the author's first write to carry in — `wikis.yaml` is what makes a
+    directory a multi-wiki repository, and `find_repo_root` reads it from
+    the working tree. Untracked, it would not survive a clone: every wiki
+    would look standalone, and the next `WikiStore.init` would nest a
+    `.git` inside the repo instead of joining it.
+    """
+    from outmem.git_ops import add as git_add
+    from outmem.git_ops import commit_as
+
+    identity = _agent_identity()
+    git_add(root, paths)
+    commit_as(
+        root,
+        message=subject,
+        author_name=identity.name,
+        author_email=identity.email,
+    )
+
+
+def cmd_repo_init(args: argparse.Namespace) -> int:
+    """Scaffold a multi-wiki repository: a git repo plus an empty registry."""
+    from outmem.git_ops import init_repo
+
+    root = _repo_root(args)
+    root.mkdir(parents=True, exist_ok=True)
+    registry_path = root / REGISTRY_FILENAME
+    if registry_path.exists():
+        print(f"outmem: {registry_path} already exists.", file=sys.stderr)
+        return 1
+    init_repo(root, initial_branch=args.branch)
+    registry_path.write_text(_STARTER_REGISTRY, encoding="utf-8")
+    (root / ".gitignore").write_text(_REPO_GITIGNORE, encoding="utf-8")
+    try:
+        _commit_registry(
+            root,
+            paths=[REGISTRY_FILENAME, ".gitignore"],
+            subject="repo: initialise",
+        )
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 1
+    _status(f"initialised multi-wiki repository at {root}")
+    _status("add a wiki with: outmem repo add <name> --audience <tag>")
+    return 0
+
+
+def cmd_repo_add(args: argparse.Namespace) -> int:
+    """Register a new wiki and scaffold it inside the repository."""
+    import yaml
+
+    root = _repo_root(args)
+    registry_path = root / REGISTRY_FILENAME
+    if not registry_path.is_file():
+        print(
+            f"outmem: {root} is not a multi-wiki repository — run "
+            "`outmem repo init` first.",
+            file=sys.stderr,
+        )
+        return 1
+    raw = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+    wikis = raw.setdefault("wikis", {})
+    if args.name in wikis:
+        print(f"outmem: wiki {args.name!r} is already registered.", file=sys.stderr)
+        return 1
+    tags = raw.setdefault("tags", {})
+    for tag in args.audience:
+        tags.setdefault(tag, {"description": ""})
+    rel = args.path or f"wikis/{args.name}"
+    wikis[args.name] = {
+        "path": rel,
+        "title": args.title or args.name,
+        "audience": list(args.audience),
+    }
+    # Write the registry BEFORE scaffolding: `WikiStore.init` discovers its
+    # repository by looking itself up here, and an unlisted directory would
+    # nest a `.git` inside the repo instead of joining it.
+    registry_path.write_text(
+        yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    (root / rel).mkdir(parents=True, exist_ok=True)
+    try:
+        WikiStore.init(root / rel, agent_identity=_agent_identity())
+        _commit_registry(
+            root, paths=[REGISTRY_FILENAME], subject=f"repo: add {args.name}"
+        )
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 1
+    _status(f"registered wiki {args.name!r} at {rel}")
+    return 0
+
+
+def _emit(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=False))
+
+
+def cmd_repo_list(args: argparse.Namespace) -> int:
+    """The catalogue: which wikis exist and which tags reach them."""
+    try:
+        repo = Repo.open(_repo_root(args))
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 1
+    catalogue = (
+        repo.catalogue_for(args.audience) if args.audience else repo.catalogue()
+    )
+    if args.json:
+        _emit(catalogue.as_dict(), as_json=True)
+        return 0
+    if not catalogue.wikis:
+        print("outmem: no wikis registered.", file=sys.stderr)
+        return 1
+    width = max(len(w.name) for w in catalogue.wikis)
+    for w in catalogue.wikis:
+        audience = ", ".join(w.audience) or "(nobody)"
+        print(f"{w.name:<{width}}  {w.pages:>5} pages  [{audience}]  {w.title}")
+    return 0
+
+
+def cmd_repo_tags(args: argparse.Namespace) -> int:
+    """The declared vocabulary — what a user database provisions against."""
+    try:
+        repo = Repo.open(_repo_root(args))
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        _emit(repo.catalogue().as_dict(), as_json=True)
+        return 0
+    tags = repo.tags()
+    if not tags:
+        print("outmem: no tags declared.", file=sys.stderr)
+        return 1
+    width = max(len(t.name) for t in tags)
+    for tag in tags:
+        reaches = ", ".join(tag.wikis) or "(nothing)"
+        suffix = f"  — {tag.description}" if tag.description else ""
+        print(f"{tag.name:<{width}}  -> {reaches}{suffix}")
+    return 0
+
+
+def cmd_repo_audience(args: argparse.Namespace) -> int:
+    """What a user holding these tags would get. The support-ticket tool."""
+    try:
+        repo = Repo.open(_repo_root(args))
+    except OutmemError as exc:
+        print(f"outmem: {exc}", file=sys.stderr)
+        return 1
+    held = set(args.tags)
+    catalogue = repo.catalogue_for(held)
+    # `reconcile` answers a repository-wide question — which tags nobody
+    # holds, which wikis nobody reaches. Asked about one user, only the
+    # `unknown` half means anything: "wikis you cannot see" is the normal
+    # condition, not a finding.
+    unknown = repo.reconcile(held).unknown
+    if args.json:
+        payload = dict(catalogue.as_dict())
+        payload["unknown_tags"] = list(unknown)
+        _emit(payload, as_json=True)
+        return 0
+    if not catalogue.wikis:
+        print(
+            f"outmem: tags {', '.join(sorted(held)) or '(none)'} reach no wiki.",
+            file=sys.stderr,
+        )
+    for w in catalogue.wikis:
+        print(f"{w.name}  {w.title}")
+    if unknown:
+        print(
+            f"outmem: no wiki declares {', '.join(unknown)} — a stale grant "
+            "or a typo.",
+            file=sys.stderr,
+        )
+    return 0 if catalogue.wikis else 1
+
+
 def _slugs_from_commits(subjects: tuple[str, ...]) -> list[str]:
     """Extract slugs from ``compact: <slug>`` / ``extend: <slug>`` commits.
 
@@ -1257,6 +1494,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="Wiki root (defaults to $OUTMEM_PATH or the current directory).",
     )
+    root_parent.add_argument(
+        "--wiki",
+        default=argparse.SUPPRESS,
+        metavar="NAME",
+        help=(
+            "Name of a wiki in a multi-wiki repository. --root (or the "
+            "current directory) is then the repository, not the wiki."
+        ),
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1429,6 +1675,77 @@ def build_parser() -> argparse.ArgumentParser:
         "alias, but stay pointed at the old name).",
     )
     p_rename.set_defaults(func=cmd_rename)
+
+    p_repo = sub.add_parser(
+        "repo",
+        help="Multi-wiki repository: register wikis and inspect audience tags.",
+        parents=[root_parent],
+    )
+    repo_sub = p_repo.add_subparsers(dest="repo_command", required=True)
+
+    p_repo_init = repo_sub.add_parser(
+        "init",
+        help="Scaffold a multi-wiki repository (git repo + wikis.yaml).",
+        parents=[root_parent],
+    )
+    p_repo_init.add_argument("--branch", default=DEFAULT_BRANCH)
+    p_repo_init.set_defaults(func=cmd_repo_init)
+
+    p_repo_add = repo_sub.add_parser(
+        "add",
+        help="Register and scaffold a new wiki inside the repository.",
+        parents=[root_parent],
+    )
+    p_repo_add.add_argument("name")
+    p_repo_add.add_argument(
+        "--audience",
+        action="append",
+        default=[],
+        metavar="TAG",
+        help="Audience tag that reaches this wiki (repeatable).",
+    )
+    p_repo_add.add_argument("--title", default=None)
+    p_repo_add.add_argument(
+        "--path", default=None, help="Directory, relative to the repo root."
+    )
+    p_repo_add.set_defaults(func=cmd_repo_add)
+
+    p_repo_list = repo_sub.add_parser(
+        "list",
+        help="List registered wikis, their audience tags and page counts.",
+        parents=[root_parent],
+    )
+    p_repo_list.add_argument("--json", action="store_true")
+    p_repo_list.add_argument(
+        "--audience",
+        action="append",
+        default=[],
+        metavar="TAG",
+        help="Show only what these tags reach (repeatable).",
+    )
+    p_repo_list.set_defaults(func=cmd_repo_list)
+
+    p_repo_tags = repo_sub.add_parser(
+        "tags",
+        help="The declared tag vocabulary — provision your user DB from this.",
+        parents=[root_parent],
+    )
+    p_repo_tags.add_argument("--json", action="store_true")
+    p_repo_tags.set_defaults(func=cmd_repo_tags)
+
+    p_repo_audience = repo_sub.add_parser(
+        "audience",
+        help="What a user holding these tags would see.",
+        parents=[root_parent],
+    )
+    p_repo_audience.add_argument(
+        "--tags",
+        required=True,
+        type=lambda s: [t for t in s.split(",") if t],
+        help="Comma-separated tags the user holds.",
+    )
+    p_repo_audience.add_argument("--json", action="store_true")
+    p_repo_audience.set_defaults(func=cmd_repo_audience)
 
     p_sources = sub.add_parser(
         "sources",
