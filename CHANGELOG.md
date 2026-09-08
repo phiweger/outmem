@@ -3,6 +3,27 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.17.5
+
+### Added
+
+- **`registry-undescribed-tag`** — `outmem lint --repo` reports a declared
+  audience tag whose `description:` is empty. That string is what `outmem
+  repo tags --json` emits and what a host's user database provisions
+  against, so an empty one reaches the provisioning UI as a blank while
+  the meaning sits in a YAML comment the payload cannot see.
+
+  outmem produced this state itself: `repo add --audience X` writes
+  `description: ''` and offers no flag to fill it, and lint then called
+  the result clean. A warning, not an error — terse self-explanatory tags
+  (`legal`, `hr`) are a legitimate choice.
+
+### Docs
+
+- `docs/multi-wiki.md` draws the line the guidance assumed: comments carry
+  rationale for the next reader, `description:` carries what a machine
+  consumes.
+
 ## 0.17.4
 
 A review round over 0.17.3.

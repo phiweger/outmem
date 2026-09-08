@@ -480,6 +480,7 @@ nothing. Registry findings:
 | `registry-undeclared-tag` — an `audience` tag no `tags:` entry declares | error |
 | `registry-unreachable-wiki` — empty `audience` | warning |
 | `registry-unused-tag` — declared, nothing lists it | warning |
+| `registry-undescribed-tag` — declared with an empty `description:` | warning |
 | `registry-unlisted-wiki` — a wiki-shaped directory the registry omits | warning |
 
 Plus `cross-wiki-wikilink` (error) on any `[[other-wiki/page]]`, since

@@ -1065,3 +1065,69 @@ class TestPathsAreValidatedBeforeAnythingHappens:
         _run_git(["init", "--initial-branch", "main"], cwd=root)
         _commit(root, file="wikis.yaml", content=COMMENTED, message="hand-written registry")
         return root
+
+
+class TestUndescribedTags:
+    """`description:` is the field the host's user database consumes.
+
+    outmem writes it empty itself (`repo add --audience X`) and offers no
+    flag to fill it, so an unhelpful `repo tags --json` payload is a state
+    the tool produces and used to call clean.
+    """
+
+    def _kinds(self, root: Path) -> set[str]:
+        from outmem.lint import lint_repository
+
+        return {f.kind for f in lint_repository(root).findings}
+
+    def test_repo_add_leaves_a_tag_lint_now_reports(self, tmp_path: Path) -> None:
+        from outmem.cli.__main__ import main
+
+        root = tmp_path / "mem"
+        assert main(["repo", "init", "--root", str(root)]) == 0
+        assert main(
+            ["repo", "add", "open", "--root", str(root), "--audience", "alle"]
+        ) == 0
+        assert "registry-undescribed-tag" in self._kinds(root)
+
+    def test_a_described_tag_is_clean(self, tmp_path: Path) -> None:
+        root = tmp_path / "mem"
+        root.mkdir()
+        _run_git(["init", "--initial-branch", "main"], cwd=root)
+        (root / "wikis.yaml").write_text(
+            'tags:\n  alle: {description: "Alle Mitarbeitenden"}\n'
+            "wikis:\n  open: {path: wikis/open, audience: [alle]}\n",
+            encoding="utf-8",
+        )
+        (root / "wikis" / "open").mkdir(parents=True)
+        WikiStore.init(root / "wikis" / "open")
+        assert "registry-undescribed-tag" not in self._kinds(root)
+
+    def test_a_comment_does_not_count_as_a_description(self, tmp_path: Path) -> None:
+        # The whole point: a comment is for the next human and never
+        # reaches `repo tags --json`.
+        root = tmp_path / "mem"
+        root.mkdir()
+        _run_git(["init", "--initial-branch", "main"], cwd=root)
+        (root / "wikis.yaml").write_text(
+            "tags:\n  alle: {}   # everyone in the org\n"
+            "wikis:\n  open: {path: wikis/open, audience: [alle]}\n",
+            encoding="utf-8",
+        )
+        (root / "wikis" / "open").mkdir(parents=True)
+        WikiStore.init(root / "wikis" / "open")
+        assert "registry-undescribed-tag" in self._kinds(root)
+
+    def test_it_is_a_warning_not_an_error(self, tmp_path: Path) -> None:
+        # A terse self-explanatory tag (`legal`, `hr`) is a legitimate
+        # choice; forcing prose on it would be officious.
+        from outmem.cli.__main__ import main
+        from outmem.lint import lint_repository
+
+        root = tmp_path / "mem"
+        main(["repo", "init", "--root", str(root)])
+        main(["repo", "add", "open", "--root", str(root), "--audience", "legal"])
+        report = lint_repository(root)
+        assert not report.has_errors
+        assert main(["lint", "--repo", "--root", str(root)]) == 1
+        assert main(["lint", "--repo", "--root", str(root), "--error-only"]) == 0
