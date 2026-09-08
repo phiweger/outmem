@@ -146,6 +146,16 @@ have two modes, chosen by whether the name is already listed:
 So a hand-maintained registry and the convenience commands coexist: the
 commands only ever write to a file they could regenerate anyway.
 
+**Comments carry rationale; `description:` carries data.** A comment is for
+the next person to read the file — "mirrors the IdP groups", "see ADR-014".
+Anything a *machine* consumes belongs in the tag's `description:`, because
+that is the field `outmem repo tags --json` emits and a provisioning UI
+displays; a comment never reaches that consumer. `repo add --audience X`
+writes an empty description and has no flag to fill it, so `outmem lint
+--repo` reports an undescribed tag (`registry-undescribed-tag`, a warning) —
+terse self-explanatory tags are a legitimate choice, so it does not fail the
+run.
+
 ---
 
 ## Host integration
@@ -360,6 +370,7 @@ installs no hook and creates nothing. Registry findings:
 | `registry-undeclared-tag` | error | an `audience` tag no `tags:` entry declares — the wiki is unreachable |
 | `registry-unreachable-wiki` | warning | a wiki with an empty `audience` |
 | `registry-unused-tag` | warning | a declared tag no wiki lists |
+| `registry-undescribed-tag` | warning | a declared tag with an empty `description:` — what `repo tags --json` emits, and what a user database provisions against |
 | `registry-unlisted-wiki` | warning | a wiki-shaped directory absent from the registry — unreachable, and commits in it would start their own repository |
 
 Plus `cross-wiki-wikilink` (error) on any `[[other-wiki/page]]` link.

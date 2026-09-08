@@ -1625,6 +1625,20 @@ def lint_repository(root: Path) -> LintReport:
             f"tag {tag!r} is declared but no wiki lists it — anyone granted "
             "it gains nothing.",
         )
+    for tag in sorted(t for t, description in registry.tags.items() if not description):
+        # `repo add --audience X` writes `description: ''` and there is no
+        # flag to fill it, so the empty case is one outmem creates itself
+        # and then reported as clean. The symptom is silent by
+        # construction: the provisioning UI shows a blank, and the meaning
+        # lives in a comment that `repo tags --json` cannot see.
+        registry_finding(
+            "registry-undescribed-tag",
+            Severity.WARNING,
+            f"tag {tag!r} has no description — `outmem repo tags --json` "
+            "emits it as an empty string, and that payload is what a user "
+            "database provisions against. A comment in the file does not "
+            "reach it; put the meaning in `description:`.",
+        )
     for stray in sorted(_wiki_shaped_dirs(root)):
         if registry.name_at(stray) is None:
             rel = stray.relative_to(root).as_posix()
