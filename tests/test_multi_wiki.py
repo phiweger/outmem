@@ -557,3 +557,111 @@ class TestRepoImport:
              "--name", "legal"]
         ) == 1
         assert "already registered" in capsys.readouterr().err
+
+
+class TestReviewFindings:
+    """Regressions for problems found reviewing this work, not by tests."""
+
+    def test_a_half_registered_wiki_does_not_lint_clean(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        from outmem.repo import lint_registry
+
+        # `repo add` creates the directory before scaffolding it. Checking
+        # only that the directory *exists* let this state pass — the one
+        # state where a clean report is actively misleading.
+        (repo / "wikis" / "half").mkdir(parents=True)
+        (repo / "wikis.yaml").write_text(
+            REGISTRY + "  half: {path: wikis/half, audience: [legal]}\n",
+            encoding="utf-8",
+        )
+        kinds = {kind for _sev, kind, _msg in lint_registry(repo)}
+        assert "registry-not-a-wiki" in kinds
+
+    def test_repo_add_rolls_back_when_scaffolding_fails(
+        self, repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from unittest.mock import patch
+
+        from outmem.cli.__main__ import main
+        from outmem.repo import load_registry
+
+        with patch("outmem.store.WikiStore.init", side_effect=OutmemError("boom")):
+            assert main(
+                ["repo", "add", "hr", "--root", str(repo), "--audience", "hr"]
+            ) == 1
+        registry = load_registry(repo)
+        assert registry is not None
+        # A listed wiki that is not one is reachable by name and openable
+        # by nobody — not a state to leave behind after a failed command.
+        assert "hr" not in registry.wikis
+        assert "rolled back" in capsys.readouterr().err
+
+    def test_import_refuses_a_nested_repository(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        # `git mv`-ing a directory that is its own repository leaves a
+        # nested one inside this repo; git then refuses to stage it at all
+        # ("does not have a commit checked out"), after the move already
+        # happened.
+        nested = repo / "incoming"
+        WikiStore.init(nested)
+        assert (nested / ".git").is_dir()
+        assert main(
+            ["repo", "import", str(nested), "--root", str(repo),
+             "--name", "incoming", "--audience", "legal"]
+        ) == 1
+        assert "has its own git repository" in capsys.readouterr().err
+        # Nothing moved, nothing registered.
+        assert nested.is_dir()
+        assert not (repo / "wikis" / "incoming").exists()
+
+    def test_import_moves_a_plain_directory_inside_the_repo(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        import shutil
+
+        from outmem.cli.__main__ import main
+        from outmem.repo import Repo
+
+        incoming = repo / "incoming"
+        WikiStore.init(incoming)
+        shutil.rmtree(incoming / ".git")
+        assert main(
+            ["repo", "import", str(incoming), "--root", str(repo),
+             "--name", "incoming", "--audience", "legal"]
+        ) == 0
+        assert not incoming.exists()
+        assert Repo.open(repo).wiki_as_operator("incoming").repo == repo
+
+    def test_a_registry_in_a_non_git_directory_says_what_to_do(
+        self, tmp_path: Path
+    ) -> None:
+        # "call WikiStore.init() first" sent people to the wiki, where it
+        # would not help: the *repository* is what needs initialising.
+        (tmp_path / "wikis.yaml").write_text(
+            "tags: {a: {}}\nwikis:\n  w: {path: w, audience: [a]}\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "w").mkdir()
+        store = WikiStore.init(tmp_path / "w")
+        assert store.repo == tmp_path
+        with pytest.raises(OutmemError, match="outmem repo init"):
+            store.write_page("x", title="X", body="Body.\n")
+
+    def test_hook_messages_name_the_repository_not_the_wiki(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        # There is one hook per clone, at the repository. Naming the
+        # wiki's own (nonexistent) `.git` sent the reader looking for a
+        # file that is not there.
+        main(["hook", "install", "--root", str(repo), "--wiki", "open"])
+        out = capsys.readouterr().out
+        assert str(repo / ".git" / "hooks" / "pre-commit") in out
+        assert "wikis/open/.git" not in out

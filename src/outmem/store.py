@@ -2119,6 +2119,17 @@ class WikiStore:
                 "to mutate it."
             )
         if not is_git_repo(self.repo):
+            # Two different situations, two different remedies. A
+            # standalone wiki needs `WikiStore.init`; a wiki that found
+            # its repository through a `wikis.yaml` needs that
+            # *repository* initialised, and calling `init` on the wiki
+            # would not help — the old message sent people the wrong way.
+            if self.repo != self.root:
+                raise OutmemError(
+                    f"{self.repo} holds a wikis.yaml listing this wiki but is "
+                    "not a git repo. Run `outmem repo init` there, or remove "
+                    "the registry entry to use this wiki standalone."
+                )
             raise OutmemError(f"{self.repo} is not a git repo — call WikiStore.init() first.")
         commit_paths = list(paths)
         # Reindex first so the vector DB mutates *before* `git add` runs.

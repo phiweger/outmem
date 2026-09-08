@@ -596,6 +596,20 @@ def lint_registry(root: Path) -> list[tuple[str, str, str]]:
                     f"wiki {name!r} is listed but {entry.path} does not exist.",
                 )
             )
+        elif not (path / "config.yaml").is_file():
+            # A listed directory that is not a wiki. Checking only for
+            # existence let a half-finished `repo add` — registry entry
+            # written, scaffolding failed — lint clean, which is the one
+            # state where a clean report is actively misleading.
+            out.append(
+                (
+                    "error",
+                    "registry-not-a-wiki",
+                    f"wiki {name!r} is listed but {entry.path} is not a wiki "
+                    "(no config.yaml). Scaffold it with `outmem init`, or "
+                    "drop the entry.",
+                )
+            )
         if not entry.audience:
             out.append(
                 (

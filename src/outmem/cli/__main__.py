@@ -551,11 +551,11 @@ def cmd_hook_install(args: argparse.Namespace) -> int:
     from outmem.hooks import HOOK_NAME, install_hook
 
     store = _open_store(args)
-    target = store.root / ".git" / "hooks" / HOOK_NAME
+    target = store.repo / ".git" / "hooks" / HOOK_NAME
     status = install_hook(store.repo, force=args.force)
     if status == "no-git":
         print(
-            f"outmem: no .git/hooks at {store.root} — is this a git repo?",
+            f"outmem: no .git/hooks at {store.repo} — is this a git repo?",
             file=sys.stderr,
         )
         return 1
@@ -577,7 +577,7 @@ def cmd_hook_uninstall(args: argparse.Namespace) -> int:
     from outmem.hooks import HOOK_NAME, uninstall_hook
 
     store = _open_store(args)
-    target = store.root / ".git" / "hooks" / HOOK_NAME
+    target = store.repo / ".git" / "hooks" / HOOK_NAME
     status = uninstall_hook(store.repo, force=args.force)
     if status == "absent":
         _status(f"{target} is not present.")
@@ -1232,7 +1232,20 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
             root, paths=[REGISTRY_FILENAME], subject=f"repo: add {args.name}"
         )
     except OutmemError as exc:
+        # Roll the entry back. Leaving it would list a wiki that is not
+        # one — reachable by name, openable by nobody, and a state the
+        # operator has no reason to expect after a command that failed.
+        del wikis[args.name]
+        registry_path.write_text(
+            yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
         print(f"outmem: {exc}", file=sys.stderr)
+        print(
+            f"outmem: rolled back the {REGISTRY_FILENAME} entry for "
+            f"{args.name!r}; {rel} may need removing by hand.",
+            file=sys.stderr,
+        )
         return 1
     _status(f"registered wiki {args.name!r} at {rel}")
     return 0
@@ -1287,6 +1300,20 @@ def cmd_repo_import(args: argparse.Namespace) -> int:
         return 1
 
     inside = source.is_relative_to(root.resolve())
+    if inside and (source / ".git").exists():
+        # Moving it would leave a nested repository inside this one: git
+        # then treats the directory as a foreign checkout and refuses to
+        # stage it ("does not have a commit checked out"). Removing the
+        # nested `.git` discards that wiki's history, which is the
+        # operator's call to make, not this command's.
+        print(
+            f"outmem: {source} has its own git repository. A move cannot "
+            "carry its history into this one — remove "
+            f"{source / '.git'} first (this discards that history), or "
+            "import from outside the repository to copy the working tree.",
+            file=sys.stderr,
+        )
+        return 1
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         if inside:
