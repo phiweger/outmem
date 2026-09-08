@@ -1339,6 +1339,22 @@ class TestAWikiWithNoGitDirectory:
         # wrong thing.
         assert "slower" not in caplog.text
 
+    def test_an_operator_on_a_headless_wiki_is_not_warned_at(
+        self, headless: WikiStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The bare store takes no view, so it never reaches the label
+        index and has nothing to be told. Warning there would put the
+        line in front of every `outmem lint` and `outmem read` run
+        against a deployed copy, where it is noise rather than news."""
+        from outmem._store import labels as labels_mod
+
+        labels_mod._warned_headless.discard(str(headless.root))
+        with caplog.at_level("WARNING", logger="outmem._store.labels"):
+            headless.list_slugs()
+            headless.read("glossary")
+            headless.search("glossary")
+        assert "no reachable git HEAD" not in caplog.text
+
     def test_a_wiki_with_a_repo_does_not_warn(
         self, store: WikiStore, caplog: pytest.LogCaptureFixture
     ) -> None:
