@@ -166,3 +166,29 @@ class TestCliWikiFlag:
             == 1
         )
         assert "needs a multi-wiki repository" in capsys.readouterr().err
+
+
+class TestOpeningARegisteredNonWiki:
+    def test_a_directory_that_was_never_scaffolded_is_refused(self, repo: Path) -> None:
+        # `WikiStore.open` scaffolds `wiki/pages/` and `log/` into whatever
+        # it is pointed at; `Repo` must not let a listed-but-empty
+        # directory quietly become a wiki that opens and holds nothing.
+        (repo / "wikis" / "hollow").mkdir()
+        (repo / "wikis.yaml").write_text(
+            REGISTRY + "  hollow: {path: wikis/hollow, audience: [hr]}\n", encoding="utf-8"
+        )
+        with pytest.raises(OutmemError, match="not a wiki"):
+            Repo.open(repo).wiki_as_operator("hollow")
+        assert not (repo / "wikis" / "hollow" / "wiki").exists()
+
+
+class TestRepoSubcommandsTakeNoWiki:
+    def test_wiki_is_not_an_option_for_repo_commands(self, repo: Path) -> None:
+        # The subject of every `repo` command is the registry; a wiki name
+        # has nothing to refer to there and is refused by the parser
+        # rather than silently ignored.
+        from outmem.cli.__main__ import main
+
+        with pytest.raises(SystemExit) as exc:
+            main(["repo", "list", "--root", str(repo), "--wiki", "open"])
+        assert exc.value.code == 2

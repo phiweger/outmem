@@ -67,28 +67,41 @@ src/outmem/
 ├── store.py                    # WikiStore — public API + write_page/extend_page/append_log
 ├── _store/                     # internal facets imported by store.py
 │   ├── sources.py              #   add_source, list_sources, record_ingestion, ...
-│   └── semantic.py             #   reindex, find_similar, the indexer ...
+│   ├── semantic.py             #   reindex, find_similar, the indexer ...
+│   ├── import_vault.py         #   `outmem import` of an existing markdown vault
+│   └── locking.py              #   repo-wide flock around stage-and-commit
+├── repo.py                     # wikis.yaml registry, Repo, audience tags, discovery
+├── wikiset.py                  # WikiSet — several wikis read as one, names `wiki/slug`
 ├── _sqlite.py / _time.py       # shared helpers used by both DBs and timestamp call sites
-├── _logfire.py                 # opt-in Pydantic Logfire hook
+├── _logfire.py / observability.py  # opt-in Pydantic Logfire hook + public setup helper
 ├── config.py                   # OutmemConfig + YAML loader
 ├── frontmatter.py / slug.py    # page model + wikilink rewriter
+├── outline.py / completeness.py    # section outlines; elision + tool-sentinel guards
 ├── git_ops.py / history.py     # subprocess wrappers + named queries
+├── hooks.py                    # pre-commit hook install / auto-ensure
 ├── search.py / backlinks.py    # rg --json + HEAD-keyed cache
+├── relevance.py                # LLM rerank gate over retrieved candidates
 ├── identity.py / state.py      # CONTRIBUTORS.md + .outmem/ state (fcntl-locked)
 ├── sources.py                  # sources registry (SQLite-backed)
 ├── skills.py                   # SKILL.md loader (uses `outskilled` dep)
-├── lint.py / index.py          # outmem lint + wiki/index.md auto-maintenance
+├── lint.py / index.py          # outmem lint (+ lint_repository) + wiki/index.md maintenance
+├── testing.py                  # conformance harness for downstream slug resolvers
 ├── exceptions.py               # OutmemError hierarchy
-├── adapters/pydantic_ai.py     # wiki_tools() + skill_text()
+├── adapters/pydantic_ai.py     # wiki_tools() + skill_text() over one WikiStore
+├── adapters/wikiset.py         # the read palette over a WikiSet
 ├── agent/                      # orient → retrieve → compact runtime + system.j2
+├── optimize/                   # retrieval-strategy tuning (`outmem optimize`)
 ├── dashboard/                  # FastAPI read view
 ├── semantic/                   # sqlite-vec wrapper + chunker + embedder probes
 ├── skills/notes/               # bundled SKILL.md files rendered into the system prompt
-└── cli/__main__.py             # the `outmem` command
+└── cli/                        # the `outmem` command
+    ├── __main__.py             #   parser + single-wiki subcommands
+    ├── repo.py                 #   the `outmem repo …` group (multi-wiki repositories)
+    └── _common.py              #   helpers both share: identity, status line, --root resolution
 
-docs/                           # cli, python-api, features, configuration, this file
+docs/                           # cli, python-api, features, configuration, multi-wiki, this file
 evals/                          # cases + harness + fixtures (eval suite, opt-in)
 examples/starter-wiki/          # pre-populated example to try the library against
-specs/                          # conceptual rationale, v0.1 spec, planning prompt
+specs/                          # conceptual rationale, v0.1 spec, planning prompt, design records
 tests/                          # pytest suite, ruff + mypy strict clean
 ```

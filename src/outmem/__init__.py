@@ -10,6 +10,15 @@ Public API::
     store.extend_page("pricing-formula", body="Revised: cost-plus 40%.")
     store.append_log(topic="pricing", content="noticed an inconsistency")
 
+Several wikis in one repository, one per audience (see
+``docs/multi-wiki.md``)::
+
+    from outmem import Repo
+
+    repo = Repo.open("/srv/memory")
+    with repo.wikiset(audience={"everyone", "legal"}, read_only=True) as wikis:
+        wikis.read("legal/nda")
+
 See ``docs/`` for the conceptual rationale, the v0.1 spec, and integration
 patterns. See ``src/outmem/skills/notes/`` for the skills a downstream agent
 loads to learn the search / evolution / write workflows.
@@ -30,8 +39,10 @@ from outmem.exceptions import (
 from outmem.frontmatter import ProvenanceEntry, WikiFrontmatter
 from outmem.observability import setup_logfire
 from outmem.relevance import RelevantPage, judge_relevance
+from outmem.repo import Repo
 from outmem.search import SearchHit
 from outmem.store import AgentIdentity, WikiPage, WikiStore, WikiStoreConfig
+from outmem.wikiset import WikiSet
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -50,10 +61,12 @@ __all__ = [
     "OutmemError",
     "ProvenanceEntry",
     "RelevantPage",
+    "Repo",
     "SearchHit",
     "SlugError",
     "WikiFrontmatter",
     "WikiPage",
+    "WikiSet",
     "WikiStore",
     "WikiStoreConfig",
     "WritebackError",

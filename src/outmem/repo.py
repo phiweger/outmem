@@ -45,10 +45,11 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from outmem.config import CONFIG_FILENAME
 from outmem.exceptions import OutmemError
 
 if TYPE_CHECKING:
-    from outmem.store import WikiStore
+    from outmem.store import AgentIdentity, WikiStore
     from outmem.wikiset import WikiSet
 
 REGISTRY_FILENAME = "wikis.yaml"
@@ -175,6 +176,7 @@ def _parse_wikis(path: Path, block: object) -> dict[str, WikiEntry]:
     if not isinstance(block, dict):
         raise _fail(path, "`wikis` must be a mapping of wiki name to settings.")
     out: dict[str, WikiEntry] = {}
+    claimed: dict[str, str] = {}  # normalised path -> wiki name
     for name, settings in block.items():
         if not isinstance(name, str) or not _NAME_RE.match(name):
             raise _fail(
@@ -186,14 +188,29 @@ def _parse_wikis(path: Path, block: object) -> dict[str, WikiEntry]:
         if not isinstance(settings, dict):
             raise _fail(path, f"wiki {name!r} must map to a mapping.")
         rel = settings.get("path", f"wikis/{name}")
-        if not isinstance(rel, str) or not rel:
-            raise _fail(path, f"wiki {name!r}: `path` must be a non-empty string.")
-        if Path(rel).is_absolute() or ".." in Path(rel).parts:
+        if not isinstance(rel, str):
+            raise _fail(path, f"wiki {name!r}: `path` must be a string.")
+        parts = Path(rel).parts
+        # `.` and `` both normalise to no parts and would name the
+        # repository root itself — a wiki that is its own repository is
+        # a standalone wiki, not an entry here, and `find_repo_root`
+        # walks *parents* so it could never be found anyway.
+        if not parts or Path(rel).is_absolute() or ".." in parts:
             raise _fail(
                 path,
-                f"wiki {name!r}: `path` must stay inside the repository, "
-                f"got {rel!r}.",
+                f"wiki {name!r}: `path` must be a relative directory inside "
+                f"the repository, got {rel!r}.",
             )
+        normalised = Path(*parts).as_posix()
+        if normalised in claimed:
+            # Two names for one directory: `name_at` would return whichever
+            # came first and the other wiki would silently be that one.
+            raise _fail(
+                path,
+                f"wikis {claimed[normalised]!r} and {name!r} both point at "
+                f"{normalised!r}.",
+            )
+        claimed[normalised] = name
         title = settings.get("title", name)
         audience = settings.get("audience", [])
         if isinstance(audience, str):
@@ -204,11 +221,24 @@ def _parse_wikis(path: Path, block: object) -> dict[str, WikiEntry]:
             raise _fail(path, f"wiki {name!r}: `audience` must be a list of tags.")
         out[name] = WikiEntry(
             name=name,
-            path=rel.rstrip("/"),
+            path=normalised,
             title=title if isinstance(title, str) else name,
             audience=frozenset(audience),
         )
     return out
+
+
+def is_wiki_root(path: Path) -> bool:
+    """A directory somebody meant to be a wiki: it carries a ``config.yaml``.
+
+    ``outmem init`` always writes one, and it is the one file
+    :meth:`WikiStore.open` never creates on its own — ``open`` will
+    happily scaffold ``wiki/pages/`` and ``log/`` into any directory it
+    is pointed at. So the config file is the honest signal, and the one
+    predicate the registry, the linter and ``repo import`` all share
+    rather than each deciding for themselves.
+    """
+    return (path / CONFIG_FILENAME).is_file()
 
 
 def find_repo_root(wiki_root: Path) -> tuple[Path, str, str | None]:
@@ -408,7 +438,14 @@ class Repo:
         return [n for n, e in self.registry.wikis.items() if e.audience & held]
 
     def wiki(
-        self, name: str, *, audience: Iterable[str], **kwargs: object
+        self,
+        name: str,
+        *,
+        audience: Iterable[str],
+        agent_identity: AgentIdentity | None = None,
+        remote: str | None = None,
+        branch: str | None = None,
+        read_only: bool = False,
     ) -> WikiStore:
         """Open one wiki on behalf of an audience.
 
@@ -416,21 +453,53 @@ class Repo:
         name does. The two are one message on purpose: a caller that can
         tell them apart can enumerate the wikis it may not open, and a
         wiki's *name* can itself be the sensitive part.
+
+        The remaining arguments are :meth:`WikiStore.open`'s. A served
+        session usually wants ``read_only=True`` — it also skips the
+        layout, stale-lock and hook side effects of a writable open.
         """
         if name not in self.wikis_for(audience):
             raise OutmemError(f"no such wiki: {name!r}")
-        return self._open(name, **kwargs)
+        return self._open(
+            name,
+            agent_identity=agent_identity,
+            remote=remote,
+            branch=branch,
+            read_only=read_only,
+        )
 
-    def wiki_as_operator(self, name: str, **kwargs: object) -> WikiStore:
+    def wiki_as_operator(
+        self,
+        name: str,
+        *,
+        agent_identity: AgentIdentity | None = None,
+        remote: str | None = None,
+        branch: str | None = None,
+        read_only: bool = False,
+    ) -> WikiStore:
         """Open one wiki with no audience check — maintenance and admin.
 
         Named for what it is so that reaching for it is a decision.
         """
         if name not in self.registry.wikis:
             raise OutmemError(f"no such wiki: {name!r}")
-        return self._open(name, **kwargs)
+        return self._open(
+            name,
+            agent_identity=agent_identity,
+            remote=remote,
+            branch=branch,
+            read_only=read_only,
+        )
 
-    def wikiset(self, *, audience: Iterable[str], **kwargs: object) -> WikiSet:
+    def wikiset(
+        self,
+        *,
+        audience: Iterable[str],
+        agent_identity: AgentIdentity | None = None,
+        remote: str | None = None,
+        branch: str | None = None,
+        read_only: bool = False,
+    ) -> WikiSet:
         """Open every wiki this audience reaches, read as one.
 
         The ordinary shape of a served session: the open core plus
@@ -438,6 +507,9 @@ class Repo:
         model as a single knowledge base. The access decision is made
         here, once, by choosing which stores go in — everything
         downstream reads what it was handed in full.
+
+        Close the set when done, or use it as a context manager; see
+        :meth:`outmem.wikiset.WikiSet.close`.
         """
         from outmem.wikiset import WikiSet
 
@@ -446,18 +518,53 @@ class Repo:
             raise OutmemError(
                 "these audience tags reach no wiki in this repository."
             )
-        return WikiSet([self._open(n, **kwargs) for n in names])
+        return WikiSet(
+            [
+                self._open(
+                    n,
+                    agent_identity=agent_identity,
+                    remote=remote,
+                    branch=branch,
+                    read_only=read_only,
+                )
+                for n in names
+            ]
+        )
 
-    def _open(self, name: str, **kwargs: object) -> WikiStore:
+    def _open(
+        self,
+        name: str,
+        *,
+        agent_identity: AgentIdentity | None,
+        remote: str | None,
+        branch: str | None,
+        read_only: bool,
+    ) -> WikiStore:
         from outmem.store import WikiStore as _WikiStore
 
         path = self.registry.path_of(name)
         if not path.is_dir():
             raise OutmemError(
-                f"wiki {name!r} is listed in {REGISTRY_FILENAME} but "
-                f"{path} does not exist."
+                f"wiki {name!r} is listed in {REGISTRY_FILENAME} but {path} "
+                "does not exist."
             )
-        return _WikiStore.open(path, **kwargs)  # type: ignore[arg-type]
+        # Refuse rather than let `WikiStore.open` scaffold `wiki/pages/`
+        # and `log/` into a directory that was never made a wiki — that
+        # is how a half-finished `repo add` turns into something that
+        # opens, lints clean, and holds nothing.
+        if not is_wiki_root(path):
+            raise OutmemError(
+                f"wiki {name!r} is listed in {REGISTRY_FILENAME} but {path} "
+                f"is not a wiki (no {CONFIG_FILENAME}). Scaffold it with "
+                "`outmem init`, or drop the entry."
+            )
+        return _WikiStore.open(
+            path,
+            agent_identity=agent_identity,
+            remote=remote,
+            branch=branch,
+            read_only=read_only,
+        )
 
     # -- discovery -----------------------------------------------------
 
@@ -553,124 +660,3 @@ class Repo:
             tags=tuple(self._catalogue_tags(names, include_unused=include_unused)),
             wikis=wikis,
         )
-
-
-# ---------------------------------------------------------------------------
-# Registry lint
-#
-# Both failures these look for are silent by construction. A wiki nobody can
-# reach and a tag nobody can be granted produce no error anywhere — the
-# content is simply gone, and the first sign is somebody asking why the
-# assistant has never heard of the HR handbook.
-# ---------------------------------------------------------------------------
-
-
-def lint_registry(root: Path) -> list[tuple[str, str, str]]:
-    """Check a repository's ``wikis.yaml``.
-
-    Returns ``(severity, kind, message)`` triples — plain tuples rather
-    than :class:`outmem.lint.LintFinding`, which is anchored to a path
-    inside one wiki and has nowhere to put a repository-level problem.
-    """
-    registry = load_registry(root)
-    if registry is None:
-        return [
-            (
-                "error",
-                "registry-missing",
-                f"{root} has no {REGISTRY_FILENAME}.",
-            )
-        ]
-    out: list[tuple[str, str, str]] = []
-    declared = set(registry.tags)
-    used: set[str] = set()
-
-    for name, entry in registry.wikis.items():
-        used |= entry.audience
-        path = registry.path_of(name)
-        if not path.is_dir():
-            out.append(
-                (
-                    "error",
-                    "registry-missing-wiki",
-                    f"wiki {name!r} is listed but {entry.path} does not exist.",
-                )
-            )
-        elif not (path / "config.yaml").is_file():
-            # A listed directory that is not a wiki. Checking only for
-            # existence let a half-finished `repo add` — registry entry
-            # written, scaffolding failed — lint clean, which is the one
-            # state where a clean report is actively misleading.
-            out.append(
-                (
-                    "error",
-                    "registry-not-a-wiki",
-                    f"wiki {name!r} is listed but {entry.path} is not a wiki "
-                    "(no config.yaml). Scaffold it with `outmem init`, or "
-                    "drop the entry.",
-                )
-            )
-        if not entry.audience:
-            out.append(
-                (
-                    "warning",
-                    "registry-unreachable-wiki",
-                    f"wiki {name!r} declares no audience — nobody can open it.",
-                )
-            )
-        for tag in sorted(entry.audience - declared):
-            out.append(
-                (
-                    "error",
-                    "registry-undeclared-tag",
-                    f"wiki {name!r} lists audience tag {tag!r}, which no "
-                    "`tags:` entry declares — nobody can be granted a tag "
-                    "nobody knows exists, so the wiki is unreachable.",
-                )
-            )
-
-    for tag in sorted(declared - used):
-        out.append(
-            (
-                "warning",
-                "registry-unused-tag",
-                f"tag {tag!r} is declared but no wiki lists it — anyone "
-                "granted it gains nothing.",
-            )
-        )
-
-    for path in sorted(_wiki_shaped_dirs(root)):
-        rel = path.relative_to(root).as_posix()
-        if registry.name_at(path) is None:
-            out.append(
-                (
-                    "warning",
-                    "registry-unlisted-wiki",
-                    f"{rel} looks like a wiki but no {REGISTRY_FILENAME} "
-                    "entry names it — it is unreachable, and commits made "
-                    "in it would start their own repository.",
-                )
-            )
-    return out
-
-
-def _wiki_shaped_dirs(root: Path) -> list[Path]:
-    """Directories under ``root`` that look like a wiki root.
-
-    "Looks like" is `config.yaml` beside a `wiki/pages/` directory —
-    what `outmem init` produces. Only one level under `wikis/` and one
-    under the root itself are searched; a deep walk of a repository with
-    thousands of pages costs more than this check is worth.
-    """
-    candidates: list[Path] = []
-    for parent in (root, root / "wikis"):
-        if not parent.is_dir():
-            continue
-        for child in parent.iterdir():
-            if not child.is_dir() or child.name.startswith("."):
-                continue
-            if (child / "config.yaml").is_file() and (
-                child / "wiki" / "pages"
-            ).is_dir():
-                candidates.append(child)
-    return candidates

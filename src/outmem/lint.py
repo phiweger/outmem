@@ -1510,3 +1510,173 @@ def format_report(report: LintReport) -> str:
             lines.append(f"  [{finding.severity.value}] {where}: {finding.message}")
         lines.append("")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Multi-wiki repositories
+#
+# One report for the registry and every wiki it lists, with every path
+# repo-relative — `wikis/legal/wiki/pages/nda.md` — so a reader of the
+# output knows which wiki a finding is in without a per-wiki header.
+#
+# The registry checks look for failures that are silent by construction. A
+# wiki nobody can reach and a tag nobody can be granted produce no error
+# anywhere: the content is simply gone, and the first sign is somebody
+# asking why the assistant has never heard of the HR handbook.
+# ---------------------------------------------------------------------------
+
+
+def indexed_paths_or_none(store: Any) -> list[str] | None:
+    """Paths currently in ``store``'s semantic index, or ``None`` if none.
+
+    ``None`` means "could not check" and makes the corresponding lint
+    check skip, which is the honest answer for a wiki with no index (or
+    one whose index won't open) — distinct from "checked and clean".
+    """
+    from outmem._store import semantic as _semantic
+
+    if not _semantic.available(store):
+        return None
+    try:
+        indexed = _semantic.vector_store_or_open(store).list_indexed_files()
+    except OutmemError:
+        # Missing extra or unreachable embedder. Not a lint failure —
+        # lint must stay useful without the semantic stack installed.
+        return None
+    return [rel_path for rel_path, _hash, _kind in indexed]
+
+
+def lint_repository(root: Path) -> LintReport:
+    """Lint a multi-wiki repository: ``wikis.yaml``, then every wiki in it.
+
+    Each wiki is opened read-only — a lint has no business installing a
+    pre-commit hook or clearing a stale lock as a side effect — and its
+    findings are re-anchored to repo-relative paths before they join the
+    report.
+    """
+    from dataclasses import replace
+
+    from outmem.repo import REGISTRY_FILENAME, is_wiki_root, load_registry
+    from outmem.store import WikiStore
+
+    report = LintReport()
+
+    def registry_finding(kind: str, severity: Severity, message: str) -> None:
+        report.findings.append(
+            LintFinding(kind=kind, severity=severity, path=REGISTRY_FILENAME, message=message)
+        )
+
+    try:
+        registry = load_registry(root)
+    except OutmemError as exc:
+        # A registry that exists but does not parse is worth a finding,
+        # not a crash: the linter is exactly the tool somebody reaches
+        # for when a repository is misbehaving.
+        registry_finding("registry-malformed", Severity.ERROR, str(exc))
+        return report
+    if registry is None:
+        registry_finding(
+            "registry-missing", Severity.ERROR, f"{root} has no {REGISTRY_FILENAME}."
+        )
+        return report
+
+    declared = set(registry.tags)
+    used: set[str] = set()
+    for name, entry in registry.wikis.items():
+        used |= entry.audience
+        path = registry.path_of(name)
+        if not path.is_dir():
+            registry_finding(
+                "registry-missing-wiki",
+                Severity.ERROR,
+                f"wiki {name!r} is listed but {entry.path} does not exist.",
+            )
+        elif not is_wiki_root(path):
+            # A listed directory that is not a wiki. Checking only for
+            # existence let a half-finished `repo add` — entry written,
+            # scaffolding failed — lint clean, which is the one state
+            # where a clean report is actively misleading.
+            registry_finding(
+                "registry-not-a-wiki",
+                Severity.ERROR,
+                f"wiki {name!r} is listed but {entry.path} is not a wiki "
+                "(no config.yaml). Scaffold it with `outmem init`, or drop "
+                "the entry.",
+            )
+        if not entry.audience:
+            registry_finding(
+                "registry-unreachable-wiki",
+                Severity.WARNING,
+                f"wiki {name!r} declares no audience — nobody can open it.",
+            )
+        for tag in sorted(entry.audience - declared):
+            registry_finding(
+                "registry-undeclared-tag",
+                Severity.ERROR,
+                f"wiki {name!r} lists audience tag {tag!r}, which no `tags:` "
+                "entry declares — nobody can be granted a tag nobody knows "
+                "exists, so the wiki is unreachable.",
+            )
+    for tag in sorted(declared - used):
+        registry_finding(
+            "registry-unused-tag",
+            Severity.WARNING,
+            f"tag {tag!r} is declared but no wiki lists it — anyone granted "
+            "it gains nothing.",
+        )
+    for stray in sorted(_wiki_shaped_dirs(root)):
+        if registry.name_at(stray) is None:
+            rel = stray.relative_to(root).as_posix()
+            report.findings.append(
+                LintFinding(
+                    kind="registry-unlisted-wiki",
+                    severity=Severity.WARNING,
+                    path=rel,
+                    message=(
+                        f"looks like a wiki but no {REGISTRY_FILENAME} entry "
+                        "names it — it is unreachable, and commits made in "
+                        "it would start their own repository."
+                    ),
+                )
+            )
+
+    for name in registry.wikis:
+        path = registry.path_of(name)
+        if not is_wiki_root(path):
+            continue  # reported above
+        store = WikiStore.open(path, read_only=True)
+        try:
+            inner = lint_wiki(
+                store.wiki_path,
+                log_dir=store.log_path,
+                sources_dir=store.sources_path,
+                sources_local_dir=store.sources_local_path,
+                repo_root=store.repo,
+                indexed_paths=indexed_paths_or_none(store),
+            )
+            prefix = store.repo_prefix
+        finally:
+            # One store per wiki, each holding lazy SQLite handles.
+            store.close()
+        report.findings.extend(
+            replace(f, path=f"{prefix}{f.path}") for f in inner.findings
+        )
+    return report
+
+
+def _wiki_shaped_dirs(root: Path) -> list[Path]:
+    """Directories one level under ``root`` or ``root/wikis`` that are wikis.
+
+    Only those two levels are searched; a deep walk of a repository with
+    thousands of pages costs more than this check is worth.
+    """
+    from outmem.repo import is_wiki_root
+
+    found: list[Path] = []
+    for parent in (root, root / "wikis"):
+        if not parent.is_dir():
+            continue
+        for child in parent.iterdir():
+            if child.is_dir() and not child.name.startswith(".") and is_wiki_root(child):
+                found.append(child)
+    return found

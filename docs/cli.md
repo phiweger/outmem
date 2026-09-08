@@ -461,10 +461,14 @@ can itself be the sensitive part.
 outmem lint --repo --root /srv/memory
 ```
 
-Checks `wikis.yaml`, then every wiki. Registry findings:
+Checks `wikis.yaml`, then every wiki, as **one report**. Paths are
+repo-relative — `wikis/legal/wiki/pages/nda.md` — so a finding says which wiki
+it is in. Each wiki is opened read-only: linting installs no hook and creates
+nothing. Registry findings:
 
 | Kind | Severity |
 |---|---|
+| `registry-malformed` — `wikis.yaml` exists but does not parse | error |
 | `registry-missing-wiki` — listed, no directory | error |
 | `registry-not-a-wiki` — listed, directory exists, not a wiki | error |
 | `registry-undeclared-tag` — an `audience` tag no `tags:` entry declares | error |
