@@ -3,6 +3,56 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.17.2
+
+A review pass over the multi-wiki work: correctness, typing, and the shape
+of the CLI. No new features.
+
+### Fixed
+
+- **`Repo` refused to open a listed directory that is not a wiki.** Before,
+  `WikiStore.open` scaffolded `wiki/pages/` and `log/` into it as a side
+  effect — the path by which a half-finished `repo add` became something
+  that opened, linted clean, and held nothing. A missing directory and a
+  present-but-empty one are now two distinct errors.
+- **`wikis.yaml` rejects two entries naming one directory**, and a `path`
+  of `.` or `""`. Two names for one directory meant `name_at` returned
+  whichever came first and the other wiki silently *was* that one; `.`
+  names the repository itself, which a walk of *parents* could never find.
+- **`outmem lint --repo` opens each wiki read-only.** A lint has no
+  business installing a pre-commit hook or creating `.outmem/` as a side
+  effect, and it was doing both. A malformed `wikis.yaml` is now a
+  `registry-malformed` finding rather than a crash — the linter is what
+  somebody reaches for when a repository is misbehaving.
+
+### Changed
+
+- **`outmem lint --repo` is one report.** Findings from every wiki carry
+  repo-relative paths (`wikis/legal/wiki/pages/nda.md`), so the path says
+  which wiki without a header per wiki, and the exit-code rule is the one
+  `outmem lint` already used. `lint_registry` in `outmem.repo` is replaced
+  by `outmem.lint.lint_repository`, which returns a `LintReport` like
+  everything else in that module.
+- **`Repo.wiki`, `wiki_as_operator` and `wikiset` spell out their
+  arguments** (`agent_identity`, `remote`, `branch`, `read_only`) instead of
+  forwarding `**kwargs` past the type checker. Keyword callers are
+  unaffected.
+- **`Repo` and `WikiSet` are exported from `outmem`.**
+- **The `repo` subcommands no longer accept `--wiki`**, which they ignored;
+  the subject of every one of them is the registry. They live in
+  `outmem.cli.repo` now, and the starter `wikis.yaml` is plain YAML — the
+  comments it carried were dropped by the first `repo add`, which
+  round-trips the file through the YAML loader.
+- Federated search results carry which wikis truncated (`FederatedSearch`),
+  and the read tools use the qualified accessors rather than re-formatting
+  names by hand.
+
+### Docs
+
+- `docs/python-api.md` gains the multi-wiki section it was missing;
+  `docs/features.md` a pointer; `docs/development.md`'s repository layout
+  is current again.
+
 ## 0.17.1
 
 ### Fixed

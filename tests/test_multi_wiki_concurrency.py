@@ -174,3 +174,26 @@ class TestLockPlacement:
         )
         store.write_page("x", title="X", body="Body.\n")
         assert store.exists("x")
+
+
+class TestLockPreparationFailure:
+    def test_a_lock_directory_that_cannot_be_created_degrades_to_unlocked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The real branch, not a stub of it: `mkdir` raising for the lock
+        # directory alone. A wiki with one writer must keep working where
+        # a lock cannot be taken.
+        from outmem._store.locking import REPO_STATE_DIR
+
+        store = WikiStore.init(tmp_path / "solo")
+        real_mkdir = Path.mkdir
+
+        def refuse_lock_dir(self: Path, *a: object, **k: object) -> None:
+            if self.name == REPO_STATE_DIR:
+                raise OSError("read-only file system")
+            real_mkdir(self, *a, **k)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "mkdir", refuse_lock_dir)
+        store.write_page("x", title="X", body="Body.\n")
+        assert store.exists("x")
+        assert not (store.root / REPO_STATE_DIR).exists()

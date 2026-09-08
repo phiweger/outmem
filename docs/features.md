@@ -287,6 +287,29 @@ The render pipeline rewrites `[[wikilink]]` into markdown
 with `html=False`. Defence in depth: raw HTML in wiki body is escaped,
 not rendered.
 
+## Several wikis in one repository
+
+No extra needed. Some material is for part of the company only; outmem
+separates it by putting each audience in its own wiki inside one git
+repository, declared in a `wikis.yaml` at the repository root. A wiki is the
+compartment — within it everything is open — and a session is permitted a set
+of wikis up front, so nothing at read time filters anything.
+
+```bash
+outmem repo init --root /srv/memory
+outmem repo add legal --root /srv/memory --audience legal
+outmem repo tags --json          # the vocabulary your user database provisions against
+```
+
+```python
+from outmem import Repo
+with Repo.open("/srv/memory").wikiset(audience=user_tags, read_only=True) as wikis:
+    ...
+```
+
+Layout, host integration, what crosses a wiki boundary and what does not:
+[`multi-wiki.md`](multi-wiki.md).
+
 ## Bundled skill bodies
 
 For internal completeness: the runtime's system prompt is composed of

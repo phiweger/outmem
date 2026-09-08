@@ -128,7 +128,7 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         except OutmemError as exc:
             return f"(search failed: {exc})"
         lines = [
-            f"{h.wiki}/{h.hit.path}:{h.hit.line_number}: {h.hit.text.rstrip()}"
+            f"{h.path}:{h.hit.line_number}: {h.hit.text.rstrip()}"
             for h in result.hits
             if h.hit.is_match
         ]
@@ -176,10 +176,7 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
             excerpt = m.match.content[:_EXCERPT_CHARS].strip()
             if len(m.match.content) > _EXCERPT_CHARS:
                 excerpt += " …"
-            blocks.append(
-                f"{m.wiki}/{m.match.rel_path}  (similarity "
-                f"{m.match.similarity:.2f})\n{excerpt}"
-            )
+            blocks.append(f"{m.rel_path}  (similarity {m.match.similarity:.2f})\n{excerpt}")
         return "\n\n".join(blocks)
 
     def find_backlinks(name: str) -> str:

@@ -397,9 +397,9 @@ class TestRegistryLint:
     """
 
     def _kinds(self, root: Path) -> set[str]:
-        from outmem.repo import lint_registry
+        from outmem.lint import lint_repository
 
-        return {kind for _sev, kind, _msg in lint_registry(root)}
+        return {f.kind for f in lint_repository(root).findings if f.kind.startswith("registry-")}
 
     def test_a_clean_repository_reports_nothing(
         self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
@@ -565,7 +565,7 @@ class TestReviewFindings:
     def test_a_half_registered_wiki_does_not_lint_clean(
         self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
     ) -> None:
-        from outmem.repo import lint_registry
+        from outmem.lint import lint_repository
 
         # `repo add` creates the directory before scaffolding it. Checking
         # only that the directory *exists* let this state pass — the one
@@ -575,7 +575,7 @@ class TestReviewFindings:
             REGISTRY + "  half: {path: wikis/half, audience: [legal]}\n",
             encoding="utf-8",
         )
-        kinds = {kind for _sev, kind, _msg in lint_registry(repo)}
+        kinds = {f.kind for f in lint_repository(repo).findings}
         assert "registry-not-a-wiki" in kinds
 
     def test_repo_add_rolls_back_when_scaffolding_fails(
@@ -720,3 +720,101 @@ class TestReviewFindings:
         tracked = _run_git(["ls-files"], cwd=root)
         assert "wikis.yaml" in tracked
         assert ".gitignore" not in tracked
+
+
+class TestRegistryParsingEdges:
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # `.` is the repository itself — a wiki that is its own repo is
+            # a standalone wiki, not an entry, and could never be found by
+            # a walk of *parents* anyway.
+            "wikis:\n  w: {path: .}\n",
+            "wikis:\n  w: {path: ''}\n",
+            "wikis:\n  w: {path: ./}\n",
+            # Two names for one directory: `name_at` would hand back the
+            # first and the second wiki would silently *be* the first.
+            "wikis:\n  a: {path: wikis/x}\n  b: {path: wikis/x}\n",
+            "wikis:\n  a: {path: wikis/x}\n  b: {path: ./wikis/x/}\n",
+            "wikis:\n  Bad Name: {path: wikis/x}\n",
+            "wikis:\n  w: {path: 5}\n",
+            "tags: [not, a, mapping]\n",
+            "tags:\n  t: 5\n",
+        ],
+    )
+    def test_refused(self, tmp_path: Path, body: str) -> None:
+        (tmp_path / "wikis.yaml").write_text(body, encoding="utf-8")
+        with pytest.raises(OutmemError):
+            load_registry(tmp_path)
+
+    def test_lenient_shapes_are_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "wikis.yaml").write_text(
+            "tags:\n  a:\n  b: 'plain description'\n  c: {description: 7}\n"
+            "wikis:\n  w: {audience: solo, title: 3}\n",
+            encoding="utf-8",
+        )
+        registry = load_registry(tmp_path)
+        assert registry is not None
+        assert registry.tags == {"a": "", "b": "plain description", "c": ""}
+        assert registry.wikis["w"].path == "wikis/w"
+        assert registry.wikis["w"].audience == frozenset({"solo"})
+        assert registry.wikis["w"].title == "w"
+
+
+class TestRepositoryLint:
+    def test_a_malformed_registry_is_a_finding_not_a_crash(self, tmp_path: Path) -> None:
+        # The linter is exactly what somebody reaches for when a repository
+        # is misbehaving; crashing on the thing they came to diagnose
+        # would be the wrong answer.
+        from outmem.lint import lint_repository
+
+        (tmp_path / "wikis.yaml").write_text(": : :\n bad\n", encoding="utf-8")
+        report = lint_repository(tmp_path)
+        assert [f.kind for f in report.findings] == ["registry-malformed"]
+        assert report.has_errors
+
+    def test_findings_carry_repo_relative_paths(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        # One report for every wiki: the path says which wiki a finding is
+        # in, so there is no need for a header per wiki.
+        from outmem.lint import lint_repository
+
+        openw, legal = wiki_pair
+        openw.write_page("a", title="A", body="See [[pricng]].\n")
+        legal.write_page("b", title="B", body="See [[nope]].\n")
+        paths = {f.path for f in lint_repository(repo).findings if f.kind == "broken-wikilink"}
+        assert paths == {"wikis/open/wiki/pages/a.md", "wikis/legal/wiki/pages/b.md"}
+
+    def test_linting_installs_no_hook_and_scaffolds_nothing(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore]
+    ) -> None:
+        # Wikis are opened read-only for lint. A writable open would
+        # auto-install the pre-commit hook and create `.outmem/` as side
+        # effects of a command that only reads.
+        import shutil
+
+        from outmem.lint import lint_repository
+
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        if hook.exists():
+            hook.unlink()
+        shutil.rmtree(repo / "wikis" / "open" / ".outmem", ignore_errors=True)
+        lint_repository(repo)
+        assert not hook.exists()
+        assert not (repo / "wikis" / "open" / ".outmem").exists()
+
+    def test_cli_exit_codes_match_single_wiki_lint(
+        self, repo: Path, wiki_pair: tuple[WikiStore, WikiStore],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from outmem.cli.__main__ import main
+
+        openw, _legal = wiki_pair
+        assert main(["lint", "--repo", "--root", str(repo)]) == 0
+        openw.write_page("a", title="A", body="Orphan.\n")  # warning: orphan-page
+        assert main(["lint", "--repo", "--root", str(repo)]) == 1
+        assert main(["lint", "--repo", "--root", str(repo), "--error-only"]) == 0
+        openw.write_page("b", title="B", body="See [[nope]].\n")  # error
+        assert main(["lint", "--repo", "--root", str(repo)]) == 2
+        assert "wikis/open/wiki/pages/b.md" in capsys.readouterr().out

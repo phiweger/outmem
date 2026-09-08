@@ -332,10 +332,13 @@ outmem hook install --root /srv/memory --wiki open
 outmem lint --repo --root /srv/memory
 ```
 
-Checks the registry, then every wiki. Registry findings:
+Checks the registry, then every wiki, as one report with repo-relative paths
+(`wikis/legal/wiki/pages/nda.md`). Wikis are opened read-only for lint — it
+installs no hook and creates nothing. Registry findings:
 
 | Kind | Severity | Meaning |
 |---|---|---|
+| `registry-malformed` | error | `wikis.yaml` exists but does not parse |
 | `registry-missing-wiki` | error | listed in `wikis.yaml`, no directory |
 | `registry-not-a-wiki` | error | listed, directory exists, but it is not a wiki (no `config.yaml`) |
 | `registry-undeclared-tag` | error | an `audience` tag no `tags:` entry declares — the wiki is unreachable |

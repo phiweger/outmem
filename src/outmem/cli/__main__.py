@@ -21,48 +21,29 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from outmem import __version__
 from outmem._progress import report_progress
-from outmem.config import (
-    DEFAULT_BRANCH,
-    SEMANTIC_INDEX_PAGES,
-    SEMANTIC_UNAVAILABLE_HELP,
-)
+from outmem.cli._common import TIMESTAMP_FMT as _TIMESTAMP_FMT
+from outmem.cli._common import agent_identity as _agent_identity
+from outmem.cli._common import base_root
+from outmem.cli._common import status as _status
+from outmem.cli.repo import register as register_repo_commands
+from outmem.config import SEMANTIC_INDEX_PAGES, SEMANTIC_UNAVAILABLE_HELP
 from outmem.exceptions import OutmemError
-from outmem.repo import REGISTRY_FILENAME, Repo, load_registry, split_subject
+from outmem.lint import LintReport
+from outmem.repo import REGISTRY_FILENAME, load_registry, split_subject
 from outmem.sources import SOURCES_DIR, SOURCES_LOCAL_DIR
-from outmem.store import AgentIdentity, WikiStore, ensure_gitignored
-
-_TIMESTAMP_FMT = "%H:%M:%S"
-
-
-def _status(msg: str) -> None:
-    """Print a status / progress line to stdout, prefixed with a local
-    ``[HH:MM:SS]`` timestamp. Reserve for human-readable progress messages;
-    keep raw :func:`print` for structured output (commit SHAs, grep hits,
-    paths) that downstream tools might pipe."""
-    print(f"[{datetime.now().strftime(_TIMESTAMP_FMT)}] {msg}")
+from outmem.store import WikiStore
 
 
 def _resolve_root(args: argparse.Namespace) -> Path:
-    # ``--root`` uses argparse.SUPPRESS default (so nested subparsers don't
-    # clobber outer-level values), which means it's ABSENT from args rather
-    # than None when unset — use getattr to handle both forms cleanly.
-    root = getattr(args, "root", None)
-    base = (
-        Path(root).expanduser()
-        if root
-        else Path(os.environ.get("OUTMEM_PATH", "")).expanduser()
-        if os.environ.get("OUTMEM_PATH")
-        else Path.cwd()
-    )
+    """The wiki a subcommand acts on — ``base_root``, or a wiki inside it."""
+    base = base_root(args)
     wiki = getattr(args, "wiki", None)
     if not wiki:
         return base
@@ -79,20 +60,6 @@ def _resolve_root(args: argparse.Namespace) -> Path:
         known = ", ".join(sorted(registry.wikis)) or "(none)"
         raise OutmemError(f"no such wiki: {wiki!r}. Registered: {known}.")
     return registry.path_of(wiki)
-
-
-def _agent_identity() -> AgentIdentity:
-    """Resolve the agent identity from env, falling back to defaults.
-
-    ``OUTMEM_AGENT_NAME`` and ``OUTMEM_AGENT_EMAIL`` override the
-    defaults so the same install can serve multiple wikis with different
-    agent identities (one process per wiki).
-    """
-    name = os.environ.get("OUTMEM_AGENT_NAME")
-    email = os.environ.get("OUTMEM_AGENT_EMAIL")
-    if name and email:
-        return AgentIdentity(name=name, email=email)
-    return AgentIdentity()
 
 
 def _open_store(args: argparse.Namespace) -> WikiStore:
@@ -596,102 +563,35 @@ def cmd_hook_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
-def _indexed_paths_or_none(store: WikiStore) -> list[str] | None:
-    """Paths currently in the semantic index, or ``None`` if there isn't one.
-
-    ``None`` means "could not check" and makes the corresponding lint
-    check skip, which is the honest answer for a wiki with no index (or
-    one whose index won't open) — distinct from "checked and clean".
-    """
-    from outmem._store import semantic as _semantic
-
-    if not _semantic.available(store):
-        return None
-    try:
-        indexed = _semantic.vector_store_or_open(store).list_indexed_files()
-    except OutmemError:
-        # Missing extra or unreachable embedder. Not a lint failure —
-        # lint must stay useful without the semantic stack installed.
-        return None
-    return [rel_path for rel_path, _hash, _kind in indexed]
-
-
-def _cmd_lint_repo(args: argparse.Namespace) -> int:
-    """Lint a whole multi-wiki repository: the registry, then each wiki."""
-    from outmem.lint import format_report, lint_wiki
-    from outmem.repo import lint_registry
-
-    root = _repo_root(args)
-    worst = 0
-    registry_findings = lint_registry(root)
-    if registry_findings:
-        print(f"# {REGISTRY_FILENAME}")
-        for severity, kind, message in registry_findings:
-            print(f"  [{severity}] {kind}: {message}")
-        print()
-        if any(s == "error" for s, _k, _m in registry_findings):
-            worst = 2
-        elif not args.error_only:
-            worst = max(worst, 1)
-
-    try:
-        repo = Repo.open(root)
-    except OutmemError as exc:
-        print(f"outmem: {exc}", file=sys.stderr)
+def _lint_exit_code(report: LintReport, *, error_only: bool) -> int:
+    """``2`` on any error, ``1`` on warnings unless ``--error-only``, else ``0``."""
+    if report.has_errors:
         return 2
-
-    for name in repo.registry.wikis:
-        wiki_root = repo.registry.path_of(name)
-        if not wiki_root.is_dir():
-            continue  # already reported by lint_registry
-        store = WikiStore.open(wiki_root, agent_identity=_agent_identity())
-        try:
-            report = lint_wiki(
-                store.wiki_path,
-                log_dir=store.log_path,
-                sources_dir=store.sources_path,
-                sources_local_dir=store.sources_local_path,
-                repo_root=store.repo,
-                indexed_paths=_indexed_paths_or_none(store),
-            )
-        finally:
-            # One store per wiki, each holding lazy SQLite handles. A
-            # repository with thirty wikis would otherwise keep ninety
-            # connections open for the length of the run.
-            store.close()
-        if report.has_findings:
-            print(f"# wiki: {name}")
-            sys.stdout.write(format_report(report))
-            print()
-        if report.has_errors:
-            worst = 2
-        elif report.has_findings and not args.error_only:
-            worst = max(worst, 1)
-    if worst == 0:
-        _status("lint: clean")
-    return worst
+    if report.has_findings and not error_only:
+        return 1
+    return 0
 
 
 def cmd_lint(args: argparse.Namespace) -> int:
-    from outmem.lint import format_report, lint_wiki
+    from outmem.lint import format_report, indexed_paths_or_none, lint_repository, lint_wiki
 
     if getattr(args, "repo", False):
-        return _cmd_lint_repo(args)
-    store = _open_store(args)
-    report = lint_wiki(
-        store.wiki_path,
-        log_dir=store.log_path,
-        sources_dir=store.sources_path,
-        sources_local_dir=store.sources_local_path,
-        repo_root=store.repo,
-        indexed_paths=_indexed_paths_or_none(store),
-    )
+        # The registry plus every wiki in it, as one report whose paths
+        # are repo-relative — `wikis/legal/wiki/pages/nda.md` says which
+        # wiki without a header per wiki.
+        report = lint_repository(base_root(args))
+    else:
+        store = _open_store(args)
+        report = lint_wiki(
+            store.wiki_path,
+            log_dir=store.log_path,
+            sources_dir=store.sources_path,
+            sources_local_dir=store.sources_local_path,
+            repo_root=store.repo,
+            indexed_paths=indexed_paths_or_none(store),
+        )
     sys.stdout.write(format_report(report))
-    if report.has_errors:
-        return 2
-    if report.has_findings and not args.error_only:
-        return 1
-    return 0
+    return _lint_exit_code(report, error_only=args.error_only)
 
 
 def cmd_rename(args: argparse.Namespace) -> int:
@@ -1116,376 +1016,6 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
-_STARTER_REGISTRY = """\
-# Several wikis in one repository. A wiki is the unit of access: within
-# one, everything is open, and separation comes from which wiki a request
-# opens. Add wikis with `outmem repo add <name> --audience <tag>`.
-version: 1
-
-# The declared vocabulary. This is the contract with your user database:
-# store these tags against users, never wiki names, so a wiki can be
-# renamed or moved without touching a user record.
-tags: {}
-
-wikis: {}
-"""
-
-# Repository-level ignores, appended one at a time and only when absent.
-# `.outmem-repo/` carries its own self-ignoring `.gitignore`, so the entry
-# here is belt-and-braces for anyone reading the repo root.
-_REPO_IGNORES = (
-    (".outmem-repo/", "# outmem: repository-level state, not part of any wiki."),
-    (".env", "# outmem: secrets stay out of the repository."),
-)
-
-
-# ---------------------------------------------------------------------------
-# Multi-wiki repositories
-# ---------------------------------------------------------------------------
-
-
-def _repo_root(args: argparse.Namespace) -> Path:
-    """The repository a `repo` subcommand acts on — --root, or the cwd."""
-    root = getattr(args, "root", None)
-    if root:
-        return Path(root).expanduser()
-    env = os.environ.get("OUTMEM_PATH")
-    return Path(env).expanduser() if env else Path.cwd()
-
-
-def _commit_registry(root: Path, *, paths: list[str], subject: str) -> None:
-    """Commit the registry itself.
-
-    Unlike a wiki's scaffold — which `outmem init` leaves untracked for
-    the author's first write to carry in — `wikis.yaml` is what makes a
-    directory a multi-wiki repository, and `find_repo_root` reads it from
-    the working tree. Untracked, it would not survive a clone: every wiki
-    would look standalone, and the next `WikiStore.init` would nest a
-    `.git` inside the repo instead of joining it.
-    """
-    from outmem.git_ops import add as git_add
-    from outmem.git_ops import commit_as, staged_changes
-
-    identity = _agent_identity()
-    git_add(root, paths)
-    added, deleted = staged_changes(root)
-    if not added and not deleted:
-        # Re-running a setup command that changed nothing is a no-op, not
-        # a failure. Without this, git's own "nothing to commit" surfaces
-        # as an error from a command that did exactly what was asked.
-        return
-    commit_as(
-        root,
-        message=subject,
-        author_name=identity.name,
-        author_email=identity.email,
-    )
-
-
-def cmd_repo_init(args: argparse.Namespace) -> int:
-    """Scaffold a multi-wiki repository: a git repo plus an empty registry."""
-    from outmem.git_ops import init_repo
-
-    root = _repo_root(args)
-    root.mkdir(parents=True, exist_ok=True)
-    registry_path = root / REGISTRY_FILENAME
-    if registry_path.exists():
-        print(f"outmem: {registry_path} already exists.", file=sys.stderr)
-        return 1
-    init_repo(root, initial_branch=args.branch)
-    registry_path.write_text(_STARTER_REGISTRY, encoding="utf-8")
-    # Append; never rewrite. `repo init` is routinely run in a directory
-    # that already has a `.gitignore` — writing ours over it silently
-    # dropped whatever was there (`__pycache__/`, `*.pyc`, `.vectors.db`)
-    # and committed the loss.
-    touched = [
-        ensure_gitignored(root, pattern, comment=comment)
-        for pattern, comment in _REPO_IGNORES
-    ]
-    paths = [REGISTRY_FILENAME]
-    if any(touched):
-        paths.append(".gitignore")
-    try:
-        _commit_registry(root, paths=paths, subject="repo: initialise")
-    except OutmemError as exc:
-        print(f"outmem: {exc}", file=sys.stderr)
-        return 1
-    _status(f"initialised multi-wiki repository at {root}")
-    _status("add a wiki with: outmem repo add <name> --audience <tag>")
-    return 0
-
-
-def cmd_repo_add(args: argparse.Namespace) -> int:
-    """Register a new wiki and scaffold it inside the repository."""
-    import yaml
-
-    root = _repo_root(args)
-    registry_path = root / REGISTRY_FILENAME
-    if not registry_path.is_file():
-        print(
-            f"outmem: {root} is not a multi-wiki repository — run "
-            "`outmem repo init` first.",
-            file=sys.stderr,
-        )
-        return 1
-    raw = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
-    wikis = raw.setdefault("wikis", {})
-    if args.name in wikis:
-        print(f"outmem: wiki {args.name!r} is already registered.", file=sys.stderr)
-        return 1
-    tags = raw.setdefault("tags", {})
-    for tag in args.audience:
-        tags.setdefault(tag, {"description": ""})
-    rel = args.path or f"wikis/{args.name}"
-    wikis[args.name] = {
-        "path": rel,
-        "title": args.title or args.name,
-        "audience": list(args.audience),
-    }
-    # Write the registry BEFORE scaffolding: `WikiStore.init` discovers its
-    # repository by looking itself up here, and an unlisted directory would
-    # nest a `.git` inside the repo instead of joining it.
-    registry_path.write_text(
-        yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
-    )
-    (root / rel).mkdir(parents=True, exist_ok=True)
-    try:
-        WikiStore.init(root / rel, agent_identity=_agent_identity())
-        _commit_registry(
-            root, paths=[REGISTRY_FILENAME], subject=f"repo: add {args.name}"
-        )
-    except OutmemError as exc:
-        # Roll the entry back. Leaving it would list a wiki that is not
-        # one — reachable by name, openable by nobody, and a state the
-        # operator has no reason to expect after a command that failed.
-        del wikis[args.name]
-        registry_path.write_text(
-            yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
-            encoding="utf-8",
-        )
-        print(f"outmem: {exc}", file=sys.stderr)
-        print(
-            f"outmem: rolled back the {REGISTRY_FILENAME} entry for "
-            f"{args.name!r}; {rel} may need removing by hand.",
-            file=sys.stderr,
-        )
-        return 1
-    _status(f"registered wiki {args.name!r} at {rel}")
-    return 0
-
-
-def cmd_repo_import(args: argparse.Namespace) -> int:
-    """Move an existing wiki into a multi-wiki repository.
-
-    Two cases, and they differ in what happens to history.
-
-    A wiki already inside the repository is moved with ``git mv``, so
-    every tracked file keeps its history and ``git log --follow`` still
-    works across the move.
-
-    A wiki from elsewhere is copied in and committed as new content. Its
-    own history stays in its own repository — merging two histories is
-    `git subtree`/`filter-repo` work, and doing it badly is worse than
-    not doing it, so this says so rather than pretending.
-    """
-    import shutil
-
-    import yaml
-
-    from outmem.git_ops import is_git_repo
-
-    root = _repo_root(args)
-    registry_path = root / REGISTRY_FILENAME
-    if not registry_path.is_file():
-        print(
-            f"outmem: {root} is not a multi-wiki repository — run "
-            "`outmem repo init` first.",
-            file=sys.stderr,
-        )
-        return 1
-    source = Path(args.path).expanduser().resolve()
-    if not (source / "config.yaml").is_file():
-        print(
-            f"outmem: {source} does not look like a wiki (no config.yaml).",
-            file=sys.stderr,
-        )
-        return 1
-
-    raw = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
-    wikis = raw.setdefault("wikis", {})
-    if args.name in wikis:
-        print(f"outmem: wiki {args.name!r} is already registered.", file=sys.stderr)
-        return 1
-    rel = args.path_in_repo or f"wikis/{args.name}"
-    target = root / rel
-    if target.exists():
-        print(f"outmem: {target} already exists.", file=sys.stderr)
-        return 1
-
-    inside = source.is_relative_to(root.resolve())
-    if inside and (source / ".git").exists():
-        # Moving it would leave a nested repository inside this one: git
-        # then treats the directory as a foreign checkout and refuses to
-        # stage it ("does not have a commit checked out"). Removing the
-        # nested `.git` discards that wiki's history, which is the
-        # operator's call to make, not this command's.
-        print(
-            f"outmem: {source} has its own git repository. A move cannot "
-            "carry its history into this one — remove "
-            f"{source / '.git'} first (this discards that history), or "
-            "import from outside the repository to copy the working tree.",
-            file=sys.stderr,
-        )
-        return 1
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if inside:
-            _run_git_mv(root, source, target)
-        else:
-            shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git"))
-    except (OSError, OutmemError) as exc:
-        print(f"outmem: could not move the wiki: {exc}", file=sys.stderr)
-        return 1
-
-    tags = raw.setdefault("tags", {})
-    for tag in args.audience:
-        tags.setdefault(tag, {"description": ""})
-    wikis[args.name] = {
-        "path": rel,
-        "title": args.title or args.name,
-        "audience": list(args.audience),
-    }
-    registry_path.write_text(
-        yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8"
-    )
-    try:
-        _commit_registry(
-            root,
-            paths=[REGISTRY_FILENAME, rel],
-            subject=f"repo: import {args.name}",
-        )
-    except OutmemError as exc:
-        print(f"outmem: {exc}", file=sys.stderr)
-        return 1
-
-    _status(f"imported {source} as wiki {args.name!r} at {rel}")
-    if not inside:
-        if is_git_repo(source):
-            _status(
-                f"note: {source} keeps its own git history — the copy at "
-                f"{rel} starts fresh. Move it inside the repository first "
-                "if you need `git log --follow` across the boundary."
-            )
-        _status(f"the original at {source} was left in place; remove it yourself")
-    return 0
-
-
-def _run_git_mv(root: Path, source: Path, target: Path) -> None:
-    """``git mv`` inside ``root``, falling back to a plain rename.
-
-    An untracked directory cannot be ``git mv``-ed — there is nothing to
-    move in the index — but moving it is still the right thing, so the
-    failure is not fatal.
-    """
-    import subprocess
-
-    rel_source = source.relative_to(root.resolve()).as_posix()
-    rel_target = target.relative_to(root.resolve()).as_posix()
-    result = subprocess.run(
-        ["git", "mv", "--", rel_source, rel_target],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        source.rename(target)
-
-
-def _emit(payload: dict[str, object], *, as_json: bool) -> None:
-    if as_json:
-        print(json.dumps(payload, indent=2, sort_keys=False))
-
-
-def cmd_repo_list(args: argparse.Namespace) -> int:
-    """The catalogue: which wikis exist and which tags reach them."""
-    try:
-        repo = Repo.open(_repo_root(args))
-    except OutmemError as exc:
-        print(f"outmem: {exc}", file=sys.stderr)
-        return 1
-    catalogue = (
-        repo.catalogue_for(args.audience) if args.audience else repo.catalogue()
-    )
-    if args.json:
-        _emit(catalogue.as_dict(), as_json=True)
-        return 0
-    if not catalogue.wikis:
-        print("outmem: no wikis registered.", file=sys.stderr)
-        return 1
-    width = max(len(w.name) for w in catalogue.wikis)
-    for w in catalogue.wikis:
-        audience = ", ".join(w.audience) or "(nobody)"
-        print(f"{w.name:<{width}}  {w.pages:>5} pages  [{audience}]  {w.title}")
-    return 0
-
-
-def cmd_repo_tags(args: argparse.Namespace) -> int:
-    """The declared vocabulary — what a user database provisions against."""
-    try:
-        repo = Repo.open(_repo_root(args))
-    except OutmemError as exc:
-        print(f"outmem: {exc}", file=sys.stderr)
-        return 1
-    if args.json:
-        _emit(repo.catalogue().as_dict(), as_json=True)
-        return 0
-    tags = repo.tags()
-    if not tags:
-        print("outmem: no tags declared.", file=sys.stderr)
-        return 1
-    width = max(len(t.name) for t in tags)
-    for tag in tags:
-        reaches = ", ".join(tag.wikis) or "(nothing)"
-        suffix = f"  — {tag.description}" if tag.description else ""
-        print(f"{tag.name:<{width}}  -> {reaches}{suffix}")
-    return 0
-
-
-def cmd_repo_audience(args: argparse.Namespace) -> int:
-    """What a user holding these tags would get. The support-ticket tool."""
-    try:
-        repo = Repo.open(_repo_root(args))
-    except OutmemError as exc:
-        print(f"outmem: {exc}", file=sys.stderr)
-        return 1
-    held = set(args.tags)
-    catalogue = repo.catalogue_for(held)
-    # `reconcile` answers a repository-wide question — which tags nobody
-    # holds, which wikis nobody reaches. Asked about one user, only the
-    # `unknown` half means anything: "wikis you cannot see" is the normal
-    # condition, not a finding.
-    unknown = repo.reconcile(held).unknown
-    if args.json:
-        payload = dict(catalogue.as_dict())
-        payload["unknown_tags"] = list(unknown)
-        _emit(payload, as_json=True)
-        return 0
-    if not catalogue.wikis:
-        print(
-            f"outmem: tags {', '.join(sorted(held)) or '(none)'} reach no wiki.",
-            file=sys.stderr,
-        )
-    for w in catalogue.wikis:
-        print(f"{w.name}  {w.title}")
-    if unknown:
-        print(
-            f"outmem: no wiki declares {', '.join(unknown)} — a stale grant "
-            "or a typo.",
-            file=sys.stderr,
-        )
-    return 0 if catalogue.wikis else 1
-
-
 def _slugs_from_commits(subjects: tuple[str, ...]) -> list[str]:
     """Extract slugs from ``compact: <slug>`` / ``extend: <slug>`` commits.
 
@@ -1891,94 +1421,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_rename.set_defaults(func=cmd_rename)
 
-    p_repo = sub.add_parser(
-        "repo",
-        help="Multi-wiki repository: register wikis and inspect audience tags.",
-        parents=[root_parent],
-    )
-    repo_sub = p_repo.add_subparsers(dest="repo_command", required=True)
-
-    p_repo_init = repo_sub.add_parser(
-        "init",
-        help="Scaffold a multi-wiki repository (git repo + wikis.yaml).",
-        parents=[root_parent],
-    )
-    p_repo_init.add_argument("--branch", default=DEFAULT_BRANCH)
-    p_repo_init.set_defaults(func=cmd_repo_init)
-
-    p_repo_add = repo_sub.add_parser(
-        "add",
-        help="Register and scaffold a new wiki inside the repository.",
-        parents=[root_parent],
-    )
-    p_repo_add.add_argument("name")
-    p_repo_add.add_argument(
-        "--audience",
-        action="append",
-        default=[],
-        metavar="TAG",
-        help="Audience tag that reaches this wiki (repeatable).",
-    )
-    p_repo_add.add_argument("--title", default=None)
-    p_repo_add.add_argument(
-        "--path", default=None, help="Directory, relative to the repo root."
-    )
-    p_repo_add.set_defaults(func=cmd_repo_add)
-
-    p_repo_list = repo_sub.add_parser(
-        "list",
-        help="List registered wikis, their audience tags and page counts.",
-        parents=[root_parent],
-    )
-    p_repo_list.add_argument("--json", action="store_true")
-    p_repo_list.add_argument(
-        "--audience",
-        action="append",
-        default=[],
-        metavar="TAG",
-        help="Show only what these tags reach (repeatable).",
-    )
-    p_repo_list.set_defaults(func=cmd_repo_list)
-
-    p_repo_tags = repo_sub.add_parser(
-        "tags",
-        help="The declared tag vocabulary — provision your user DB from this.",
-        parents=[root_parent],
-    )
-    p_repo_tags.add_argument("--json", action="store_true")
-    p_repo_tags.set_defaults(func=cmd_repo_tags)
-
-    p_repo_audience = repo_sub.add_parser(
-        "audience",
-        help="What a user holding these tags would see.",
-        parents=[root_parent],
-    )
-    p_repo_audience.add_argument(
-        "--tags",
-        required=True,
-        type=lambda s: [t for t in s.split(",") if t],
-        help="Comma-separated tags the user holds.",
-    )
-    p_repo_audience.add_argument("--json", action="store_true")
-    p_repo_audience.set_defaults(func=cmd_repo_audience)
-
-    p_repo_import = repo_sub.add_parser(
-        "import",
-        help="Move an existing wiki into the repository and register it.",
-        parents=[root_parent],
-    )
-    p_repo_import.add_argument("path", help="The wiki directory to import.")
-    p_repo_import.add_argument("--name", required=True)
-    p_repo_import.add_argument(
-        "--audience", action="append", default=[], metavar="TAG"
-    )
-    p_repo_import.add_argument("--title", default=None)
-    p_repo_import.add_argument(
-        "--path-in-repo",
-        default=None,
-        help="Destination, relative to the repo root (default wikis/<name>).",
-    )
-    p_repo_import.set_defaults(func=cmd_repo_import)
+    register_repo_commands(sub)
 
     p_sources = sub.add_parser(
         "sources",

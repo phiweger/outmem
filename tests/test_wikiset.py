@@ -51,6 +51,31 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
+@pytest.fixture
+def indexed(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Repo:
+    monkeypatch.setattr(
+        "outmem.semantic.build_embedder",
+        lambda _model: make_bag_of_words_handle(),
+    )
+    monkeypatch.setattr(
+        "outmem.store.build_embedder",
+        lambda _model: make_bag_of_words_handle(),
+        raising=False,
+    )
+    for name in ("open", "hr", "legal"):
+        cfg = repo / "wikis" / name / "config.yaml"
+        cfg.write_text(
+            cfg.read_text(encoding="utf-8").replace(
+                "similarity_threshold: 0.8", "similarity_threshold: 0.01"
+            ),
+            encoding="utf-8",
+        )
+        store = WikiStore.open(repo / "wikis" / name)
+        store.semantic_reindex_all()
+        store.close()
+    return Repo.open(repo)
+
+
 class TestQualifierGrammar:
     @pytest.mark.parametrize(
         ("name", "expected"),
@@ -163,30 +188,6 @@ class TestFannedSearch:
 
 
 class TestSemanticMerge:
-    @pytest.fixture
-    def indexed(self, repo: Path, monkeypatch: pytest.MonkeyPatch) -> Repo:
-        monkeypatch.setattr(
-            "outmem.semantic.build_embedder",
-            lambda _model: make_bag_of_words_handle(),
-        )
-        monkeypatch.setattr(
-            "outmem.store.build_embedder",
-            lambda _model: make_bag_of_words_handle(),
-            raising=False,
-        )
-        for name in ("open", "hr", "legal"):
-            cfg = repo / "wikis" / name / "config.yaml"
-            cfg.write_text(
-                cfg.read_text(encoding="utf-8").replace(
-                    "similarity_threshold: 0.8", "similarity_threshold: 0.01"
-                ),
-                encoding="utf-8",
-            )
-            store = WikiStore.open(repo / "wikis" / name)
-            store.semantic_reindex_all()
-            store.close()
-        return Repo.open(repo)
-
     def test_matches_carry_their_wiki_and_are_ranked_together(
         self, indexed: Repo
     ) -> None:
@@ -357,3 +358,67 @@ class TestTruncationIsVisible:
         tools = {t.__name__: t for t in wikiset_read_tools(wikis)}
         out = tools["grep_wiki"]("version")
         assert "results from legal were truncated" in out
+
+
+class TestToolPaletteEdges:
+    """The branches a happy path never walks — each returns text, not an exception."""
+
+    def _tools(self, repo: Path, audience: set[str]) -> dict[str, object]:
+        from outmem.adapters.wikiset import wikiset_read_tools
+
+        wikis = Repo.open(repo).wikiset(audience=audience)
+        return {t.__name__: t for t in wikiset_read_tools(wikis)}
+
+    def test_read_page_reports_an_invalid_slug(self, repo: Path) -> None:
+        tools = self._tools(repo, {"everyone"})
+        out = tools["read_page"]("open/Not A Slug!")  # type: ignore[operator]
+        assert out.startswith("(")
+
+    def test_read_page_reports_malformed_frontmatter(self, repo: Path) -> None:
+        # A page whose YAML cannot parse is reported as such, not as absent
+        # and not as a crash — the model needs to know the page *exists*
+        # and is broken, which is a different next step.
+        page = repo / "wikis" / "open" / "wiki" / "pages" / "broken.md"
+        page.write_text("---\ntitle: [unterminated\n---\n\nbody\n", encoding="utf-8")
+        tools = self._tools(repo, {"everyone"})
+        out = tools["read_page"]("open/broken")  # type: ignore[operator]
+        assert "malformed frontmatter" in out or "broken" in out
+
+    def test_grep_reports_a_bad_pattern(self, repo: Path) -> None:
+        tools = self._tools(repo, {"everyone"})
+        out = tools["grep_wiki"]("(unclosed")  # type: ignore[operator]
+        assert out.startswith("(search failed") or "no matches" in out
+
+    def test_find_backlinks(self, repo: Path) -> None:
+        WikiStore.open(repo / "wikis" / "open").write_page(
+            "cites", title="Cites", body="See [[pricing]].\n"
+        )
+        tools = self._tools(repo, {"everyone"})
+        assert tools["find_backlinks"]("pricing") == "open/cites"  # type: ignore[operator]
+        assert "nothing links to" in tools["find_backlinks"]("cites")  # type: ignore[operator]
+        assert "no such page" in tools["find_backlinks"]("nope")  # type: ignore[operator]
+
+    def test_search_wiki_without_an_index_says_so(self, repo: Path) -> None:
+        tools = self._tools(repo, {"everyone"})
+        assert "no semantic index" in tools["search_wiki"]("anything")  # type: ignore[operator]
+
+
+class TestSemanticTool:
+    """The federated `search_wiki` tool over a real (stub-embedded) index."""
+
+    def test_search_wiki_ranks_across_wikis_and_labels_each(self, indexed: Repo) -> None:
+        from outmem.adapters.wikiset import wikiset_read_tools
+
+        wikis = indexed.wikiset(audience={"everyone", "hr", "legal"})
+        tools = {t.__name__: t for t in wikiset_read_tools(wikis)}
+        out = tools["search_wiki"]("counsel reviews every NDA", k=3)
+        assert out.startswith("legal/")
+        assert "(similarity " in out
+
+    def test_search_wiki_only_sees_the_set(self, indexed: Repo) -> None:
+        from outmem.adapters.wikiset import wikiset_read_tools
+
+        wikis = indexed.wikiset(audience={"everyone"})
+        tools = {t.__name__: t for t in wikiset_read_tools(wikis)}
+        out = tools["search_wiki"]("counsel reviews every NDA", k=5)
+        assert "legal/" not in out

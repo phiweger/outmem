@@ -621,6 +621,73 @@ Read-only mode is also useful in tests and notebooks: open a wiki
 you don't want to accidentally modify and any commit attempt will
 fail loudly rather than silently writing.
 
+## Several wikis in one repository
+
+Some organisations hold material only part of the company may see. outmem
+separates that by putting each audience in its own wiki, inside one git
+repository. A wiki is the compartment: within it everything is open, and a
+session is permitted a *set of wikis* up front. Nothing at read time decides
+what to hide. Full contract in [`multi-wiki.md`](multi-wiki.md).
+
+```python
+from outmem import Repo
+
+repo = Repo.open("/srv/memory")            # the directory holding wikis.yaml
+
+# One wiki, on behalf of an audience. `audience` is keyword-only and required;
+# a name the audience does not reach fails exactly as an unknown name does.
+store = repo.wiki("legal", audience={"legal", "everyone"}, read_only=True)
+
+# Every wiki the audience reaches, read as one. Close it when done.
+with repo.wikiset(audience={"legal", "everyone"}, read_only=True) as wikis:
+    wikis.names                              # ("open", "legal") — registry order
+    wikis.list_slugs()                       # ["open/pricing", "legal/nda", …]
+    wikis.read("legal/nda")                  # qualified: that wiki only
+    wikis.read("pricing")                    # bare: first wiki holding it
+    wikis.resolve("shared").shadowed         # ("legal/shared",) — what a bare name hid
+    wikis.search("NDA").hits                 # every hit carries .wiki
+    wikis.search("NDA").truncated            # which wikis clipped at the output cap
+    wikis.semantic_find_similar("…", top_k=5)   # merged, then cut — not cut per wiki
+
+# The unrestricted path is named for what it is.
+admin = repo.wiki_as_operator("legal")
+```
+
+`read_only=True` is what a served session wants: besides refusing writes it
+skips the layout, stale-lock and pre-commit-hook side effects of a writable
+open. Reads federate; writes do not — a session that writes takes a single
+`WikiStore`.
+
+**Discovery**, for wiring the audience tags into your own user table. The
+host stores *tags*, never wiki names, so wikis can be renamed or moved without
+touching a user record:
+
+```python
+repo.tags()                        # the declared vocabulary, with wiki back-references
+repo.catalogue()                   # every wiki and tag — admin view
+repo.catalogue_for({"everyone"})   # only what this audience reaches — safe for a picker
+repo.reconcile(all_assigned_tags)  # .unknown: assigned but undeclared; .unreachable: wikis nobody opens
+repo.catalogue().as_dict()         # the versioned JSON `outmem repo tags --json` emits
+```
+
+**Tools** for a PydanticAI agent over the set — one search surface, names
+qualified `wiki/slug`:
+
+```python
+from outmem.adapters.wikiset import wikiset_read_tools
+
+agent = Agent("anthropic:claude-sonnet-5", tools=wikiset_read_tools(wikis))
+```
+
+**Lint** the registry and every wiki in it as one report with repo-relative
+paths:
+
+```python
+from outmem.lint import lint_repository, format_report
+
+print(format_report(lint_repository("/srv/memory")))
+```
+
 ## Logfire from library entry points
 
 The CLI auto-configures Pydantic Logfire from the wiki's
