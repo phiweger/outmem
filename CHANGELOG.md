@@ -3,6 +3,51 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.17.6
+
+### Fixed
+
+- **Federated `search_wiki` returned nothing on a corpus that answered the
+  question.** The multi-wiki path called `find_similar` directly instead of
+  running each wiki's configured retrieval pipeline, which diverged from the
+  single-wiki tool three ways: it ignored `retrieval.strategy`, it inherited
+  `semantic.similarity_threshold` (0.8, tuned for whole-page duplicate
+  detection) where the configured path forces `0.0` because question-vs-chunk
+  cosines sit well below it, and it returned raw chunks — including chunks of
+  ingested source documents — rather than deduped pages.
+
+  The visible symptom was `(nothing close to …)` on an indexed store with a
+  current index. In a grounded-answer system that is the most expensive
+  failure available: "we have nothing on that" is a load-bearing answer, and
+  it was being given because retrieval had broken.
+
+  `WikiSet.search_pages()` now runs each wiki's own strategy and fuses the
+  rankings by Reciprocal Rank Fusion, the method `hybrid` already uses for its
+  legs. `search_wiki` returns `[[wiki/slug]]` page citations, matching the
+  single-wiki contract.
+- **One unindexed wiki blanked semantic search for the whole set.**
+  `semantic_available()` is true if *any* wiki has an index, but the fan-out
+  called every store and an unindexed one raised — so adding a wiki broke
+  search until it was reindexed. Unindexed wikis are skipped.
+- **One failing wiki no longer blanks the others.** A wiki whose retriever
+  errors is reported as a diagnostic; the rest still answer.
+
+### Changed
+
+- **`search_wiki` works without a semantic index.** It used to refuse; it now
+  falls back to bm25 for that query and says so, the same graceful degradation
+  the single-wiki tool has always had.
+- **The no-match message names the wikis searched and carries diagnostics**,
+  so an empty corpus and a retrieval outage are distinguishable.
+
+### Note on the tests
+
+The suite could not have caught this. The fixture covering federated semantic
+search rewrote `similarity_threshold` to `0.01` so the stub embedder would
+produce hits — the exact knob that hid the bug. A second fixture now leaves
+every retrieval setting at its default, and the regression tests run against
+that one.
+
 ## 0.17.5
 
 ### Added

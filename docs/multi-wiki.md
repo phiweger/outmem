@@ -272,6 +272,20 @@ unambiguous. A bare slug resolves in wiki order and reports what it shadowed,
 so a reader who got the open version of a name two wikis share can ask for the
 other.
 
+Each wiki runs the retrieval pipeline **it** configures (`retrieval.strategy`),
+and the per-wiki rankings are fused by Reciprocal Rank Fusion — the same method
+`hybrid` uses for its legs. Fusion rather than concatenation because retrievers
+return order, not comparable scores: one wiki's third-best is not commensurable
+with another's. A wiki whose strategy needs a semantic index it hasn't built
+falls back to bm25 for that query and says so, and a wiki that fails outright
+is reported without blanking the rest.
+
+`search_wiki` returns qualified page citations (`[[legal/nda]]`), not raw
+chunks — the same contract as the single-wiki tool. When nothing matches, the
+message names the wikis searched and carries every diagnostic, because "we have
+nothing on that" is a load-bearing answer and must not be confused with a
+retrieval failure.
+
 Search results carry which wikis had to clip theirs at the output cap, and the
 tool passes that to the model: a partial result that reads as complete is worse
 than no result, because the model concludes the wiki holds nothing more and

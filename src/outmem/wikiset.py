@@ -22,10 +22,12 @@ declared order.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from outmem.config import DEFAULT_OPTIMIZE_RRF_K
 from outmem.exceptions import OutmemError
 from outmem.search import DEFAULT_RESULT_BYTES
 
@@ -89,6 +91,24 @@ class FederatedSearch:
 
 
 @dataclass(frozen=True)
+class FederatedPages:
+    """Merged page ranking across the set, plus why it looks like it does.
+
+    ``notes`` carries every wiki's per-query diagnostic — a rerank that
+    fell back, a semantic strategy running on bm25 because no index is
+    built. Empty ``pages`` with non-empty ``notes`` is a retrieval
+    problem; empty both is an empty corpus. A caller that cannot tell
+    those apart will report "we have nothing on that" when retrieval
+    broke, which in a grounded-answer system is the most expensive
+    confusion available.
+    """
+
+    pages: tuple[str, ...]
+    notes: tuple[str, ...] = ()
+    searched: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Resolution:
     """Where a bare slug landed, and what it shadowed getting there."""
 
@@ -130,6 +150,10 @@ class WikiSet:
                 raise ValueError(f"duplicate wiki name in set: {name!r}")
             named[name] = store
         self._stores = named
+        # Retrievers are expensive to build and safe to reuse; see
+        # `_retriever_for`. Guarded because a served set is shared.
+        self._retrievers: dict[tuple[str, str], Any] = {}
+        self._retriever_lock = threading.Lock()
 
     # -- shape ---------------------------------------------------------
 
@@ -261,6 +285,79 @@ class WikiSet:
                 clipped.append(name)
         return FederatedSearch(hits=tuple(hits), truncated=tuple(clipped))
 
+    def search_pages(self, question: str, *, k: int = 5) -> FederatedPages:
+        """Rank pages across the set using each wiki's *configured* pipeline.
+
+        Every wiki runs the strategy its own ``retrieval.strategy`` names
+        — rerank, hybrid, bm25, whatever — rather than a raw vector
+        search. That matters beyond tidiness: the configured path forces
+        ``threshold=0.0`` on its semantic leg, because question-vs-chunk
+        cosines sit well below the 0.8 default (which is tuned for
+        whole-page near-duplicate detection). A federated path that
+        called ``find_similar`` directly inherited that 0.8 and filtered
+        every match, so the tool reported an empty corpus on a corpus
+        that answered the question.
+
+        The per-wiki rankings are fused by Reciprocal Rank Fusion, the
+        same method ``hybrid`` uses to combine its legs. Fusion rather
+        than concatenation because the retrievers return *order* and no
+        comparable score: one wiki's third-best is not commensurable with
+        another's, and RRF is the house answer to exactly that.
+        """
+        from outmem.optimize.blocks import _reciprocal_rank_fusion
+
+        ranked: list[tuple[str, ...]] = []
+        notes: list[str] = []
+        searched: list[str] = []
+        rrf_k = DEFAULT_OPTIMIZE_RRF_K
+        for name, store in self._stores.items():
+            searched.append(name)
+            rrf_k = store.config.outmem.retrieval.rrf_k
+            try:
+                result = self._retriever_for(store).retrieve(question, k=k)
+            except (OutmemError, ImportError) as exc:
+                # One wiki failing must not blank the whole set: the others
+                # still have answers, and the caller is told which one broke.
+                notes.append(f"{name}: {exc}")
+                continue
+            if result.note:
+                notes.append(f"{name}: {result.note}")
+            ranked.append(tuple(f"{name}{QUALIFIER}{s}" for s in result.slugs))
+        fused = _reciprocal_rank_fusion(ranked, rrf_k)[:k] if ranked else ()
+        return FederatedPages(
+            pages=fused, notes=tuple(notes), searched=tuple(searched)
+        )
+
+    def _retriever_for(self, store: WikiStore) -> Any:
+        """Build-or-reuse this wiki's retriever, keyed by store and strategy.
+
+        Cached because a bm25 candidate net re-reads every page off disk
+        and builds an FTS5 table — once per process, not once per tool
+        call. Keyed on the strategy too, so editing ``config.yaml``
+        mid-session rebuilds rather than serving the old pipeline.
+        """
+        from dataclasses import replace
+
+        from outmem.optimize.blocks import build_retriever_from_settings
+        from outmem.optimize.dsl import strategy_needs_semantic
+
+        configured = store.config.outmem.retrieval.strategy
+        effective = configured
+        if strategy_needs_semantic(configured) and not store.semantic_available():
+            # Same graceful degradation the single-wiki tool does: answer
+            # this query on bm25 rather than erroring, and say so.
+            effective = "bm25"
+        key = (str(store.root), effective)
+        with self._retriever_lock:
+            retriever = self._retrievers.get(key)
+            if retriever is None:
+                settings = store.config.outmem.retrieval
+                if effective != configured:
+                    settings = replace(settings, strategy=effective)
+                retriever = build_retriever_from_settings(store, settings)
+                self._retrievers[key] = retriever
+        return retriever
+
     def semantic_find_similar(
         self,
         text: str,
@@ -280,6 +377,12 @@ class WikiSet:
         """
         merged: list[QualifiedMatch] = []
         for name, store in self._stores.items():
+            if not store.semantic_available():
+                # `semantic_available` on the set is True if ANY wiki has an
+                # index, so a mixed set is normal — a newly added wiki has
+                # none yet. Raising here let one unindexed wiki blank
+                # semantic search for the whole set.
+                continue
             for match in store.semantic_find_similar(
                 text,
                 top_k=top_k,
