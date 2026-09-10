@@ -53,6 +53,14 @@ def repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def indexed(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Repo:
+    """Indexed wikis with the similarity threshold lowered to 0.01.
+
+    Only for exercising `semantic_find_similar` directly, where the caller
+    chooses the threshold. Do NOT reach for this to test `search_wiki`:
+    lowering the threshold is exactly what hid the bug where the federated
+    tool inherited the 0.8 default and filtered every match. That path is
+    covered by `indexed_default`, which leaves the config alone.
+    """
     monkeypatch.setattr(
         "outmem.semantic.build_embedder",
         lambda _model: make_bag_of_words_handle(),
@@ -73,6 +81,39 @@ def indexed(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Repo:
         store = WikiStore.open(repo / "wikis" / name)
         store.semantic_reindex_all()
         store.close()
+    return Repo.open(repo)
+
+
+@pytest.fixture
+def indexed_default(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Repo:
+    """Indexed wikis with **every retrieval setting left at its default**.
+
+    `similarity_threshold` stays at 0.8 and the strategy stays as written.
+    A test that tunes those cannot catch a federated path that ignores
+    them, which is how the "nothing close to …" bug survived a green
+    suite.
+    """
+    monkeypatch.setattr(
+        "outmem.semantic.build_embedder",
+        lambda _model: make_bag_of_words_handle(),
+    )
+    monkeypatch.setattr(
+        "outmem.store.build_embedder",
+        lambda _model: make_bag_of_words_handle(),
+        raising=False,
+    )
+    # `open` runs a semantic strategy; `hr` and `legal` stay on the default
+    # so the set exercises a mix of configured pipelines.
+    cfg = repo / "wikis" / "open" / "config.yaml"
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8").replace(
+            "strategy: rerank(bm25)", "strategy: semantic"
+        ),
+        encoding="utf-8",
+    )
+    store = WikiStore.open(repo / "wikis" / "open")
+    store.semantic_reindex_all()
+    store.close()
     return Repo.open(repo)
 
 
@@ -398,22 +439,28 @@ class TestToolPaletteEdges:
         assert "nothing links to" in tools["find_backlinks"]("cites")  # type: ignore[operator]
         assert "no such page" in tools["find_backlinks"]("nope")  # type: ignore[operator]
 
-    def test_search_wiki_without_an_index_says_so(self, repo: Path) -> None:
+    def test_search_wiki_works_without_a_semantic_index(self, repo: Path) -> None:
+        # It used to refuse outright. It now runs the configured pipeline,
+        # which falls back to bm25 when a semantic strategy has no index —
+        # the same graceful degradation the single-wiki tool has always had.
         tools = self._tools(repo, {"everyone"})
-        assert "no semantic index" in tools["search_wiki"]("anything")  # type: ignore[operator]
+        out = tools["search_wiki"]("list price cost")  # type: ignore[operator]
+        assert "[[open/pricing]]" in out
 
 
 class TestSemanticTool:
     """The federated `search_wiki` tool over a real (stub-embedded) index."""
 
-    def test_search_wiki_ranks_across_wikis_and_labels_each(self, indexed: Repo) -> None:
+    def test_search_wiki_returns_qualified_page_citations(self, indexed: Repo) -> None:
+        # The contract is pages, `[[wiki/slug]]`, matching the single-wiki
+        # tool. It used to emit raw chunk excerpts with a cosine attached.
         from outmem.adapters.wikiset import wikiset_read_tools
 
         wikis = indexed.wikiset(audience={"everyone", "hr", "legal"})
         tools = {t.__name__: t for t in wikiset_read_tools(wikis)}
         out = tools["search_wiki"]("counsel reviews every NDA", k=3)
-        assert out.startswith("legal/")
-        assert "(similarity " in out
+        assert "[[legal/nda]]" in out
+        wikis.close()
 
     def test_search_wiki_only_sees_the_set(self, indexed: Repo) -> None:
         from outmem.adapters.wikiset import wikiset_read_tools
@@ -422,3 +469,135 @@ class TestSemanticTool:
         tools = {t.__name__: t for t in wikiset_read_tools(wikis)}
         out = tools["search_wiki"]("counsel reviews every NDA", k=5)
         assert "legal/" not in out
+        wikis.close()
+
+
+class TestConfiguredPipelineIsFederated:
+    """The federated path runs each wiki's configured retrieval strategy.
+
+    It used to call `find_similar` directly, which meant three divergences
+    from the single-wiki tool: it ignored `retrieval.strategy`, it
+    inherited the `similarity_threshold` that the configured path exists
+    to override (0.8, tuned for whole-page duplicate detection, filters
+    every question-vs-chunk match), and it returned raw chunks rather than
+    deduped pages. The symptom was "(nothing close to …)" on a corpus that
+    answered the question — an empty-corpus claim caused by a retrieval
+    outage, which is the most expensive confusion a grounded-answer system
+    has.
+    """
+
+    def test_the_default_threshold_no_longer_filters_everything(
+        self, indexed_default: Repo
+    ) -> None:
+        wikis = indexed_default.wikiset(audience={"everyone", "hr", "legal"})
+        assert wikis.store("open").config.outmem.semantic.similarity_threshold == 0.8
+        assert wikis.store("open").config.outmem.retrieval.strategy == "semantic"
+        found = wikis.search_pages("shared open version", k=5)
+        assert found.pages, f"empty on a corpus that answers it; notes={found.notes}"
+        wikis.close()
+
+    def test_the_low_level_api_still_honours_the_configured_threshold(
+        self, indexed_default: Repo
+    ) -> None:
+        # The two are different contracts and both must hold: the pipeline
+        # bypasses the threshold, the raw call obeys it.
+        wikis = indexed_default.wikiset(audience={"everyone"})
+        assert wikis.semantic_find_similar("shared open version", top_k=5) == []
+        assert wikis.semantic_find_similar(
+            "shared open version", top_k=5, threshold=0.0
+        )
+        wikis.close()
+
+    def test_results_are_qualified_pages_not_chunks_or_sources(
+        self, indexed_default: Repo, repo: Path
+    ) -> None:
+        store = WikiStore.open(repo / "wikis" / "open")
+        doc = repo / "handbuch.md"
+        doc.write_text("The open version, restated in a source document.\n", encoding="utf-8")
+        store.add_source(doc)
+        store.close()
+        wikis = indexed_default.wikiset(audience={"everyone"})
+        for name in wikis.search_pages("shared open version", k=5).pages:
+            wiki, slug = split_qualified(name)
+            assert wiki == "open"
+            assert "/" not in slug and "sources" not in slug
+            assert wikis.store("open").exists(slug)
+        wikis.close()
+
+    def test_an_unindexed_wiki_does_not_blank_the_set(
+        self, indexed_default: Repo
+    ) -> None:
+        # `semantic_available` is true if ANY wiki has an index, so a mixed
+        # set is the normal state — a newly added wiki has none. Raising
+        # killed semantic search for every wiki.
+        wikis = indexed_default.wikiset(audience={"everyone", "hr", "legal"})
+        assert not wikis.store("hr").semantic_available()
+        assert wikis.search_pages("shared open version", k=5).pages
+        assert wikis.semantic_find_similar("open version", top_k=5, threshold=0.0)
+        wikis.close()
+
+    def test_every_wiki_in_the_set_is_searched(self, indexed_default: Repo) -> None:
+        wikis = indexed_default.wikiset(audience={"everyone", "hr", "legal"})
+        assert set(wikis.search_pages("anything", k=5).searched) == {
+            "open", "hr", "legal"
+        }
+        wikis.close()
+
+    def test_one_failing_wiki_does_not_blank_the_others(
+        self, indexed_default: Repo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from outmem.wikiset import WikiSet
+
+        wikis = indexed_default.wikiset(audience={"everyone", "hr", "legal"})
+        real = WikiSet._retriever_for
+
+        def explode(self: WikiSet, store: WikiStore) -> object:
+            if store.wiki_name == "legal":
+                raise OutmemError("boom")
+            return real(self, store)
+
+        monkeypatch.setattr(WikiSet, "_retriever_for", explode)
+        found = wikis.search_pages("shared open version", k=5)
+        assert found.pages
+        assert any("legal: boom" in n for n in found.notes)
+        wikis.close()
+
+
+class TestEmptyResultIsDistinguishable:
+    """"Nothing found" and "retrieval broke" must not read the same.
+
+    In a grounded-answer system "we have nothing on that" is a load-bearing
+    answer. A caller that cannot tell it from an outage states it with
+    confidence anyway.
+    """
+
+    def _tool(self, repo_obj: Repo, audience: set[str]) -> object:
+        from outmem.adapters.wikiset import wikiset_read_tools
+
+        wikis = repo_obj.wikiset(audience=audience)
+        return {t.__name__: t for t in wikiset_read_tools(wikis)}["search_wiki"]
+
+    def test_the_empty_message_names_what_was_searched(
+        self, indexed_default: Repo
+    ) -> None:
+        # A bm25-only set: a semantic strategy bypasses the threshold by
+        # design and so always returns its top-k, which means "no match" is
+        # only reachable on a lexical pipeline.
+        out = self._tool(indexed_default, {"hr", "legal"})("quantenchromodynamik")
+        assert "no pages matched" in out
+        assert "hr" in out and "legal" in out
+
+    def test_a_retrieval_failure_is_reported_as_a_diagnostic(
+        self, indexed_default: Repo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from outmem.wikiset import FederatedPages, WikiSet
+
+        monkeypatch.setattr(
+            WikiSet,
+            "search_pages",
+            lambda self, q, *, k=5: FederatedPages(
+                pages=(), notes=("open: embedder unreachable",), searched=("open",)
+            ),
+        )
+        out = self._tool(indexed_default, {"everyone"})("anything")
+        assert "diagnostics" in out and "embedder unreachable" in out

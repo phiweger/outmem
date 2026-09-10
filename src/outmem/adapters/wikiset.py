@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from outmem.exceptions import FrontmatterError, OutmemError, SlugError
+from outmem.wikiset import split_qualified
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -146,38 +147,52 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         return "\n".join(lines)
 
     def search_wiki(question: str, k: int = 5) -> str:
-        """Meaning-based search across every wiki in this session.
+        """Find the pages most likely to answer a question, across every wiki.
 
-        Returns the passages closest to your question, best first,
-        each labelled with the wiki it came from. Candidates from every
-        wiki are ranked together, so a compartment holding the answer
-        outranks the open core rather than queueing behind it.
+        The primary search tool: ask a natural-language question, get back
+        the most relevant whole pages, each qualified with the wiki it
+        came from. Every wiki runs the pipeline *it* configures
+        (`retrieval.strategy`), and the rankings are fused, so a
+        compartment holding the answer outranks the open core rather than
+        queueing behind it. Call `read_page` on the interesting ones.
+
+        Use this for question-shaped queries. For the exact line a literal
+        string appears on, use `grep_wiki`.
 
         Example:
             search_wiki(question="how is the list price calculated?")
 
         Args:
             question: A natural-language question.
-            k: How many passages to return.
+            k: How many pages to return.
         """
-        if not wikis.semantic_available():
-            return (
-                "(no semantic index — use `grep_wiki` for exact matching, or "
-                "run `outmem reindex` on the wikis that need one)"
-            )
         try:
-            matches = wikis.semantic_find_similar(question, top_k=k)
+            found = wikis.search_pages(question, k=k)
         except OutmemError as exc:
-            return f"(semantic search failed: {exc})"
-        if not matches:
-            return f"(nothing close to {question!r} in: {', '.join(wikis.names)})"
-        blocks = []
-        for m in matches:
-            excerpt = m.match.content[:_EXCERPT_CHARS].strip()
-            if len(m.match.content) > _EXCERPT_CHARS:
-                excerpt += " …"
-            blocks.append(f"{m.rel_path}  (similarity {m.match.similarity:.2f})\n{excerpt}")
-        return "\n\n".join(blocks)
+            return f"(search_wiki failed: {exc})"
+        if not found.pages:
+            # Never report an empty corpus when retrieval is what failed.
+            # "We have nothing on that" is a load-bearing answer here, and
+            # a caller who cannot tell it from an outage will state it
+            # with confidence.
+            where = ", ".join(found.searched) or "(none)"
+            detail = f" (diagnostics: {'; '.join(found.notes)})" if found.notes else ""
+            return (
+                f"(no pages matched {question!r} in: {where} — try rephrasing, "
+                f"or `grep_wiki` for literal keyword matches){detail}"
+            )
+        lines: list[str] = []
+        for qualified in found.pages:
+            wiki, slug = split_qualified(qualified)
+            try:
+                body = wikis.store(wiki or "").read(slug).body.replace("\n", " ").strip()
+            except OutmemError:
+                body = ""
+            preview = body[:_EXCERPT_CHARS] + ("…" if len(body) > _EXCERPT_CHARS else "")
+            lines.append(f"  - [[{qualified}]] {preview}")
+        if found.notes:
+            lines.append(f"(diagnostics: {'; '.join(found.notes)})")
+        return "\n".join(lines)
 
     def find_backlinks(name: str) -> str:
         """Which pages link to this one.
