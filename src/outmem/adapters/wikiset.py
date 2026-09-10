@@ -28,10 +28,10 @@ if TYPE_CHECKING:
 
     from outmem.wikiset import WikiSet
 
-# How many characters of a matched chunk to show per semantic hit. Enough
-# to judge relevance, short enough that ten of them do not fill the
-# context the model needs for the answer.
-_EXCERPT_CHARS = 400
+# How much of a page to show per hit, so the model can tell whether it is
+# worth a `read_page`. Matches the single-wiki tool: the two produce the
+# same kind of result and should look the same doing it.
+_PREVIEW_CHARS = 200
 
 
 def _wiki_note(wikis: WikiSet) -> str:
@@ -185,10 +185,15 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         for qualified in found.pages:
             wiki, slug = split_qualified(qualified)
             try:
-                body = wikis.store(wiki or "").read(slug).body.replace("\n", " ").strip()
+                store = wikis.store(wiki) if wiki else None
+                body = (
+                    store.read(slug).body.replace("\n", " ").strip() if store else ""
+                )
             except OutmemError:
+                # A page can vanish between ranking and rendering; a missing
+                # preview is better than losing the citation.
                 body = ""
-            preview = body[:_EXCERPT_CHARS] + ("…" if len(body) > _EXCERPT_CHARS else "")
+            preview = body[:_PREVIEW_CHARS] + ("…" if len(body) > _PREVIEW_CHARS else "")
             lines.append(f"  - [[{qualified}]] {preview}")
         if found.notes:
             lines.append(f"(diagnostics: {'; '.join(found.notes)})")

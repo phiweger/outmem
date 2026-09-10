@@ -40,13 +40,30 @@ history (`git log --grep '^release:'`).
 - **The no-match message names the wikis searched and carries diagnostics**,
   so an empty corpus and a retrieval outage are distinguishable.
 
+### Also fixed, from reviewing the above
+
+- **The fusion constant was read per wiki**, inside the loop, so the value
+  used to fuse was whichever wiki came last — a silent dependence on registry
+  order. It is the set's constant now: a wiki's `rrf_k` governs fusion within
+  its own hybrid strategy, which is a different fusion over different inputs.
+- **`WikiSet.close()` left the retriever cache populated.** Retrievers hold
+  their store and, for bm25, a built FTS5 table — exactly what closing exists
+  to release.
+- **Page previews were sized by the constant left over from chunk excerpts**
+  (400 chars). They match the single-wiki tool's 200 now; the two produce the
+  same kind of result and should look the same doing it.
+
 ### Note on the tests
 
-The suite could not have caught this. The fixture covering federated semantic
-search rewrote `similarity_threshold` to `0.01` so the stub embedder would
-produce hits — the exact knob that hid the bug. A second fixture now leaves
-every retrieval setting at its default, and the regression tests run against
-that one.
+The suite could not have caught the original bug. The fixture covering
+federated semantic search rewrote `similarity_threshold` to `0.01` so the stub
+embedder would produce hits — the exact knob that hid it. A second fixture now
+leaves every retrieval setting at its default, and the regression tests run
+against that one.
+
+The fusion-constant fix needed the same care: an ordering assertion could not
+catch it, because `rrf_k` changes rank only when candidates compete. That test
+captures the argument the fusion is actually called with.
 
 ## 0.17.5
 

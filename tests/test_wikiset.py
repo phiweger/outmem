@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from outmem.exceptions import OutmemError
+from outmem.optimize import blocks as wikiset_module
 from outmem.repo import Repo
 from outmem.semantic.testing import make_bag_of_words_handle
 from outmem.store import WikiStore
@@ -601,3 +602,71 @@ class TestEmptyResultIsDistinguishable:
         )
         out = self._tool(indexed_default, {"everyone"})("anything")
         assert "diagnostics" in out and "embedder unreachable" in out
+
+
+class TestReviewOfTheFederatedFix:
+    """Regressions for problems found reviewing 0.17.6, not by its tests."""
+
+    def test_the_fusion_constant_is_the_sets_not_a_wikis(
+        self, indexed_default: Repo, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `rrf_k` was read inside the per-wiki loop, so the constant used to
+        # fuse was whichever wiki came last — a silent dependence on
+        # registry order. Asserting the *ranking* cannot catch this
+        # reliably (k changes order only when candidates compete), so
+        # capture the argument the fusion was actually called with.
+        import yaml
+
+        from outmem.config import DEFAULT_OPTIMIZE_RRF_K
+
+        for name, value in (("open", 10), ("hr", 90)):
+            cfg = repo / "wikis" / name / "config.yaml"
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+            data.setdefault("retrieval", {})["rrf_k"] = value
+            cfg.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+        seen: list[int] = []
+        real = wikiset_module._reciprocal_rank_fusion
+
+        def capture(ranked: list[tuple[str, ...]], rrf_k: int) -> tuple[str, ...]:
+            seen.append(rrf_k)
+            return real(ranked, rrf_k)
+
+        monkeypatch.setattr(
+            "outmem.optimize.blocks._reciprocal_rank_fusion", capture
+        )
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "hr"})
+        wikis.search_pages("shared open version", k=5)
+        wikis.close()
+        assert seen == [DEFAULT_OPTIMIZE_RRF_K]
+        assert 10 not in seen and 90 not in seen
+
+    def test_close_releases_the_retriever_cache(self, indexed_default: Repo) -> None:
+        # Retrievers hold their store and, for bm25, a built FTS5 table.
+        # Leaving them cached kept alive exactly what closing releases.
+        wikis = indexed_default.wikiset(audience={"everyone", "hr"})
+        wikis.search_pages("shared open version", k=5)
+        assert wikis._retrievers
+        wikis.close()
+        assert not wikis._retrievers
+
+    def test_preview_length_matches_the_single_wiki_tool(
+        self, indexed_default: Repo, repo: Path
+    ) -> None:
+        # The two tools produce the same kind of result and should look the
+        # same doing it; the constant had been carried over from the chunk
+        # excerpts the tool no longer returns.
+        from outmem.adapters.wikiset import _PREVIEW_CHARS, wikiset_read_tools
+
+        assert _PREVIEW_CHARS == 200
+        store = WikiStore.open(repo / "wikis" / "open")
+        store.write_page("lang", title="Lang", body="wort " * 300)
+        store.close()
+        wikis = Repo.open(repo).wikiset(audience={"everyone"})
+        tools = {t.__name__: t for t in wikiset_read_tools(wikis)}
+        line = next(
+            ln for ln in tools["search_wiki"]("wort", k=5).splitlines() if "lang" in ln
+        )
+        assert "…" in line
+        assert len(line) < 400
+        wikis.close()
