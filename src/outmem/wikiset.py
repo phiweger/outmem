@@ -25,13 +25,14 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from outmem.config import DEFAULT_OPTIMIZE_RRF_K
 from outmem.exceptions import OutmemError
 from outmem.search import DEFAULT_RESULT_BYTES
 
 if TYPE_CHECKING:
+    from outmem.optimize.blocks import Retriever
     from outmem.search import SearchHit
     from outmem.semantic.store import Match
     from outmem.store import WikiPage, WikiStore
@@ -152,7 +153,7 @@ class WikiSet:
         self._stores = named
         # Retrievers are expensive to build and safe to reuse; see
         # `_retriever_for`. Guarded because a served set is shared.
-        self._retrievers: dict[tuple[str, str], Any] = {}
+        self._retrievers: dict[tuple[str, str], Retriever] = {}
         self._retriever_lock = threading.Lock()
 
     # -- shape ---------------------------------------------------------
@@ -309,10 +310,8 @@ class WikiSet:
         ranked: list[tuple[str, ...]] = []
         notes: list[str] = []
         searched: list[str] = []
-        rrf_k = DEFAULT_OPTIMIZE_RRF_K
         for name, store in self._stores.items():
             searched.append(name)
-            rrf_k = store.config.outmem.retrieval.rrf_k
             try:
                 result = self._retriever_for(store).retrieve(question, k=k)
             except (OutmemError, ImportError) as exc:
@@ -323,12 +322,20 @@ class WikiSet:
             if result.note:
                 notes.append(f"{name}: {result.note}")
             ranked.append(tuple(f"{name}{QUALIFIER}{s}" for s in result.slugs))
-        fused = _reciprocal_rank_fusion(ranked, rrf_k)[:k] if ranked else ()
+        # The set's own constant, not any wiki's. A wiki's `rrf_k` governs
+        # fusion *within* its hybrid strategy — a different fusion, over its
+        # own legs. Reading it here picked whichever wiki came last, which
+        # is a silent arbitrary choice when they disagree.
+        fused = (
+            _reciprocal_rank_fusion(ranked, DEFAULT_OPTIMIZE_RRF_K)[:k]
+            if ranked
+            else ()
+        )
         return FederatedPages(
             pages=fused, notes=tuple(notes), searched=tuple(searched)
         )
 
-    def _retriever_for(self, store: WikiStore) -> Any:
+    def _retriever_for(self, store: WikiStore) -> Retriever:
         """Build-or-reuse this wiki's retriever, keyed by store and strategy.
 
         Cached because a bm25 candidate net re-reads every page off disk
@@ -415,6 +422,11 @@ class WikiSet:
         Build a set once per audience and keep it, or use it as a context
         manager.
         """
+        with self._retriever_lock:
+            # Retrievers hold their store and, for bm25, a built FTS5 table.
+            # Leaving them cached would keep alive exactly what closing is
+            # meant to release.
+            self._retrievers.clear()
         for store in self._stores.values():
             store.close()
 
