@@ -416,6 +416,11 @@ class WikiStore:
         # an adjudication is about the words, and an alias must not make
         # the same decision be taken twice.
         self._elision_allowed: set[str] = set()
+        # Whether a model that re-sends an elided body unchanged is taken
+        # at its word. From `completeness.elision_yield` in config.yaml; a
+        # plain attribute so a connector can withdraw the yield for the
+        # store it serves regardless of how the wiki is configured.
+        self.elision_yield: bool = config.outmem.completeness.elision_yield
 
     # ------------------------------------------------------------------
     # Construction
@@ -450,11 +455,14 @@ class WikiStore:
         ``read_only=True`` flips the store into a refusing-to-mutate
         mode:
 
-        * Every commit-producing entry point (``write_page``,
-          ``extend_page``, ``append_log``, ``add_source``,
-          ``record_ingestion``, ``rebuild_index``, ``import_vault``)
-          raises :class:`OutmemError` via a single guard in
-          :meth:`_commit_paths`.
+        * Every mutating entry point (``write_page``, ``extend_page``,
+          ``append_page``, ``append_log``, ``rename_page``,
+          ``add_source``, ``record_ingestion``, ``rebuild_index``,
+          ``import_vault``, the registry repairs, the semantic reindex)
+          raises :class:`OutmemError` from :meth:`_refuse_if_read_only`
+          *before* anything touches disk or the registry, so a refused
+          call leaves no page file, no regenerated index and no row
+          behind. :meth:`_commit_paths` refuses as well, as the backstop.
         * ``pull()`` is also refused — ``git pull --rebase`` would
           mutate the working tree.
         * The directory-creating layout step is skipped, the stale
@@ -766,6 +774,8 @@ class WikiStore:
         ``fix: repair frontmatter…`` commit (``commit_subject`` overrides
         the subject). Read-only stores refuse the write step.
         """
+        if not dry_run:
+            self._refuse_if_read_only("repair pages")
         from outmem.slug import relpath_to_slug
 
         repaired: list[tuple[str, str]] = []
@@ -914,6 +924,7 @@ class WikiStore:
         depends on the prefix grammar — see spec §9).
         ``wiki/index.md`` is regenerated and staged in the same commit.
         """
+        self._refuse_if_read_only("write a page")
         with self._write_lock:
             if slug == INDEX_SLUG:
                 raise OutmemError(
@@ -946,7 +957,10 @@ class WikiStore:
             )
             if not allow_elision:
                 _reject_incomplete_body(
-                    body, tool="write_page", allowed=self._elision_allowed
+                    body,
+                    tool="write_page",
+                    allowed=self._elision_allowed,
+                    resubmission_yields=self.elision_yield,
                 )
             # Both guards run before anything touches disk, so a refused
             # write leaves no half-applied state — no page file, no
@@ -994,6 +1008,7 @@ class WikiStore:
 
         Returns the new HEAD SHA.
         """
+        self._refuse_if_read_only("rename a page")
         with self._write_lock:
             old_slug = self.resolve_slug(old_slug)
             validate_slug(old_slug)
@@ -1059,6 +1074,7 @@ class WikiStore:
 
     def commit_registry(self, subject: str) -> str | None:
         """Commit ``.sources.db`` alone, for registry-only mutations."""
+        self._refuse_if_read_only("commit the registry")
         return self._commit_paths(
             [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
             subject=subject,
@@ -1171,6 +1187,7 @@ class WikiStore:
         # _page_relpath(slug) would not, so the commit would stage a path
         # that doesn't exist — after the page and index.md were already
         # rewritten on disk.
+        self._refuse_if_read_only("extend a page")
         with self._write_lock:
             slug = self.resolve_slug(slug)
             if slug == INDEX_SLUG:
@@ -1180,7 +1197,10 @@ class WikiStore:
                 )
             if not allow_elision:
                 _reject_incomplete_body(
-                    body, tool="extend_page", allowed=self._elision_allowed
+                    body,
+                    tool="extend_page",
+                    allowed=self._elision_allowed,
+                    resubmission_yields=self.elision_yield,
                 )
             page = self.read(slug)
             if provenance is not None:
@@ -1257,6 +1277,7 @@ class WikiStore:
         :meth:`extend_page`, whose replace semantics exist so a
         re-compaction can drop a superseded source.
         """
+        self._refuse_if_read_only("append to a page")
         with self._write_lock:
             slug = self.resolve_slug(slug)
             if slug == INDEX_SLUG:
@@ -1271,7 +1292,10 @@ class WikiStore:
                 )
             if not allow_elision:
                 _reject_incomplete_body(
-                    body, tool="append_page", allowed=self._elision_allowed
+                    body,
+                    tool="append_page",
+                    allowed=self._elision_allowed,
+                    resubmission_yields=self.elision_yield,
                 )
             page = self.read(slug)
             existing = page.body.rstrip()
@@ -1317,6 +1341,7 @@ class WikiStore:
         hook, where we want the rebuilt index to land in the
         human's commit rather than a separate one).
         """
+        self._refuse_if_read_only("rebuild the index")
         self._regenerate_index()
         rel = f"{self.config.wiki_dir}/{INDEX_FILENAME}"
         if not commit:
@@ -1339,6 +1364,7 @@ class WikiStore:
         callers compose their own structure (timestamp, session ID, etc.).
         Commit message defaults to ``log: <topic>``.
         """
+        self._refuse_if_read_only("append to the log")
         with self._write_lock:
             if not topic.strip():
                 raise OutmemError("append_log: topic must be non-empty.")
@@ -1598,6 +1624,7 @@ class WikiStore:
         command. Rows that fail that check are skipped, so the count
         returned is what was actually written.
         """
+        self._refuse_if_read_only("assign document keys")
         from outmem.sources import DocumentKeyConflict
 
         registry = _sources.get_registry(self)
@@ -1643,6 +1670,8 @@ class WikiStore:
         Each tree has its own registry, so a key held in both names two
         unrelated documents and must be disambiguated.
         """
+        if not dry_run:
+            self._refuse_if_read_only("rekey a document")
         tree = self._tree_for_document(old_key, local=local)
         registry = _sources.get_registry(self, tree)
         if dry_run:
@@ -1708,6 +1737,8 @@ class WikiStore:
         also the one nothing cleans. Only the tracked registry produces
         a commit; the local one lives inside the gitignored tree.
         """
+        if not dry_run:
+            self._refuse_if_read_only("collect registry garbage")
         from outmem.sources import RegistryAudit, gc_registry
 
         audit = gc_registry(self.sources_path, dry_run=dry_run)
@@ -1834,6 +1865,7 @@ class WikiStore:
         check inside :meth:`VectorStore.reindex_file` short-circuits
         unchanged content.
         """
+        self._refuse_if_read_only("reindex the semantic index")
         return _semantic.reindex_path(self, rel_path)
 
     def semantic_remove_path(self, rel_path: str) -> int:
@@ -1856,6 +1888,7 @@ class WikiStore:
         The summary's ``dropped_paths`` lists wiki pages that exist on disk
         but did not make it into the index — check them, they are
         unreachable by search."""
+        self._refuse_if_read_only("reindex the semantic index")
         return _semantic.reindex_all(
             self,
             force=force,
@@ -2151,6 +2184,24 @@ class WikiStore:
         """
         add(self.repo, [self._repo_relpath(p) for p in paths])
 
+    def _refuse_if_read_only(self, action: str) -> None:
+        """The read-only guard, at the *entry* of every mutating method.
+
+        ``read_only=True`` promises a store that refuses to mutate, and
+        :meth:`_commit_paths` kept that promise for git — but every write
+        path puts its files on disk first and commits second, so a
+        refused ``write_page`` still left the page and a regenerated
+        ``index.md`` in the tree, and a refused ``record_ingestion`` had
+        already written its registry row. This runs before any of that.
+        The commit-time guard stays as the backstop for whatever reaches
+        it another way.
+        """
+        if self.config.read_only:
+            raise OutmemError(
+                f"wiki at {self.root} is opened read-only; refused to {action}. "
+                "Reopen with `WikiStore.open(..., read_only=False)` to mutate it."
+            )
+
     def _commit_paths(self, paths: Sequence[str], *, subject: str) -> str:
         if self.config.read_only:
             raise OutmemError(
@@ -2284,7 +2335,11 @@ def _reject_unregistered_provenance(
 
 
 def _reject_incomplete_body(
-    body: str, *, tool: str, allowed: set[str] | None = None
+    body: str,
+    *,
+    tool: str,
+    allowed: set[str] | None = None,
+    resubmission_yields: bool = True,
 ) -> None:
     """Raise if ``body`` stops at an elision marker.
 
@@ -2312,6 +2367,14 @@ def _reject_incomplete_body(
     cannot change that. The two branches are one exception type because
     callers handle them identically — retry, don't commit — and they
     differ only in whether insisting is an answer.
+
+    ``resubmission_yields=False`` withdraws the elision yield as well
+    (``completeness.elision_yield`` in config, or
+    :attr:`WikiStore.elision_yield`): the message then tells the model to
+    rephrase so the marker does not end its line, and the exception
+    carries ``resubmittable=False`` so the tool wrapper never arms the
+    yield. For a store served over a connector, where the model reading
+    this is a host's and follows "send it again unchanged" reflexively.
     """
     if allowed is not None and _body_text_key(body) in allowed:
         return
@@ -2340,17 +2403,30 @@ def _reject_incomplete_body(
     if not found:
         return
     lines = tuple(f"line {e.line}: {e.text}" for e in found[:3])
+    if resubmission_yields:
+        quoted = (
+            "If the ellipsis belongs to a quotation and the text is already "
+            "complete, submit the same body again unchanged — or pass "
+            "`--allow-elision` (CLI) / `allow_elision=True` (API). "
+        )
+    else:
+        quoted = (
+            "If the ellipsis belongs to a quotation and the text is already "
+            "complete, rephrase so the marker does not end its line — "
+            "sending this body again unchanged will be refused again. Only "
+            "an operator can pass it as written (`--allow-elision` (CLI) / "
+            "`allow_elision=True` (API)). "
+        )
     raise IncompleteBodyError(
         f"{tool}: the body stops at an elision marker "
         f"({found[0].marker!r}) — outmem pages must carry the complete "
         f"text, since nothing downstream can tell a shortened page from a "
         f"finished one. Write the full content; if it does not fit in one "
         f"call, send what fits now and add the rest with `append_page`. "
-        f"If the ellipsis belongs to a quotation and the text is already "
-        f"complete, submit the same body again unchanged — or pass "
-        f"`--allow-elision` (CLI) / `allow_elision=True` (API). "
+        f"{quoted}"
         f"Offending: {'; '.join(lines)}",
         markers=lines,
+        resubmittable=resubmission_yields,
     )
 
 

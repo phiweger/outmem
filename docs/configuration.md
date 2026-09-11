@@ -103,6 +103,11 @@ semantic:
 approval:
   required_for_writes: false              # flip on for review-before-commit
 
+# Optional — whether a model that re-sends an elided body unchanged is
+# taken at its word. See growing-the-wiki.md §2b.
+completeness:
+  elision_yield: true                     # false for a wiki served over a connector
+
 # Optional — Pydantic Logfire instrumentation. See features.md.
 logfire:
   enabled: false                          # true + LOGFIRE_TOKEN in env → traces

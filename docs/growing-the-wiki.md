@@ -112,9 +112,24 @@ human has the one-step override instead (`--allow-elision`,
 a flag a model can set is a flag it learns to tick. The `⟪ outmem: … ⟫`
 marker gets no such yield: outmem wrote that marker itself, so the page
 is provably built on content the model was not shown, and re-sending
-unchanged is refused again. Worth knowing if you drive these tools over
-a connector, where the model reading the refusal is not the one whose
-retry budget pays for it.
+unchanged is refused again.
+
+That yield is right inside outmem's own agent loop, where a false
+positive would otherwise cost the whole turn against a bounded retry
+budget. Over a connector it is a sentence a host model follows
+reflexively, and the elided page lands on the second try. For a wiki
+served that way, withdraw it:
+
+```yaml
+# config.yaml
+completeness:
+  elision_yield: false
+```
+
+or, from the serving code, `store.elision_yield = False` after opening.
+The refusal then tells the model to rephrase so the marker does not end
+its line, an identical resubmission is refused again, and only an
+operator can pass the body as written (`--allow-elision`).
 
 If a turn ends because it ran out of output room while writing a page,
 `outmem ask` warns and names the page even when nothing was marked —

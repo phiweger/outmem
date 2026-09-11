@@ -273,6 +273,93 @@ class TestToolSentinelIsRefusedAtWriteTime:
         assert isinstance(tool(**kwargs), str)
 
 
+class TestTheYieldCanBeWithdrawn:
+    """`completeness.elision_yield: false` — for a wiki served over a
+    connector, where the model reading the refusal is a host's and
+    follows "send it again unchanged" reflexively."""
+
+    def _tool(self, store: WikiStore, name: str):  # type: ignore[no-untyped-def]
+        from outmem.adapters.pydantic_ai import wiki_tools
+
+        return next(t for t in wiki_tools(store) if t.__name__ == name)
+
+    @pytest.fixture
+    def strict(self, tmp_path: Path) -> WikiStore:
+        root = tmp_path / "strict"
+        WikiStore.init(root).close()
+        yaml_path = root / "config.yaml"
+        text = yaml_path.read_text(encoding="utf-8")
+        assert "completeness:\n  elision_yield: true" in text  # the template carries it
+        yaml_path.write_text(
+            text.replace(
+                "completeness:\n  elision_yield: true",
+                "completeness:\n  elision_yield: false",
+            ),
+            encoding="utf-8",
+        )
+        return WikiStore.open(root)
+
+    def test_it_is_read_from_config(self, strict: WikiStore) -> None:
+        assert strict.config.outmem.completeness.elision_yield is False
+        assert strict.elision_yield is False
+
+    def test_the_default_is_on(self, store: WikiStore) -> None:
+        assert store.config.outmem.completeness.elision_yield is True
+        assert store.elision_yield is True
+
+    @pytest.mark.parametrize(
+        ("name", "kwargs"),
+        [
+            ("write_page", {"slug": "clinical:neu", "title": "Neu"}),
+            ("extend_page", {"slug": "clinical:sepsis"}),
+            ("append_page", {"slug": "clinical:sepsis"}),
+        ],
+    )
+    def test_insisting_is_refused_again(
+        self, strict: WikiStore, name: str, kwargs: dict[str, str]
+    ) -> None:
+        from pydantic_ai import ModelRetry
+
+        strict.write_page("clinical:sepsis", title="Sepsis", body="Existing.\n")
+        tool = self._tool(strict, name)
+        for _attempt in (1, 2):
+            with pytest.raises(ModelRetry):
+                tool(body=TRUNCATED, **kwargs)
+        assert not strict.exists("clinical:neu")
+        assert "[…]" not in strict.read("clinical:sepsis").body
+
+    def test_the_message_no_longer_invites_it(self, strict: WikiStore) -> None:
+        # The instruction the model reads has to match what the store
+        # will do — inviting a resubmission and then refusing it is
+        # worse than either behaviour alone.
+        with pytest.raises(IncompleteBodyError) as caught:
+            strict.write_page("clinical:neu", title="Neu", body=TRUNCATED)
+        text = str(caught.value)
+        assert "same body again unchanged" not in text
+        assert "refused again" in text
+        assert "does not end its line" in text
+        assert caught.value.resubmittable is False
+
+    def test_the_attribute_withdraws_it_at_runtime(self, store: WikiStore) -> None:
+        # A connector serving an arbitrarily configured wiki can enforce
+        # it for the store it holds, whatever config.yaml says.
+        from pydantic_ai import ModelRetry
+
+        store.elision_yield = False
+        tool = self._tool(store, "write_page")
+        kwargs = {"slug": "clinical:neu", "title": "Neu", "body": TRUNCATED}
+        for _attempt in (1, 2):
+            with pytest.raises(ModelRetry):
+                tool(**kwargs)
+        assert not store.exists("clinical:neu")
+
+    def test_the_operator_override_still_works(self, strict: WikiStore) -> None:
+        # Withdrawing the model's yield must not take the human's
+        # one-step override with it.
+        strict.write_page("clinical:neu", title="Neu", body=TRUNCATED, allow_elision=True)
+        assert strict.exists("clinical:neu")
+
+
 class TestHumanAdjudicationIsHonoured:
     """The guard exists to catch a model truncating under budget pressure,
     not to overrule the person the approval gate was installed for."""

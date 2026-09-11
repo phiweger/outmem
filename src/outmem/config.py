@@ -83,6 +83,12 @@ DEFAULT_SEMANTIC_EMBED_HEADINGS = False
 
 DEFAULT_APPROVAL_REQUIRED_FOR_WRITES = False
 
+# Whether a model that re-sends an elided body unchanged is taken at its
+# word. On inside outmem's own agent loop, where a false positive would
+# otherwise cost the whole turn; off for a deployment where the model
+# reading the refusal is not the one whose retry budget pays for it.
+DEFAULT_COMPLETENESS_ELISION_YIELD = True
+
 # The cheap gate model the rerank strategy uses, and the per-candidate
 # excerpt cap it feeds that model.
 DEFAULT_RELEVANCE_MODEL = "anthropic:claude-haiku-4-5"
@@ -173,6 +179,34 @@ class ApprovalSettings:
     """
 
     required_for_writes: bool = DEFAULT_APPROVAL_REQUIRED_FOR_WRITES
+
+
+@dataclass
+class CompletenessSettings:
+    """How strictly the completeness guard treats a model that insists.
+
+    The guard refuses a body that ends at an elision marker. It is a
+    positional heuristic and can be wrong about a quoted ellipsis, so by
+    default a model that re-sends the identical body after the refusal is
+    taken at its word: the page lands and ``outmem lint`` reports it as
+    ``truncated-page``. Inside outmem's own agent loop that is the right
+    bargain — a false positive would otherwise cost the whole turn.
+
+    ``elision_yield: false`` withdraws it. The refusal then tells the
+    model to rephrase so the marker does not end its line, and an
+    identical resubmission is refused again; only an operator can pass
+    the body as written (``--allow-elision`` / ``allow_elision=True``).
+    For a wiki served over a connector, where the model reading the
+    refusal is a host's and "send it again unchanged" gets followed
+    reflexively.
+
+    Mirrors the YAML block::
+
+        completeness:
+          elision_yield: true           # default
+    """
+
+    elision_yield: bool = DEFAULT_COMPLETENESS_ELISION_YIELD
 
 
 @dataclass
@@ -353,6 +387,7 @@ class OutmemConfig:
     sources: SourceSettings = field(default_factory=SourceSettings)
     semantic: SemanticSettings = field(default_factory=SemanticSettings)
     approval: ApprovalSettings = field(default_factory=ApprovalSettings)
+    completeness: CompletenessSettings = field(default_factory=CompletenessSettings)
     logfire: LogfireSettings = field(default_factory=LogfireSettings)
     retrieval: RetrievalSettings = field(default_factory=RetrievalSettings)
     extra: dict[str, Any] = field(default_factory=dict)
@@ -492,6 +527,7 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
         "sources",
         "semantic",
         "approval",
+        "completeness",
         "logfire",
         "retrieval",
     }
@@ -594,6 +630,12 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
         approval_block.get("required_for_writes"), bool
     ):
         config.approval.required_for_writes = approval_block["required_for_writes"]
+
+    completeness_block = data.get("completeness")
+    if isinstance(completeness_block, dict) and isinstance(
+        completeness_block.get("elision_yield"), bool
+    ):
+        config.completeness.elision_yield = completeness_block["elision_yield"]
 
     logfire_block = data.get("logfire")
     if isinstance(logfire_block, dict) and isinstance(
@@ -748,6 +790,13 @@ def starter_yaml(
         "# `append_log` and read tools are not gated.\n"
         "approval:\n"
         f"  required_for_writes: {str(DEFAULT_APPROVAL_REQUIRED_FOR_WRITES).lower()}\n"
+        "\n"
+        "# Whether a model that re-sends an elided body unchanged is taken at\n"
+        "# its word (the ellipsis was quoted text). Right inside outmem's own\n"
+        "# agent loop; set false for a wiki served over a connector, where\n"
+        "# the model reading the refusal follows \"send it again\" reflexively.\n"
+        "completeness:\n"
+        f"  elision_yield: {str(DEFAULT_COMPLETENESS_ELISION_YIELD).lower()}\n"
         "\n"
         "# Optional: send spans + LLM traces to Pydantic Logfire.\n"
         "# Requires `pip install outmem[logfire]` and $LOGFIRE_TOKEN\n"

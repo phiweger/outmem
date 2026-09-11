@@ -5,6 +5,21 @@ history (`git log --grep '^release:'`).
 
 ## 0.18.0
 
+### Added
+
+- **`completeness.elision_yield`** — an off switch for the resubmission yield.
+  The completeness guard refuses a body that ends at an elision marker; because
+  that is a positional heuristic that can be wrong about a quoted ellipsis, a
+  model that re-sends the identical body is taken at its word and the page
+  lands (reported by lint as `truncated-page`). Right inside outmem's own agent
+  loop, where a false positive would otherwise cost the whole turn. Over an MCP
+  connector it is a sentence a host model follows reflexively, and the elided
+  page lands on the second try. `elision_yield: false` in `config.yaml` — or
+  `store.elision_yield = False` from the serving code, whatever the wiki says —
+  withdraws it: the refusal tells the model to rephrase so the marker does not
+  end its line, an identical resubmission is refused again, and only an
+  operator can pass the body as written (`--allow-elision`). Default unchanged.
+
 ### Changed
 
 - **A `provenance:` citation that names no registered source is now refused at
@@ -54,6 +69,25 @@ history (`git log --grep '^release:'`).
 
 ### Fixed
 
+- **A read-only store wrote files before refusing.** `read_only=True` promised a
+  store that refuses to mutate, but the only guard sat in `_commit_paths`, and
+  every write path puts its files on disk first: a refused `write_page` left the
+  page and a regenerated `index.md` in the tree (so a second attempt said "page
+  exists"), and a refused `record_ingestion` had already written its registry
+  row — a write `git status` never showed. Every mutating entry point now
+  refuses at the door, before anything touches disk or the registry; the
+  commit-time guard stays as the backstop. Dry runs of the repairs still work,
+  since a dry run is a read.
+- **Concurrent openers of a fresh registry failed with `duplicate column name`.**
+  `_migrate` decided what to `ALTER` by reading the schema, then acted inside a
+  deferred transaction — so sixteen ingest workers starting together all read
+  "column missing", and every one after the first failed on its own open for
+  something another process had done. Reproduced at 16 openers: one round in
+  two lost at least one. The decision is now made under the write lock
+  (`BEGIN IMMEDIATE`, with the existing `busy_timeout` making the others wait
+  rather than error), and the schema is read again inside it. Zero failures
+  in thirty rounds afterwards; the reproduction ships as a test, alongside a
+  deterministic interleaving that holds the lock across an opener's arrival.
 - **A page built on content outmem had withheld could be written by insisting.**
   The completeness guard refuses two things under one exception: a body that
   ends at an elision marker, and a body carrying an `⟪ outmem: … ⟫` marker,
