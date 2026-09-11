@@ -65,7 +65,20 @@ Above 10k units the rate is renegotiated."
 # ADDS a section, keeping what's there (extend REPLACES the body).
 # --provenance here ADDS pointers, deduped — an appended section often
 # draws on a source the page already cites.
+```
 
+**`--provenance` must name a registered source.** Every write path refuses a
+citation the registry does not hold, before anything touches disk — nothing is
+written and nothing is committed. `outmem sources list` shows the keys you can
+cite; `outmem ingest` is how a new one gets a key. A registry *row* is the
+criterion, not a file: citing a superseded version is legal (that is what
+`outmem stale` is for), and a row whose file was later deleted is a lint
+warning, not a refused write. Accepted forms are
+`<sha>/file.md`, `sources/<sha>/file.md` and `sources-local/<sha>/file.md`,
+each optionally prefixed `wiki/`. Pages with no provenance at all are fine —
+navigation hubs have none.
+
+```bash
 outmem log pricing <<< "- saw a contradiction between deck and msa."
 outmem pull
 outmem push
@@ -498,7 +511,11 @@ outmem lint --error-only     # exit non-zero only for errors
 
 Static checks. **Errors:** broken wikilinks, malformed frontmatter, slug /
 filename mismatch, two pages claiming one slug. **Warnings:** orphans,
-stale provenance, provenance citing a sha256 the registry no longer holds,
+`unregistered-provenance` (a citation with no registry row at all — register
+the source or drop the claim; new writes are refused outright, so this only
+appears on pages written before 0.18), `stale-provenance` (the row is there but
+the file is gone — restore it or update the page), provenance citing a sha256
+the registry no longer holds,
 `.sources.db` disagreeing with disk in either direction, frontmatter that
 only parses after self-heal, source versions that should be one chain and
 aren't (below), and *dead slug mentions* — a slug written as prose

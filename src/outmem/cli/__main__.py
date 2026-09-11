@@ -143,6 +143,7 @@ def cmd_write(args: argparse.Namespace) -> int:
         provenance=args.provenance or None,
         tags=args.tag or None,
         allow_elision=args.allow_elision,
+        allow_unregistered_provenance=args.allow_unregistered_provenance,
     )
     print(sha)
     return 0
@@ -157,6 +158,7 @@ def cmd_extend(args: argparse.Namespace) -> int:
     sha = store.extend_page(
         args.slug, body=body, provenance=args.provenance,
         allow_elision=args.allow_elision,
+        allow_unregistered_provenance=args.allow_unregistered_provenance,
     )
     print(sha)
     return 0
@@ -171,6 +173,7 @@ def cmd_append(args: argparse.Namespace) -> int:
     sha = store.append_page(
         args.slug, body=body, provenance=args.provenance,
         allow_elision=args.allow_elision,
+        allow_unregistered_provenance=args.allow_unregistered_provenance,
     )
     print(sha)
     return 0
@@ -1328,6 +1331,13 @@ def build_parser() -> argparse.ArgumentParser:
         "heuristic; use this when the marker belongs to a quotation. "
         "`outmem lint` still reports the page as truncated-page.",
     )
+    p_write.add_argument(
+        "--allow-unregistered-provenance",
+        action="store_true",
+        help="Accept a provenance ref no registry row names. For a migration "
+        "or an operator who knows; `outmem lint` reports the page as "
+        "unregistered-provenance either way.",
+    )
     p_write.set_defaults(func=cmd_write)
 
     p_extend = sub.add_parser(
@@ -1349,6 +1359,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Accept a body ending in an ellipsis. The guard is a "
         "heuristic; use this when the marker belongs to a quotation. "
         "`outmem lint` still reports the page as truncated-page.",
+    )
+    p_extend.add_argument(
+        "--allow-unregistered-provenance",
+        action="store_true",
+        help="Accept a provenance ref no registry row names. For a migration "
+        "or an operator who knows; `outmem lint` reports the page as "
+        "unregistered-provenance either way.",
     )
     p_extend.set_defaults(func=cmd_extend)
 
@@ -1372,6 +1389,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Accept a body ending in an ellipsis. The guard is a "
         "heuristic; use this when the marker belongs to a quotation. "
         "`outmem lint` still reports the page as truncated-page.",
+    )
+    p_append.add_argument(
+        "--allow-unregistered-provenance",
+        action="store_true",
+        help="Accept a provenance ref no registry row names. For a migration "
+        "or an operator who knows; `outmem lint` reports the page as "
+        "unregistered-provenance either way.",
     )
     p_append.set_defaults(func=cmd_append)
 

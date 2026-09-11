@@ -35,6 +35,7 @@ def seeded_store(tmp_path: Path) -> WikiStore:
         title="Pricing formula",
         body="The pricing formula is cost-plus 35%.\n\nSee [[acme-msa]] for terms.\n",
         provenance=["sources/pricing-deck-2026-Q1.md"],
+        allow_unregistered_provenance=True,  # subject is rendering
         tags=["pricing", "contracts"],
     )
     store.write_page(

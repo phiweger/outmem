@@ -171,7 +171,8 @@ for f in raw/*.md; do outmem ingest "$f" --local --register-only; done
 
 Then delete `raw/` when you're satisfied, and fix up any page
 `provenance:` entries still pointing at `raw/…` — `outmem lint`
-reports them as stale provenance.
+reports them as `unregistered-provenance`, and any new write citing one
+is refused.
 
 What breaks at the API level:
 

@@ -36,6 +36,7 @@ def seeded_store(tmp_path: Path) -> WikiStore:
         body="The pricing formula is cost-plus 35%.\n",
         provenance=["sources/deck.md"],
         tags=["pricing"],
+        allow_unregistered_provenance=True,  # subject is the tool palette
     )
     store.write_page(
         "acme-msa",
@@ -220,18 +221,24 @@ def test_topic_evolution_requires_slug(seeded_store: WikiStore) -> None:
     assert "requires at least one slug" in out
 
 
-def test_write_page_creates_new(seeded_store: WikiStore) -> None:
+def test_write_page_creates_new(seeded_store: WikiStore, tmp_path: Path) -> None:
+    # Cites a genuinely registered source: the tool deliberately exposes no
+    # `allow_unregistered_provenance`, so this is the contract a model faces.
+    doc = tmp_path / "discount-table.md"
+    doc.write_text("Tier 1: 5%.\n", encoding="utf-8")
+    entry = seeded_store.add_source(doc)
+
     sha = _by_name(wiki_tools(seeded_store), "write_page")(
         slug="discounts",
         title="Discounts",
         body="Standard discount tiers.\n",
-        provenance=["sources/discount-table.md"],
+        provenance=[entry.citation_path],
         tags=["pricing"],
     )
     assert len(sha) == 40
     page = seeded_store.read("discounts")
     assert page.frontmatter.title == "Discounts"
-    assert page.frontmatter.provenance == ["sources/discount-table.md"]
+    assert page.frontmatter.provenance == [entry.citation_path]
 
 
 def test_extend_page_replaces_body(seeded_store: WikiStore) -> None:

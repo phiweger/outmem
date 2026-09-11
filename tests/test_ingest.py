@@ -283,6 +283,7 @@ def test_cli_ingest_with_agent(
     """Full ingestion run: register + agent writes a page + ingestion recorded."""
     from outmem.agent import service as svc
     from outmem.cli.__main__ import main
+    from outmem.sources import compute_sha256
 
     store = WikiStore.init(tmp_path / "w")
     src = tmp_path / "drugs.md"
@@ -300,7 +301,10 @@ def test_cli_ingest_with_agent(
                 "slug": "cat-doses",
                 "title": "Cat doses",
                 "body": "Cat dose: 5mg/kg per the drugs source.\n",
-                "provenance": ["sources/drugs.md"],
+                # `outmem ingest` registers the document before the agent
+                # runs, so the citable ref is the sha-addressed one it
+                # produces — not a name the model invents.
+                "provenance": [f"sources/{compute_sha256(src)[:12]}/drugs.md"],
             },
         },
         reply="wrote cat dosage page.",

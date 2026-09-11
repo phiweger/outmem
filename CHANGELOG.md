@@ -3,6 +3,77 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.18.0
+
+### Changed
+
+- **A `provenance:` citation that names no registered source is now refused at
+  the write**, by `write_page`, `extend_page` and `append_page`
+  (`UnregisteredProvenanceError`), instead of being accepted and reported by
+  `outmem lint` later.
+
+  Provenance is the edge everything else hangs off: `outmem stale` follows it
+  to find pages citing a superseded version, `source_citations` turns it into a
+  liveness signal, `superseded_ok:` and `finding:` annotate it,
+  `provenance-sha-mismatch` compares it. A citation to nothing silently opts a
+  page out of all of that while looking, on the page, exactly like a citation
+  to something — and a model asked to cite its source will produce a plausible
+  `sources/<sha>/document.md` from the tool docstring's own example. The write
+  is the moment the author is present and can fix it; lint is a report somebody
+  reads later. Same argument 0.15 made for refusing a body that ends in an
+  elision, and the same shape of fix.
+
+  **A registry row existing is the criterion, not a file existing.** Citing a
+  superseded version is legal — that is what `outmem stale` and `superseded_ok:`
+  are for — and a row whose file was later deleted stays a lint concern.
+  Validation happens before anything touches disk, so a refused write leaves no
+  page file, no regenerated index and no commit. Accepted ref forms are
+  `<sha>/file.md`, `sources/<sha>/file.md` and `sources-local/<sha>/file.md`,
+  each optionally prefixed `wiki/`; all resolve to the same key. A page with no
+  provenance at all is still fine — navigation hubs have none — and
+  `extend_page(provenance=None)` leaves the field untouched without
+  re-validating it, so a body edit to a page that already carries a dangling
+  ref still goes through. `append_page` validates what it merges as a whole:
+  one bad ref refuses the call and nothing is appended.
+
+  `allow_unregistered_provenance=True` restores the old behaviour per call, for
+  a migration script or an operator who knows. As with `allow_elision`, the
+  PydanticAI write tools deliberately do not expose it — an escape hatch in a
+  tool argument is an escape hatch a model will pull. Those tools instead hand
+  the refusal back to the model as a retry naming the offending refs, the way
+  they already do for an incomplete body, so it can call `list_sources` and
+  cite a real key or drop the claim.
+
+- **`outmem lint` splits the provenance finding in two.** `stale-provenance`
+  now means what its advice always assumed — the registry row is there, the
+  file is gone, "restore the source or update the page". The new
+  `unregistered-provenance` covers a ref with no row at all, where the remedy
+  is to register the source or remove the citation. Both are warnings. Nothing
+  refuses a pre-existing page, so lint is what finds these, and it now says the
+  right thing about each.
+
+### Fixed
+
+- **`outmem lint` reported a perfectly good citation as dangling** when the page
+  spelled it `wiki/sources/<sha>/file.md` — one of the three forms
+  `split_tree_prefix` accepts, and the one `grep_wiki` prints, so an agent that
+  grepped and then cited what it saw produced it routinely. The store resolved
+  it, `source_citations` attributed the page to the registry row and `outmem
+  stale` followed it; lint had a second resolver that did not strip the wiki
+  directory and said the file was missing. Lint now normalises the ref the way
+  the store does. (Found while splitting the finding above, which would have
+  turned a vague wrong answer into a confident one: "no registry row names
+  this" about a row that is right there.)
+
+### Compatibility
+
+Pages already carrying dangling refs are untouched; only new writes are
+refused. Callers that register first — `outmem ingest`, the ingest agent,
+downstream registration scripts — see no change. A caller that wrote refs to
+nothing was writing something lint would have flagged, and now hears about it
+at the write. Run `outmem lint` after upgrading to see which existing pages
+carry `unregistered-provenance`.
+
 ## 0.17.6
 
 ### Fixed

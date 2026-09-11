@@ -294,6 +294,7 @@ class TestSourceCitations:
             title="Amikacin",
             body="dosing\n",
             provenance=["sources/abx/aaaaaaaaaaaa/document.md"],
+            allow_unregistered_provenance=True,  # subject is citation collection
         )
         store.write_page(
             "abx:dosing",
@@ -302,6 +303,7 @@ class TestSourceCitations:
             provenance=[
                 {"path": "sources/abx/aaaaaaaaaaaa/document.md", "source": "ingest"}
             ],
+            allow_unregistered_provenance=True,
         )
         citations, _ = store.source_citations()
         assert citations["abx/aaaaaaaaaaaa/document.md"] == [

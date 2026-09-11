@@ -61,6 +61,7 @@ from outmem.exceptions import (
     IncompleteBodyError,
     OutmemError,
     SlugError,
+    UnregisteredProvenanceError,
 )
 from outmem.frontmatter import (
     ProvenanceEntry,
@@ -902,6 +903,7 @@ class WikiStore:
         extra: dict[str, Any] | None = None,
         commit_subject: str | None = None,
         allow_elision: bool = False,
+        allow_unregistered_provenance: bool = False,
     ) -> str:
         """Create a new wiki page (under ``wiki/pages/``) and commit it.
 
@@ -932,6 +934,13 @@ class WikiStore:
                     f"silently retarget every [[{slug}]] link. Remove the alias from "
                     f"{owner!r} first, or choose another slug."
                 )
+            # Before anything touches disk, so a refused write leaves no
+            # half-applied state — no page file, no regenerated index, no
+            # commit.
+            if not allow_unregistered_provenance:
+                _reject_unregistered_provenance(
+                    self, list(provenance or []), tool="write_page"
+                )
             now = utc_now()
             frontmatter = WikiFrontmatter(
                 title=title,
@@ -944,8 +953,8 @@ class WikiStore:
             )
             if not allow_elision:
                 _reject_incomplete_body(
-                body, tool="write_page", allowed=self._elision_allowed
-            )
+                    body, tool="write_page", allowed=self._elision_allowed
+                )
             page_text = serialize_wiki_page(frontmatter, body)
             page_path.parent.mkdir(parents=True, exist_ok=True)
             page_path.write_text(page_text, encoding="utf-8")
@@ -1141,6 +1150,7 @@ class WikiStore:
         provenance: Sequence[ProvenanceEntry] | None = None,
         commit_subject: str | None = None,
         allow_elision: bool = False,
+        allow_unregistered_provenance: bool = False,
     ) -> str:
         """Replace the body of an existing page and commit.
 
@@ -1168,10 +1178,18 @@ class WikiStore:
                 )
             if not allow_elision:
                 _reject_incomplete_body(
-                body, tool="extend_page", allowed=self._elision_allowed
-            )
+                    body, tool="extend_page", allowed=self._elision_allowed
+                )
             page = self.read(slug)
             if provenance is not None:
+                # Only the entries being *set*. `provenance=None` leaves the
+                # page's own untouched and is not re-validated — a page that
+                # already carries a dangling ref is lint's to report, and
+                # re-checking here would refuse an unrelated body edit.
+                if not allow_unregistered_provenance:
+                    _reject_unregistered_provenance(
+                        self, list(provenance), tool="extend_page"
+                    )
                 page.frontmatter.provenance = list(provenance)
             touch_updated(page.frontmatter)
             page_text = serialize_wiki_page(page.frontmatter, body)
@@ -1204,6 +1222,7 @@ class WikiStore:
         provenance: Sequence[ProvenanceEntry] | None = None,
         commit_subject: str | None = None,
         allow_elision: bool = False,
+        allow_unregistered_provenance: bool = False,
     ) -> str:
         """Append to an existing page's body and commit.
 
@@ -1245,12 +1264,20 @@ class WikiStore:
                 )
             if not allow_elision:
                 _reject_incomplete_body(
-                body, tool="append_page", allowed=self._elision_allowed
-            )
+                    body, tool="append_page", allowed=self._elision_allowed
+                )
             page = self.read(slug)
             existing = page.body.rstrip()
             merged = f"{existing}\n\n{body.strip()}\n" if existing else f"{body.strip()}\n"
             if provenance:
+                # Validated as a whole before merging: one bad ref refuses
+                # the call and nothing is appended, rather than landing the
+                # good refs and the body and leaving the caller to guess
+                # what took.
+                if not allow_unregistered_provenance:
+                    _reject_unregistered_provenance(
+                        self, list(provenance), tool="append_page"
+                    )
                 page.frontmatter.provenance = _merge_provenance(
                     page.frontmatter.provenance, provenance
                 )
@@ -2190,6 +2217,50 @@ def _format_log_filename(d: date) -> str:
 def _body_text_key(body: str) -> str:
     """Identity of one adjudicated body text."""
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _reject_unregistered_provenance(
+    store: WikiStore, entries: Sequence[ProvenanceEntry], *, tool: str
+) -> None:
+    """Raise if any entry cites a source with no registry row.
+
+    At the store layer, not the tool wrapper, so the refusal covers the
+    CLI, the Python API and any downstream app driving its own agent —
+    the same reasoning as :func:`_reject_incomplete_body`.
+
+    **A row existing is the criterion, not a file existing.** Citing a
+    superseded version is legal and ``outmem stale`` / ``superseded_ok:``
+    are the machinery for it; a row whose file was later deleted is a
+    lint concern (``stale-provenance``), not a write-time one. Both of
+    those resolve through ``get_source``, which falls back to the
+    registry when the file is gone.
+
+    Entries carrying no reference at all — an annotation-only mapping —
+    are left to lint, as before: there is nothing here to resolve.
+    """
+    from outmem.lint import provenance_ref
+
+    missing = [
+        ref
+        for entry in entries
+        if (ref := provenance_ref(entry)) is not None
+        and store.get_source(ref) is None
+    ]
+    if not missing:
+        return
+    listed = ", ".join(repr(r) for r in missing)
+    raise UnregisteredProvenanceError(
+        f"{tool}: provenance names {'a source' if len(missing) == 1 else 'sources'} "
+        f"the registry does not hold: {listed}. A citation to nothing opts the "
+        "page out of staleness and supersession reporting while looking like a "
+        "real one, so it is refused here rather than reported by `outmem lint` "
+        "later. Register the source first (`outmem ingest`, or "
+        "`WikiStore.add_source`), or cite one that is already registered "
+        "(`list_sources`, `outmem sources list`). "
+        "Accepted forms: '<sha>/file.md', 'sources/<sha>/file.md', "
+        "'sources-local/<sha>/file.md', each optionally prefixed 'wiki/'.",
+        tuple(missing),
+    )
 
 
 def _reject_incomplete_body(

@@ -26,6 +26,7 @@ def store(tmp_path: Path) -> WikiStore:
         title="Sepsis",
         body="## Erreger\n\nGramnegative Erreger dominieren.",
         provenance=["sources/a1b2c3d4e5f6/leitlinie.md"],
+        allow_unregistered_provenance=True,  # subject is append/merge semantics
     )
     return s
 
@@ -89,6 +90,7 @@ class TestProvenanceIsAdditive:
             "clinical:sepsis",
             body="## Therapie\n\nText.",
             provenance=["sources/999888777666/therapie.md"],
+            allow_unregistered_provenance=True,
         )
         refs = store.read("clinical:sepsis").frontmatter.provenance
         assert "sources/a1b2c3d4e5f6/leitlinie.md" in refs
@@ -99,6 +101,7 @@ class TestProvenanceIsAdditive:
             "clinical:sepsis",
             body="## Therapie\n\nText.",
             provenance=["sources/a1b2c3d4e5f6/leitlinie.md"],
+            allow_unregistered_provenance=True,
         )
         refs = store.read("clinical:sepsis").frontmatter.provenance
         assert refs.count("sources/a1b2c3d4e5f6/leitlinie.md") == 1
@@ -110,6 +113,7 @@ class TestProvenanceIsAdditive:
             "clinical:sepsis",
             body="## Therapie\n\nText.",
             provenance=[{"path": "sources/a1b2c3d4e5f6/leitlinie.md", "label": "LL"}],
+            allow_unregistered_provenance=True,
         )
         assert len(store.read("clinical:sepsis").frontmatter.provenance) == 1
 
@@ -216,8 +220,14 @@ class TestConcurrentWrites:
             "sha256": "deadbeef" * 8,
             "label": "Leitlinie",
         }
-        s.write_page("p", title="P", body="Text.\n", provenance=[rich])
-        s.append_page("p", body="## Mehr\n\nText.\n", provenance=[rich["path"]])
+        s.write_page(
+            "p", title="P", body="Text.\n", provenance=[rich],
+            allow_unregistered_provenance=True,  # subject is dict/string merging
+        )
+        s.append_page(
+            "p", body="## Mehr\n\nText.\n", provenance=[rich["path"]],
+            allow_unregistered_provenance=True,
+        )
         assert s.read("p").frontmatter.provenance == [rich]
 
     def test_a_richer_recite_refreshes_the_entry(self, tmp_path: Path) -> None:
@@ -226,7 +236,15 @@ class TestConcurrentWrites:
         with no way to fix it through append_page."""
         s = WikiStore.init(tmp_path / "refresh")
         path = "sources/abc123def456/doc.md"
-        s.write_page("p", title="P", body="Text.\n", provenance=[{"path": path, "sha256": "old"}])
-        s.append_page("p", body="## Mehr\n\nText.\n", provenance=[{"path": path, "sha256": "new"}])
+        s.write_page(
+            "p", title="P", body="Text.\n",
+            provenance=[{"path": path, "sha256": "old"}],
+            allow_unregistered_provenance=True,  # subject is sha refresh on merge
+        )
+        s.append_page(
+            "p", body="## Mehr\n\nText.\n",
+            provenance=[{"path": path, "sha256": "new"}],
+            allow_unregistered_provenance=True,
+        )
         (entry,) = s.read("p").frontmatter.provenance
         assert entry["sha256"] == "new"

@@ -61,13 +61,16 @@ def test_index_is_never_flagged_as_orphan(tmp_path: Path) -> None:
     assert "wiki/index.md" not in paths
 
 
-def test_stale_provenance_is_warning(tmp_path: Path) -> None:
+def test_unregistered_provenance_is_warning(tmp_path: Path) -> None:
+    """A ref no registry row names. Writes are refused now, so this is for
+    pages predating the check or written with the opt-out."""
     store = WikiStore.init(tmp_path / "w")
     store.write_page(
         "alpha",
         title="Alpha",
         body="body",
         provenance=["sources/deleted.md"],
+        allow_unregistered_provenance=True,
     )
     # Add a counter-link so alpha isn't also flagged as an orphan.
     store.write_page("ref", title="Ref", body="See [[alpha]].")
@@ -76,9 +79,10 @@ def test_stale_provenance_is_warning(tmp_path: Path) -> None:
         log_dir=store.log_path,
         sources_dir=store.sources_path,
     )
-    stale = [f for f in report.findings if f.kind == "stale-provenance"]
-    assert any("deleted.md" in f.message for f in stale)
-    assert stale[0].severity == Severity.WARNING
+    found = [f for f in report.findings if f.kind == "unregistered-provenance"]
+    assert any("deleted.md" in f.message for f in found)
+    assert found[0].severity == Severity.WARNING
+    assert "Register the source" in found[0].message
 
 
 def test_stale_provenance_dict_entry(tmp_path: Path) -> None:
@@ -89,6 +93,7 @@ def test_stale_provenance_dict_entry(tmp_path: Path) -> None:
         title="Alpha",
         body="body",
         provenance=[{"path": "sources/deleted.md", "sha256": "x"}],
+        allow_unregistered_provenance=True,
     )
     store.write_page("ref", title="Ref", body="See [[alpha]].")
     report = lint_wiki(
@@ -96,14 +101,16 @@ def test_stale_provenance_dict_entry(tmp_path: Path) -> None:
         log_dir=store.log_path,
         sources_dir=store.sources_path,
     )
-    assert any(f.kind == "stale-provenance" for f in report.findings)
+    assert any(f.kind == "unregistered-provenance" for f in report.findings)
 
 
 def test_present_provenance_not_flagged(tmp_path: Path) -> None:
     store = WikiStore.init(tmp_path / "w")
-    (store.sources_path / "real.md").write_text("real source\n", encoding="utf-8")
+    doc = tmp_path / "real.md"
+    doc.write_text("real source\n", encoding="utf-8")
+    entry = store.add_source(doc)
     store.write_page(
-        "alpha", title="Alpha", body="body", provenance=["sources/real.md"]
+        "alpha", title="Alpha", body="body", provenance=[entry.citation_path]
     )
     store.write_page("ref", title="Ref", body="See [[alpha]].")
     report = lint_wiki(
@@ -111,8 +118,9 @@ def test_present_provenance_not_flagged(tmp_path: Path) -> None:
         log_dir=store.log_path,
         sources_dir=store.sources_path,
     )
-    stale = [f for f in report.findings if f.kind == "stale-provenance"]
-    assert stale == []
+    kinds = {f.kind for f in report.findings}
+    assert "stale-provenance" not in kinds
+    assert "unregistered-provenance" not in kinds
 
 
 def test_index_drift_detected(tmp_path: Path) -> None:

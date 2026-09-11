@@ -254,9 +254,28 @@ place it can be caught cheaply. Pass `allow_elision=True` to override;
 the agent-facing tools deliberately do not expose it. See
 [growing-the-wiki.md](growing-the-wiki.md#2b-completeness--pages-that-stop-early).
 
+All three also refuse a `provenance:` entry naming a source the registry
+does not hold (`UnregisteredProvenanceError`), before anything touches disk —
+no page file, no regenerated index, no commit. Provenance is the edge
+`stale_pages()`, `source_citations()`, `superseded_ok:` and `finding:` all
+hang off, so a citation to nothing quietly opts a page out of every one of
+them while looking, on the page, exactly like a citation to something. **A
+registry row existing is the criterion, not a file existing** — citing a
+superseded version is legal and is what `stale_pages()` is for; a row whose
+file was later deleted is lint's `stale-provenance`. Accepted ref forms:
+`<sha>/file.md`, `sources/<sha>/file.md`, `sources-local/<sha>/file.md`, each
+optionally prefixed `wiki/`. A page with no provenance at all is fine —
+navigation hubs have none. Pass `allow_unregistered_provenance=True` to
+override, for a migration script or an operator who knows; as with
+`allow_elision`, the agent-facing tools deliberately do not expose it.
+
 `extend_page(provenance=…)` **replaces** the page's source pointers; omit it and
-they are untouched. Without it there is no way to update the field, so a page
-reported by `stale_pages()` would keep citing the superseded version forever.
+they are untouched — and an omitted `provenance` is not re-validated either, so
+a body edit to a page already carrying a dangling ref still goes through (lint
+reports the ref). Without `provenance=` there is no way to update the field, so
+a page reported by `stale_pages()` would keep citing the superseded version
+forever. `append_page` validates the refs it merges as a whole: one bad ref
+refuses the call and nothing is appended.
 
 Omit `as_key` and the identity is derived from the path; `add_source` raises
 `OutmemError` when that derivation is already another document's identity,
