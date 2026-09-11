@@ -246,19 +246,80 @@ class TestOptOut:
 
 
 class TestPydanticAiTool:
-    def test_write_page_hands_the_refusal_back_as_a_retry(
-        self, wiki: WikiStore
+    @pytest.mark.parametrize(
+        ("name", "kwargs"),
+        [
+            ("write_page", {"slug": "fresh", "title": "P"}),
+            ("extend_page", {"slug": "p"}),
+            ("append_page", {"slug": "p"}),
+        ],
+    )
+    def test_the_refusal_comes_back_as_a_retry_not_a_string(
+        self, wiki: WikiStore, name: str, kwargs: dict[str, str]
     ) -> None:
+        # Returned as a string, an error arrives as commentary *after* the
+        # call succeeded. ModelRetry is the only path that gets the model to
+        # cite something real. All three write tools, because all three
+        # validate.
         from pydantic_ai import ModelRetry
 
         from outmem.adapters.pydantic_ai import wiki_tools
 
-        write = next(t for t in wiki_tools(wiki) if t.__name__ == "write_page")
+        wiki.write_page("p", title="P", body="Existing.\n")
+        tool = next(t for t in wiki_tools(wiki) if t.__name__ == name)
         with pytest.raises(ModelRetry) as exc:
-            write(slug="p", title="P", body="Body.\n", provenance=[MISSING])
+            tool(body="Body.\n", provenance=[MISSING], **kwargs)
         assert MISSING in str(exc.value)
         assert "list_sources" in str(exc.value)
+        assert not wiki.exists("fresh")
+        assert wiki.read("p").body.strip() == "Existing."
+
+
+class TestTheRegistryIsReReadBeforeRefusing:
+    def test_a_source_registered_by_another_handle_is_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        # The deployment this guard was written for: outmem's write path
+        # behind a long-lived server, with ingestion happening elsewhere.
+        # The registry is cached for the store's lifetime, so the server's
+        # snapshot predates the row — and refusing would hand back advice
+        # ("cite one `list_sources` shows") that its own `list_sources`
+        # cannot satisfy, because that is stale too.
+        server = WikiStore.init(tmp_path / "w")
+        server.list_sources()  # warm the cached snapshot
+
+        ingester = WikiStore.open(tmp_path / "w", read_only=False)
+        entry = ingester.add_source(_doc(tmp_path))
+
+        server.write_page("p", title="P", body="Body.\n", provenance=[entry.citation_path])
+        assert server.exists("p")
+        # And the re-read leaves the store's own view correct, not just
+        # this one call.
+        assert [e.citation_path for e in server.list_sources()] == [entry.citation_path]
+
+    def test_a_genuinely_absent_source_is_still_refused(self, wiki: WikiStore) -> None:
+        # The re-read must not soften the check into "accept on a second
+        # look": a ref nothing registered stays refused.
+        wiki.list_sources()
+        with pytest.raises(UnregisteredProvenanceError):
+            wiki.write_page("p", title="P", body="Body.\n", provenance=[MISSING])
+
+
+class TestARefUnrepresentableOnDisk:
+    def test_it_is_refused_not_an_oserror(self, wiki: WikiStore) -> None:
+        # A citation of several hundred junk characters is exactly what a
+        # model invents when it guesses. Resolving it used to raise
+        # ENAMETOOLONG straight out of the write, past every handler that
+        # expects an OutmemError — so the agent's turn died instead of
+        # retrying.
+        with pytest.raises(UnregisteredProvenanceError):
+            wiki.write_page("p", title="P", body="Body.\n", provenance=["x" * 500])
         assert not wiki.exists("p")
+
+    def test_the_read_path_answers_rather_than_raising(self, wiki: WikiStore) -> None:
+        # Same resolver, and the read tools reach it with whatever string
+        # the model passed.
+        assert wiki.get_source("x" * 500) is None
 
 
 class TestLintSaysWhichProblem:

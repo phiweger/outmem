@@ -136,6 +136,27 @@ def get_registry(store: WikiStore, tree: SourceTree | None = None) -> SourceRegi
     return store._source_registry_local
 
 
+def refresh_registry_cache(store: WikiStore) -> None:
+    """Drop the cached snapshots so the next lookup re-reads the databases.
+
+    :func:`get_registry` caches an in-memory snapshot for the store's
+    lifetime. That is right for reads — a long-lived store would
+    otherwise pay a SQLite open per lookup — but it means a row some
+    *other* process registered after this store opened is invisible here.
+    A caller about to **refuse** a write over a missing row asks again
+    through this first, so a good citation is not rejected with advice to
+    register what is already registered.
+
+    The handles are dropped, not closed: another thread may be writing
+    through one, and closing it underneath would turn a stale read into a
+    hard failure, while a merely-unreferenced connection keeps working
+    until it is collected. :meth:`WikiStore.sources_gc` drops the tracked
+    handle the same way.
+    """
+    store._source_registry = None
+    store._source_registry_local = None
+
+
 def _load_registry(store: WikiStore, path: Path) -> SourceRegistry:
     """Open a tree's registry, or an empty stand-in for a read-only store."""
     if store.config.read_only and not (path / REGISTRY_FILENAME).is_file():
@@ -355,12 +376,31 @@ def resolve_source(store: WikiStore, rel_path: str) -> tuple[SourceTree, str] | 
     candidates = [hinted] if hinted is not None else existing_trees(store)
     for tree in candidates:
         canonical = _canonical_within(tree, remainder)
-        if canonical is not None and (tree.path / canonical).is_file():
+        if canonical is not None and _is_file(tree.path / canonical):
             return tree, canonical
     for tree in candidates:
         if tree.path.is_dir() and get_registry(store, tree).get(remainder) is not None:
             return tree, remainder
     return None
+
+
+def _is_file(path: Path) -> bool:
+    """``is_file`` that answers False for a path the OS refuses outright.
+
+    ``Path.is_file`` swallows the not-found errnos but propagates
+    ENAMETOOLONG, so a citation of several hundred junk characters —
+    exactly the shape a model invents when it guesses a path — turned a
+    lookup into an ``OSError`` from whichever caller was resolving it,
+    escaping every handler that expects an :class:`OutmemError`. A path
+    the filesystem cannot even represent is not a source, and the registry
+    fallback in :func:`resolve_source` still gets its turn. Mirrors
+    :func:`_canonical_within`, which already treats an ``OSError`` here as
+    "does not resolve".
+    """
+    try:
+        return path.is_file()
+    except OSError:
+        return False
 
 
 def _canonical_within(tree: SourceTree, remainder: str) -> str | None:
