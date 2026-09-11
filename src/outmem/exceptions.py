@@ -40,7 +40,8 @@ class ConflictError(OutmemError):
 
 
 class IncompleteBodyError(OutmemError):
-    """A page body stops early — it ends at an elision marker.
+    """A page body stops early — at an elision marker, or at a marker
+    outmem itself wrote into a tool result.
 
     The one content-level refusal in a write path otherwise concerned
     with structure. It exists because the alternative failure is silent:
@@ -52,11 +53,28 @@ class IncompleteBodyError(OutmemError):
     and the adapter turns it into a ``ModelRetry`` — the model still has
     the source in context at that moment, which is the only point where
     recovery is cheap.
+
+    ``resubmittable`` says whether re-sending the identical body should be
+    honoured, because the two cases it covers have opposite premises. An
+    elision is found by a positional heuristic that can be wrong about a
+    quoted ellipsis, so re-sending unchanged is the model's considered
+    escape hatch — see :meth:`WikiStore.allow_elision_body`. A tool-output
+    marker is not a judgement: it means outmem withheld content from a
+    tool result and the page was written from what was shown anyway.
+    Insisting cannot make the model have read the passage, so that case
+    sets this ``False`` and the yield is never armed.
     """
 
-    def __init__(self, message: str, *, markers: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        markers: tuple[str, ...] = (),
+        resubmittable: bool = True,
+    ) -> None:
         super().__init__(message)
         self.markers = markers
+        self.resubmittable = resubmittable
 
 
 class UnregisteredProvenanceError(OutmemError):

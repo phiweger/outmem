@@ -1206,13 +1206,18 @@ class WikiStore:
             )
 
     def allow_elision_body(self, body: str) -> None:
-        """Pre-authorise this exact body text past the elision guard.
+        """Pre-authorise this exact body text past the completeness guard.
 
         For callers that have already adjudicated the text: a human
         reviewer who edited and approved it, or a model that re-sent it
-        unchanged after being handed the refusal. The page is still
-        reported by ``outmem lint`` as ``truncated-page`` — the bargain
-        is bounded damage and a visible record, not silence.
+        unchanged after being handed an *elision* refusal. The page is
+        still reported by ``outmem lint`` as ``truncated-page`` — the
+        bargain is bounded damage and a visible record, not silence.
+
+        A model's re-send only reaches here for a refusal carrying
+        ``resubmittable=True``; the tool-sentinel branch never yields, so
+        the write tools do not arm it for one. A human calling this
+        directly overrides both, which is the point of a human override.
         """
         self._elision_allowed.add(_body_text_key(body))
 
@@ -2287,11 +2292,11 @@ def _reject_incomplete_body(
     the refusal covers the CLI, the Python API, and any downstream app
     driving its own agent — not just outmem's own tool palette.
 
-    The guard is a positional heuristic and therefore fallible, so every
-    caller needs a way past it — but not the *same* way. A human has a
-    one-step override (``allow_elision=True``, ``--allow-elision``, or a
-    reviewer edit under the approval gate). A model has no argument at
-    all: its only route is to submit the identical body again after
+    The elision guard is a positional heuristic and therefore fallible,
+    so every caller needs a way past it — but not the *same* way. A human
+    has a one-step override (``allow_elision=True``, ``--allow-elision``,
+    or a reviewer edit under the approval gate). A model has no argument
+    at all: its only route is to submit the identical body again after
     being handed the refusal, which the tool wrapper registers via
     :meth:`WikiStore.allow_elision_body`. That asymmetry is the design.
     A flag the model could set would become a checkbox it learns to
@@ -2299,6 +2304,14 @@ def _reject_incomplete_body(
     text is right" from "I ran out of room" (a truncating model adds
     content rather than repeating itself), and leaves the page reported
     by ``outmem lint`` either way.
+
+    **The tool-sentinel branch below grants no such yield.** It raises
+    with ``resubmittable=False``, because its premise is not a heuristic:
+    the marker is one outmem wrote into a tool result, so the page is
+    provably built on material the model was not shown, and insisting
+    cannot change that. The two branches are one exception type because
+    callers handle them identically — retry, don't commit — and they
+    differ only in whether insisting is an answer.
     """
     if allowed is not None and _body_text_key(body) in allowed:
         return
@@ -2316,8 +2329,11 @@ def _reject_incomplete_body(
             f"withheld content from a tool result, so this page would be "
             f"built on material it never showed you. Read the source in "
             f"full (`read_source`, or narrow the range) and write the "
-            f"passage from that. Offending: {'; '.join(lines)}",
+            f"passage from that. Sending this body again unchanged will be "
+            f"refused again — unlike an elision, this is not a judgement "
+            f"call. Offending: {'; '.join(lines)}",
             markers=lines,
+            resubmittable=False,
         )
 
     found = find_elision_markers(body)

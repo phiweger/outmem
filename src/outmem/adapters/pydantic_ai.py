@@ -913,7 +913,13 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             # Second identical submission means the model is
             # insisting; the store lets it through then, and lint
             # reports the page rather than the turn dying.
-            store.allow_elision_body(body)
+            if exc.resubmittable:
+                # Only the elision branch. A tool-output marker means
+                # outmem withheld the content, so insisting cannot make
+                # the model have read it — arming the yield there would
+                # land a page built on material it never saw, which is
+                # the one outcome this refusal exists to prevent.
+                store.allow_elision_body(body)
             _log_error("write_page", exc)
             _retry_incomplete(exc)
         except SlugError as exc:
@@ -986,7 +992,13 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             # Second identical submission means the model is
             # insisting; the store lets it through then, and lint
             # reports the page rather than the turn dying.
-            store.allow_elision_body(body)
+            if exc.resubmittable:
+                # Only the elision branch. A tool-output marker means
+                # outmem withheld the content, so insisting cannot make
+                # the model have read it — arming the yield there would
+                # land a page built on material it never saw, which is
+                # the one outcome this refusal exists to prevent.
+                store.allow_elision_body(body)
             _log_error("extend_page", exc)
             _retry_incomplete(exc)
         except SlugError as exc:
@@ -1059,7 +1071,13 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             # Second identical submission means the model is
             # insisting; the store lets it through then, and lint
             # reports the page rather than the turn dying.
-            store.allow_elision_body(body)
+            if exc.resubmittable:
+                # Only the elision branch. A tool-output marker means
+                # outmem withheld the content, so insisting cannot make
+                # the model have read it — arming the yield there would
+                # land a page built on material it never saw, which is
+                # the one outcome this refusal exists to prevent.
+                store.allow_elision_body(body)
             _log_error("append_page", exc)
             _retry_incomplete(exc)
         except SlugError as exc:
