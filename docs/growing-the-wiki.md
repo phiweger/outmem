@@ -102,6 +102,20 @@ of shortening. A quotation that continues past its ellipsis
 keys on a marker that *ends* its line, and skips blockquotes, code, and
 link text.
 
+**The refusal a model can insist past, and the one it cannot.** Because
+the elision check is a positional heuristic, a model that re-sends the
+*identical* body after being refused is taken at its word — the ellipsis
+was quoted text, the page lands, and `outmem lint` reports it as
+`truncated-page` so the bargain is bounded damage rather than silence. A
+human has the one-step override instead (`--allow-elision`,
+`allow_elision=True`), which the tools deliberately do not offer, because
+a flag a model can set is a flag it learns to tick. The `⟪ outmem: … ⟫`
+marker gets no such yield: outmem wrote that marker itself, so the page
+is provably built on content the model was not shown, and re-sending
+unchanged is refused again. Worth knowing if you drive these tools over
+a connector, where the model reading the refusal is not the one whose
+retry budget pays for it.
+
 If a turn ends because it ran out of output room while writing a page,
 `outmem ask` warns and names the page even when nothing was marked —
 that is the case the model did not flag itself. Verify those pages

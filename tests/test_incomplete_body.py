@@ -214,6 +214,64 @@ class TestToolSentinelIsRefusedAtWriteTime:
             "clinical:neu", title="Neu", body=SENTINEL_BODY, allow_elision=True
         )
 
+    def test_it_grants_no_resubmission_yield(self, store: WikiStore) -> None:
+        # The elision guard yields to a model that insists, because it is a
+        # heuristic that can be wrong about a quoted ellipsis. This is not
+        # that: the marker is one outmem wrote into a tool result, so the
+        # page is provably built on material the model was not shown, and
+        # insisting cannot change that.
+        with pytest.raises(IncompleteBodyError) as caught:
+            store.write_page("clinical:neu", title="Neu", body=SENTINEL_BODY)
+        assert caught.value.resubmittable is False
+
+    def test_the_message_does_not_invite_an_identical_resubmission(
+        self, store: WikiStore
+    ) -> None:
+        # A model that has met the elision refusal has been told that
+        # re-sending unchanged is a legitimate answer. Over a connector a
+        # host model will try it reflexively, so this message has to say
+        # outright that it will not work.
+        with pytest.raises(IncompleteBodyError) as caught:
+            store.write_page("clinical:neu", title="Neu", body=SENTINEL_BODY)
+        assert "refused again" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("name", "kwargs"),
+        [
+            ("write_page", {"slug": "clinical:neu", "title": "Neu"}),
+            ("extend_page", {"slug": "clinical:sepsis"}),
+            ("append_page", {"slug": "clinical:sepsis"}),
+        ],
+    )
+    def test_the_tools_refuse_it_twice(
+        self, store: WikiStore, name: str, kwargs: dict[str, str]
+    ) -> None:
+        # The write handlers armed the elision yield for *any*
+        # IncompleteBodyError, so a second identical call landed a page
+        # built on content outmem had withheld — the one outcome this
+        # refusal exists to prevent.
+        from pydantic_ai import ModelRetry
+
+        from outmem.adapters.pydantic_ai import wiki_tools
+
+        tool = next(t for t in wiki_tools(store) if t.__name__ == name)
+        for _attempt in (1, 2):
+            with pytest.raises(ModelRetry, match="tool-output marker"):
+                tool(body=SENTINEL_BODY, **kwargs)
+        assert not store.exists("clinical:neu")
+
+    def test_the_elision_yield_still_works(self, store: WikiStore) -> None:
+        # The fix must not take the considered escape hatch with it.
+        from pydantic_ai import ModelRetry
+
+        from outmem.adapters.pydantic_ai import wiki_tools
+
+        tool = next(t for t in wiki_tools(store) if t.__name__ == "write_page")
+        kwargs = {"slug": "clinical:neu", "title": "Neu", "body": TRUNCATED}
+        with pytest.raises(ModelRetry):
+            tool(**kwargs)
+        assert isinstance(tool(**kwargs), str)
+
 
 class TestHumanAdjudicationIsHonoured:
     """The guard exists to catch a model truncating under budget pressure,

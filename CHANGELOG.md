@@ -54,6 +54,23 @@ history (`git log --grep '^release:'`).
 
 ### Fixed
 
+- **A page built on content outmem had withheld could be written by insisting.**
+  The completeness guard refuses two things under one exception: a body that
+  ends at an elision marker, and a body carrying an `⟪ outmem: … ⟫` marker,
+  which means outmem itself truncated a tool result and the page was written
+  from what was shown anyway. The elision case yields to a model that re-sends
+  the identical body — a considered rule, because the guard is a positional
+  heuristic that can be wrong about a quoted ellipsis. The write tools armed
+  that yield for *either* case, so a second identical call landed the
+  withheld-content page, which is the one outcome the refusal exists to prevent.
+  Insisting cannot make a model have read a passage it was never shown, so that
+  branch now grants no yield and its message says so outright. The elision yield
+  is unchanged.
+
+  This matters most where the refusal crosses a process boundary: over an MCP
+  connector the host model reads the sentence outmem wrote and retries
+  reflexively. (The 0.18.0 provenance refusal has neither property — it does not
+  invite resubmission and does not yield to one.)
 - **A source registered by another process was refused as unregistered.** The
   registry is cached in memory for a store's lifetime — right for reads, but it
   meant a long-lived store's snapshot predated any row registered elsewhere, so
