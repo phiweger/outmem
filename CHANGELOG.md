@@ -69,6 +69,15 @@ history (`git log --grep '^release:'`).
 
 ### Fixed
 
+- **A read-only store wrote files before refusing.** `read_only=True` promised a
+  store that refuses to mutate, but the only guard sat in `_commit_paths`, and
+  every write path puts its files on disk first: a refused `write_page` left the
+  page and a regenerated `index.md` in the tree (so a second attempt said "page
+  exists"), and a refused `record_ingestion` had already written its registry
+  row — a write `git status` never showed. Every mutating entry point now
+  refuses at the door, before anything touches disk or the registry; the
+  commit-time guard stays as the backstop. Dry runs of the repairs still work,
+  since a dry run is a read.
 - **Concurrent openers of a fresh registry failed with `duplicate column name`.**
   `_migrate` decided what to `ALTER` by reading the schema, then acted inside a
   deferred transaction — so sixteen ingest workers starting together all read

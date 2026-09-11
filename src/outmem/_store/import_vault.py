@@ -86,6 +86,7 @@ def import_vault(
     Raises :class:`OutmemError` if ``source`` isn't a directory or if
     the target wiki already has pages and ``force`` is False.
     """
+    store._refuse_if_read_only("import a vault")
     if not source.is_dir():
         raise OutmemError(f"import source is not a directory: {source}")
 

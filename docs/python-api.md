@@ -599,12 +599,15 @@ boundary.
 
 What "read-only" guarantees:
 
-- Every commit-producing entry point on `WikiStore` (`write_page`,
-  `extend_page`, `append_log`, `add_source`, `record_ingestion`,
-  `rebuild_index`, `import_vault`) raises `OutmemError` via a single
-  guard in `WikiStore._commit_paths`. The contract is defense in depth:
-  even if the model somehow obtained a write tool, the commit funnel
-  would still refuse.
+- Every mutating entry point on `WikiStore` (`write_page`, `extend_page`,
+  `append_page`, `append_log`, `rename_page`, `add_source`,
+  `record_ingestion`, `rebuild_index`, `import_vault`, the registry
+  repairs, the semantic reindex) raises `OutmemError` **before anything
+  touches disk or the registry** — a refused call leaves no page file, no
+  regenerated `index.md`, no row behind, and `git status` stays clean.
+  `WikiStore._commit_paths` refuses as well, as the backstop: even if the
+  model somehow obtained a write tool and reached the commit funnel some
+  other way, it would still refuse.
 - `pull()` is also refused — `git pull --rebase` would mutate the
   working tree. `push()` stays unguarded, since with `_commit_paths`
   refused there's nothing local to push.

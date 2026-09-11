@@ -805,6 +805,83 @@ class TestReadOnly:
                 fn()
         assert store.head() == head_before
 
+    def test_a_refused_write_leaves_the_tree_clean(self, seeded: Path) -> None:
+        # "Refusing to mutate" has to mean the working tree, not just
+        # HEAD. The guard used to sit at the commit, after the page and a
+        # regenerated index.md were already on disk — so a refused write
+        # left the tree dirty and a second attempt said "page exists".
+        from subprocess import run
+
+        store = WikiStore.open(seeded, read_only=True)
+        index_before = (store.wiki_path / "index.md").read_text(encoding="utf-8")
+        # `init` leaves its scaffold untracked by design, so the invariant
+        # is "status unchanged", not "status empty".
+        status_before = run(
+            ["git", "status", "--porcelain"], cwd=seeded, capture_output=True, text=True
+        ).stdout
+        for fn in (
+            lambda: store.write_page("p", title="T", body="b"),
+            lambda: store.extend_page("pricing", body="x"),
+            lambda: store.append_page("pricing", body="more"),
+            lambda: store.append_log(topic="t", content="c\n"),
+            lambda: store.rename_page("pricing", "cost"),
+        ):
+            with pytest.raises(OutmemError, match="read-only"):
+                fn()
+        assert not (store.pages_path / "p.md").exists()
+        assert (store.wiki_path / "index.md").read_text(encoding="utf-8") == index_before
+        status_after = run(
+            ["git", "status", "--porcelain"], cwd=seeded, capture_output=True, text=True
+        ).stdout
+        assert status_after == status_before
+
+    def test_every_other_mutating_method_is_refused_before_touching_anything(
+        self, seeded: Path, tmp_path: Path
+    ) -> None:
+        # The ones a consult-only deployment would never call on purpose,
+        # each refused at the entry — including the registry repairs,
+        # whose writes go to sqlite rather than the tree and so never
+        # showed up in `git status` at all.
+        from subprocess import run
+
+        store = WikiStore.open(seeded, read_only=True)
+        registry_before = (store.sources_path / ".sources.db").read_bytes() if (
+            store.sources_path / ".sources.db"
+        ).exists() else None
+        status_before = run(
+            ["git", "status", "--porcelain"], cwd=seeded, capture_output=True, text=True
+        ).stdout
+        for fn in (
+            lambda: store.repair_pages(dry_run=False),
+            lambda: store.rebuild_index(),
+            lambda: store.commit_registry("x"),
+            lambda: store.assign_document_keys([("a", "b")]),
+            lambda: store.rekey_document("a", "b", dry_run=False),
+            lambda: store.sources_gc(dry_run=False),
+            lambda: store.record_ingestion("nope.md", prompt=None, pages_touched=[]),
+            lambda: store.semantic_reindex_path("wiki/pages/pricing.md"),
+            lambda: store.semantic_reindex_all(),
+        ):
+            with pytest.raises(OutmemError, match="read-only"):
+                fn()
+        after = (store.sources_path / ".sources.db").read_bytes() if (
+            store.sources_path / ".sources.db"
+        ).exists() else None
+        assert after == registry_before
+        status_after = run(
+            ["git", "status", "--porcelain"], cwd=seeded, capture_output=True, text=True
+        ).stdout
+        assert status_after == status_before
+
+    def test_dry_runs_still_work_read_only(self, seeded: Path) -> None:
+        # A dry run is a read. The repairs default to dry_run=True
+        # precisely so an operator can look before touching anything,
+        # and a read-only store is the natural place to look from.
+        store = WikiStore.open(seeded, read_only=True)
+        assert store.repair_pages(dry_run=True) == []
+        audit = store.sources_gc(dry_run=True)
+        assert audit.missing_files == []
+
     def test_pull_refused(self, seeded: Path) -> None:
         """``git pull --rebase`` would mutate the working tree, so the
         read-only contract refuses it. ``push`` stays unguarded — with

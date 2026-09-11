@@ -204,6 +204,7 @@ def add_source(
     local: bool = False,
     commit: bool = True,
 ) -> SourceEntry:
+    store._refuse_if_read_only("register a source")
     source_path = Path(source).expanduser()
     if local:
         # Creates the directory AND its .gitignore entry, in that order.
@@ -510,6 +511,7 @@ def record_ingestion(
     commit: bool = True,
     when: datetime | None = None,
 ) -> IngestionRecord:
+    store._refuse_if_read_only("record an ingestion")
     found = resolve_source(store, rel_path)
     tree, key = found if found is not None else (tracked_tree(store), rel_path)
     record = get_registry(store, tree).record_ingestion(
