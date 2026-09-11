@@ -416,6 +416,11 @@ class WikiStore:
         # an adjudication is about the words, and an alias must not make
         # the same decision be taken twice.
         self._elision_allowed: set[str] = set()
+        # Whether a model that re-sends an elided body unchanged is taken
+        # at its word. From `completeness.elision_yield` in config.yaml; a
+        # plain attribute so a connector can withdraw the yield for the
+        # store it serves regardless of how the wiki is configured.
+        self.elision_yield: bool = config.outmem.completeness.elision_yield
 
     # ------------------------------------------------------------------
     # Construction
@@ -946,7 +951,10 @@ class WikiStore:
             )
             if not allow_elision:
                 _reject_incomplete_body(
-                    body, tool="write_page", allowed=self._elision_allowed
+                    body,
+                    tool="write_page",
+                    allowed=self._elision_allowed,
+                    resubmission_yields=self.elision_yield,
                 )
             # Both guards run before anything touches disk, so a refused
             # write leaves no half-applied state — no page file, no
@@ -1180,7 +1188,10 @@ class WikiStore:
                 )
             if not allow_elision:
                 _reject_incomplete_body(
-                    body, tool="extend_page", allowed=self._elision_allowed
+                    body,
+                    tool="extend_page",
+                    allowed=self._elision_allowed,
+                    resubmission_yields=self.elision_yield,
                 )
             page = self.read(slug)
             if provenance is not None:
@@ -1271,7 +1282,10 @@ class WikiStore:
                 )
             if not allow_elision:
                 _reject_incomplete_body(
-                    body, tool="append_page", allowed=self._elision_allowed
+                    body,
+                    tool="append_page",
+                    allowed=self._elision_allowed,
+                    resubmission_yields=self.elision_yield,
                 )
             page = self.read(slug)
             existing = page.body.rstrip()
@@ -2284,7 +2298,11 @@ def _reject_unregistered_provenance(
 
 
 def _reject_incomplete_body(
-    body: str, *, tool: str, allowed: set[str] | None = None
+    body: str,
+    *,
+    tool: str,
+    allowed: set[str] | None = None,
+    resubmission_yields: bool = True,
 ) -> None:
     """Raise if ``body`` stops at an elision marker.
 
@@ -2312,6 +2330,14 @@ def _reject_incomplete_body(
     cannot change that. The two branches are one exception type because
     callers handle them identically — retry, don't commit — and they
     differ only in whether insisting is an answer.
+
+    ``resubmission_yields=False`` withdraws the elision yield as well
+    (``completeness.elision_yield`` in config, or
+    :attr:`WikiStore.elision_yield`): the message then tells the model to
+    rephrase so the marker does not end its line, and the exception
+    carries ``resubmittable=False`` so the tool wrapper never arms the
+    yield. For a store served over a connector, where the model reading
+    this is a host's and follows "send it again unchanged" reflexively.
     """
     if allowed is not None and _body_text_key(body) in allowed:
         return
@@ -2340,17 +2366,30 @@ def _reject_incomplete_body(
     if not found:
         return
     lines = tuple(f"line {e.line}: {e.text}" for e in found[:3])
+    if resubmission_yields:
+        quoted = (
+            "If the ellipsis belongs to a quotation and the text is already "
+            "complete, submit the same body again unchanged — or pass "
+            "`--allow-elision` (CLI) / `allow_elision=True` (API). "
+        )
+    else:
+        quoted = (
+            "If the ellipsis belongs to a quotation and the text is already "
+            "complete, rephrase so the marker does not end its line — "
+            "sending this body again unchanged will be refused again. Only "
+            "an operator can pass it as written (`--allow-elision` (CLI) / "
+            "`allow_elision=True` (API)). "
+        )
     raise IncompleteBodyError(
         f"{tool}: the body stops at an elision marker "
         f"({found[0].marker!r}) — outmem pages must carry the complete "
         f"text, since nothing downstream can tell a shortened page from a "
         f"finished one. Write the full content; if it does not fit in one "
         f"call, send what fits now and add the rest with `append_page`. "
-        f"If the ellipsis belongs to a quotation and the text is already "
-        f"complete, submit the same body again unchanged — or pass "
-        f"`--allow-elision` (CLI) / `allow_elision=True` (API). "
+        f"{quoted}"
         f"Offending: {'; '.join(lines)}",
         markers=lines,
+        resubmittable=resubmission_yields,
     )
 
 

@@ -5,6 +5,21 @@ history (`git log --grep '^release:'`).
 
 ## 0.18.0
 
+### Added
+
+- **`completeness.elision_yield`** — an off switch for the resubmission yield.
+  The completeness guard refuses a body that ends at an elision marker; because
+  that is a positional heuristic that can be wrong about a quoted ellipsis, a
+  model that re-sends the identical body is taken at its word and the page
+  lands (reported by lint as `truncated-page`). Right inside outmem's own agent
+  loop, where a false positive would otherwise cost the whole turn. Over an MCP
+  connector it is a sentence a host model follows reflexively, and the elided
+  page lands on the second try. `elision_yield: false` in `config.yaml` — or
+  `store.elision_yield = False` from the serving code, whatever the wiki says —
+  withdraws it: the refusal tells the model to rephrase so the marker does not
+  end its line, an identical resubmission is refused again, and only an
+  operator can pass the body as written (`--allow-elision`). Default unchanged.
+
 ### Changed
 
 - **A `provenance:` citation that names no registered source is now refused at
