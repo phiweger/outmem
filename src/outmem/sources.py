@@ -1253,7 +1253,14 @@ def audit_registry(sources_dir: Path) -> RegistryAudit:
     filesystem, so orphaned rows are handed to the agent as readable
     sources it then fails to open.
     """
-    registry = SourceRegistry.load(sources_dir)
+    # An audit is a read. `load` creates the directory and the database as
+    # a side effect of opening, so auditing a tree with no registry used to
+    # *write* one — a dry run of `sources gc` on a read-only store, or on a
+    # curator-shipped clone, left a fresh `.sources.db` in the tracked tree.
+    # No file means no rows and no ingestions; everything on disk is
+    # unregistered, and there is nothing to open.
+    has_db = (sources_dir / REGISTRY_FILENAME).is_file()
+    registry = SourceRegistry.load(sources_dir) if has_db else SourceRegistry.empty(sources_dir)
     registered = set(registry.entries)
     missing = sorted(r for r in registered if not (sources_dir / r).is_file())
     on_disk = {
@@ -1261,10 +1268,12 @@ def audit_registry(sources_dir: Path) -> RegistryAudit:
         for p in sources_dir.rglob("*")
         if p.is_file() and p.name != REGISTRY_FILENAME
     }
-    con = registry._connection()
-    orphans = con.execute(
-        "SELECT COUNT(*) FROM ingestions WHERE rel_path NOT IN (SELECT rel_path FROM sources)"
-    ).fetchone()[0]
+    orphans = 0
+    if has_db:
+        con = registry._connection()
+        orphans = con.execute(
+            "SELECT COUNT(*) FROM ingestions WHERE rel_path NOT IN (SELECT rel_path FROM sources)"
+        ).fetchone()[0]
     return RegistryAudit(
         missing_files=missing,
         unregistered=sorted(on_disk - registered),
