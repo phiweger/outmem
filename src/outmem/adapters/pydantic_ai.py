@@ -36,10 +36,26 @@ from outmem.exceptions import (
     IncompleteBodyError,
     OutmemError,
     SlugError,
+    UnregisteredProvenanceError,
     WritebackError,
 )
 from outmem.skills import bundled_registry
 from outmem.store import WikiStore
+
+
+def _retry_unregistered(exc: UnregisteredProvenanceError) -> NoReturn:
+    """Hand an unregistered citation back to the model as a retryable error.
+
+    The model still has the document in context at that moment, which is
+    the only point where recovery is cheap: it can call ``list_sources``
+    and cite a real key, or drop the claim. Same reasoning, and the same
+    import-locality, as :func:`_retry_incomplete`.
+    """
+    try:
+        from pydantic_ai import ModelRetry
+    except ImportError:  # pragma: no cover - only without the agent extra
+        raise exc from None
+    raise ModelRetry(str(exc)) from exc
 
 
 def _retry_incomplete(exc: IncompleteBodyError) -> NoReturn:
@@ -804,6 +820,11 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         Fails if a page with ``slug`` already exists — use ``extend_page``
         to edit existing pages.
 
+        ``provenance`` must name a **registered** source; a citation the
+        registry does not hold is refused and nothing is written. Call
+        ``list_sources`` to see the keys you can cite. A page with no
+        provenance at all is fine — navigation hubs have none.
+
         Slugs may be flat (``pricing-formula``) or namespaced with
         ``:`` separators — each namespace segment becomes a directory
         on disk under ``wiki/pages/``. Use namespaces eagerly to group
@@ -847,11 +868,15 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 this becomes ``wiki/pages/<seg>/.../<seg>.md``.
             title: Human-readable page title for the frontmatter.
             body: The complete markdown body (no frontmatter — that is generated).
-            provenance: Optional list of source pointers. Each entry is
-                either a plain path string (e.g. ``"sources/<sha>/deck.md"``) or a
-                dict carrying additional metadata (``path``, ``sha256``,
-                ``label``, etc.). Both shapes round-trip through the
-                frontmatter unchanged.
+            provenance: Optional list of source pointers, each naming a
+                source ``list_sources`` shows. An entry is either a plain
+                path string — ``"sources/<sha>/deck.md"`` and the bare
+                ``"<sha>/deck.md"`` are the same key, as is
+                ``"sources-local/<sha>/deck.md"`` for local-only material
+                — or a dict carrying additional metadata (``path``,
+                ``sha256``, ``label``, etc.). Both shapes round-trip
+                through the frontmatter unchanged. Citing something
+                unregistered is refused; omitting provenance is allowed.
             tags: Optional tag list for the frontmatter.
         """
         _log_call(
@@ -870,6 +895,14 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 provenance=list(provenance) if provenance else None,
                 tags=list(tags) if tags else None,
             )
+        except UnregisteredProvenanceError as exc:
+            # Handed BACK to the model, like an incomplete body: it still
+            # has the document in context and can call `list_sources` to
+            # cite a real key, or drop the claim. There is no
+            # allow-through second attempt here — unlike an elision, a
+            # missing registry row is a fact, not a heuristic.
+            _log_error("write_page", exc)
+            _retry_unregistered(exc)
         except WritebackError:
             raise  # propagate; the service surfaces this to the caller
         except IncompleteBodyError as exc:
@@ -926,13 +959,23 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         Args:
             slug: Existing page slug.
             body: The complete replacement body.
-            provenance: Optional replacement source pointers. Omit to
+            provenance: Optional replacement source pointers, each
+                naming a source ``list_sources`` shows — citing something
+                unregistered is refused and nothing is written. Omit to
                 leave the page's existing provenance untouched.
         """
         _log_call("extend_page", slug=slug, body=body)
         try:
             return store.extend_page(slug, body=body, provenance=provenance,
             )
+        except UnregisteredProvenanceError as exc:
+            # Handed BACK to the model, like an incomplete body: it still
+            # has the document in context and can call `list_sources` to
+            # cite a real key, or drop the claim. There is no
+            # allow-through second attempt here — unlike an elision, a
+            # missing registry row is a fact, not a heuristic.
+            _log_error("extend_page", exc)
+            _retry_unregistered(exc)
         except WritebackError:
             raise
         except IncompleteBodyError as exc:
@@ -990,12 +1033,22 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         Args:
             slug: Existing page slug.
             body: The section to append. Complete — never an excerpt.
-            provenance: Optional additional source pointers.
+            provenance: Optional additional source pointers, each
+                naming a source ``list_sources`` shows. One unregistered
+                ref refuses the whole call — nothing is appended.
         """
         _log_call("append_page", slug=slug, body=body)
         try:
             return store.append_page(slug, body=body, provenance=provenance,
             )
+        except UnregisteredProvenanceError as exc:
+            # Handed BACK to the model, like an incomplete body: it still
+            # has the document in context and can call `list_sources` to
+            # cite a real key, or drop the claim. There is no
+            # allow-through second attempt here — unlike an elision, a
+            # missing registry row is a fact, not a heuristic.
+            _log_error("append_page", exc)
+            _retry_unregistered(exc)
         except WritebackError:
             raise
         except IncompleteBodyError as exc:

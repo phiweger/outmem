@@ -34,6 +34,7 @@ from outmem.exceptions import (
     IncompleteBodyError,
     OutmemError,
     SlugError,
+    UnregisteredProvenanceError,
     WritebackError,
 )
 from outmem.frontmatter import ProvenanceEntry, WikiFrontmatter
@@ -64,6 +65,7 @@ __all__ = [
     "Repo",
     "SearchHit",
     "SlugError",
+    "UnregisteredProvenanceError",
     "WikiFrontmatter",
     "WikiPage",
     "WikiSet",

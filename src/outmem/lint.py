@@ -996,7 +996,23 @@ def _check_provenance(
     sources_local_dir: Path | None,
     report: LintReport,
 ) -> None:
-    """Flag pages whose cited source files no longer exist."""
+    """Flag pages whose citations do not resolve, and say which way.
+
+    Two failures with two different remedies: a ref no registry row names
+    at all (`unregistered-provenance` — register it or drop the claim),
+    and a ref whose row exists but whose file is gone
+    (`stale-provenance` — restore the file or update the page).
+    """
+    # The registry caches below exist to avoid re-opening sqlite once per
+    # provenance entry *within* a run. Surviving between runs would make a
+    # second lint in the same process report the registry as it was before
+    # somebody registered the source it is complaining about.
+    _REGISTRY_SHA_CACHE.clear()
+    _LOCAL_REGISTRY_CACHE.clear()
+    wiki_dir_name = next(
+        (t.parent.name for t in (sources_dir, sources_local_dir) if t is not None),
+        None,
+    )
     for page in pages.values():
         for entry in page.provenance:
             _check_one_finding(entry, page=page, report=report)
@@ -1004,20 +1020,58 @@ def _check_provenance(
             ref = provenance_ref(entry)
             if ref is None:
                 continue
+            # Resolve what the store resolves. `split_tree_prefix` accepts
+            # three spellings of a citation — the bare registry key, the
+            # `sources/…` form a page's `provenance:` usually carries, and
+            # the repo-relative `wiki/sources/…` form `grep_wiki` prints —
+            # and a page written with the third used to be reported here as
+            # a dangling ref that `outmem stale` was in fact following
+            # happily. `ref` stays what the page wrote, so the message
+            # quotes a string the author can find in the file.
+            lookup = (
+                ref.removeprefix(f"{wiki_dir_name}/") if wiki_dir_name else ref
+            )
             if not _provenance_exists(
-                ref, sources_dir=sources_dir, sources_local_dir=sources_local_dir
+                lookup, sources_dir=sources_dir, sources_local_dir=sources_local_dir
             ):
-                report.findings.append(
-                    LintFinding(
-                        kind="stale-provenance",
-                        severity=Severity.WARNING,
-                        path=page.rel_path,
-                        message=(
-                            f"cites {ref!r} but the file is missing — either "
-                            "restore the source or update the page"
-                        ),
+                # Two different problems with two different remedies, which
+                # one finding used to conflate. "Restore the source" is
+                # advice for a file that was deleted; if nothing was ever
+                # registered, the fix is to register one or drop the claim.
+                # Writes are refused now, so this is for pages that predate
+                # the check, or were written with the opt-out.
+                registered = (
+                    sources_dir is not None
+                    and _registry_sha(sources_dir, lookup) is not None
+                ) or _local_registry_has(sources_local_dir, lookup)
+                if registered:
+                    report.findings.append(
+                        LintFinding(
+                            kind="stale-provenance",
+                            severity=Severity.WARNING,
+                            path=page.rel_path,
+                            message=(
+                                f"cites {ref!r}, which is registered, but the "
+                                "file is missing — either restore the source "
+                                "or update the page"
+                            ),
+                        )
                     )
-                )
+                else:
+                    report.findings.append(
+                        LintFinding(
+                            kind="unregistered-provenance",
+                            severity=Severity.WARNING,
+                            path=page.rel_path,
+                            message=(
+                                f"cites {ref!r}, which no registry row names — "
+                                "the citation is invisible to `outmem stale` "
+                                "and supersession reporting. Register the "
+                                "source (`outmem ingest`) or remove the "
+                                "citation"
+                            ),
+                        )
+                    )
                 continue
             # The file existing is only half the question. A source that was
             # re-ingested after its content changed lives at a new
@@ -1025,7 +1079,7 @@ def _check_provenance(
             # at content that is no longer what the page was compacted from.
             cited_sha = _provenance_sha(entry)
             if cited_sha and sources_dir is not None:
-                actual = _registry_sha(sources_dir, ref)
+                actual = _registry_sha(sources_dir, lookup)
                 if actual is not None and actual != cited_sha:
                     report.findings.append(
                         LintFinding(
@@ -1039,6 +1093,33 @@ def _check_provenance(
                             ),
                         )
                     )
+
+
+def _local_registry_has(sources_local_dir: Path | None, ref: str) -> bool:
+    """Whether the *local* registry holds a row for ``ref``.
+
+    Separate from `_registry_sha` because the two trees carry separate
+    registries, and a `sources-local/` citation resolves in neither the
+    tracked registry nor, without this, anywhere at all — which would
+    report every local citation as unregistered.
+    """
+    if sources_local_dir is None or not sources_local_dir.is_dir():
+        return False
+    cache_key = str(sources_local_dir)
+    keys = _LOCAL_REGISTRY_CACHE.get(cache_key)
+    if keys is None:
+        from outmem.sources import SourceRegistry
+
+        try:
+            registry = SourceRegistry.load(sources_local_dir)
+        except Exception:
+            keys = set()
+        else:
+            keys = set(registry.entries)
+        _LOCAL_REGISTRY_CACHE[cache_key] = keys
+    # The registry keys on the bare form; the caller has already dropped
+    # any wiki-directory prefix, so only the tree prefix can remain.
+    return ref.removeprefix(f"{SOURCES_LOCAL_DIR}/") in keys
 
 
 def _provenance_sha(entry: Any) -> str | None:
@@ -1115,6 +1196,9 @@ def _registry_sha(sources_dir: Path, ref: str) -> str | None:
 
 
 _REGISTRY_SHA_CACHE: dict[str, dict[str, str]] = {}
+# Same reasoning: lint asks per provenance entry across every page, and
+# re-opening the sqlite registry each time would make it O(entries) opens.
+_LOCAL_REGISTRY_CACHE: dict[str, set[str]] = {}
 
 
 def provenance_ref(entry: Any) -> str | None:

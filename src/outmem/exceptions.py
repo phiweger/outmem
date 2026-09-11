@@ -59,6 +59,30 @@ class IncompleteBodyError(OutmemError):
         self.markers = markers
 
 
+class UnregisteredProvenanceError(OutmemError):
+    """A ``provenance:`` entry names a source the registry does not hold.
+
+    Provenance is the edge the rest of outmem hangs off: ``outmem stale``
+    follows it to find pages citing a superseded version,
+    ``source_citations`` turns it into a liveness signal, ``superseded_ok:``
+    and ``finding:`` annotate it, ``provenance-sha-mismatch`` compares it.
+    A citation to nothing opts a page out of every one of those while
+    looking, on the page, exactly like a citation to something.
+
+    Refused at the write for the same reason as
+    :class:`IncompleteBodyError`: that is the moment the author — or the
+    model, with the source still in context — is present and can fix it.
+    ``outmem lint`` is a report somebody reads later.
+
+    Carries ``refs`` (the offending references) so a caller can quote
+    them, and the adapter turns it into a ``ModelRetry``.
+    """
+
+    def __init__(self, message: str, refs: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.refs = refs
+
+
 class IdentityWarning(OutmemError):
     """A git author was not found in ``CONTRIBUTORS.md``.
 

@@ -232,6 +232,7 @@ class TestWrite:
             provenance=["sources/source.md"],
             tags=["pricing"],
             created=when,
+            allow_unregistered_provenance=True,  # subject is frontmatter round-trip
         )
         page = fresh_store.read("alpha")
         assert page.frontmatter.provenance == ["sources/source.md"]
@@ -267,6 +268,7 @@ class TestWrite:
             provenance=["sources/source.md"],
             tags=["x"],
             created=when,
+            allow_unregistered_provenance=True,  # subject is frontmatter round-trip
         )
         page_v1 = fresh_store.read("alpha")
         fresh_store.extend_page("alpha", body="v2")

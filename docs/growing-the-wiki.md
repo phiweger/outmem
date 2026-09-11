@@ -41,7 +41,7 @@ documented source for X" note. Take a few of them, find sources,
 
 ## 2. Lint surfaces structural gaps
 
-`outmem lint` catches three classes of "the wiki is reaching for
+`outmem lint` catches several classes of "the wiki is reaching for
 something it doesn't have":
 
 - **Broken wikilinks** (error) — a page wrote `[[bluesky-corp]]` but
@@ -50,8 +50,12 @@ something it doesn't have":
 - **Orphan pages** (warning) — pages with no inbound links. Less of a
   gap, more of "this knowledge is isolated" — usually wants a few
   wikilinks from related pages, not a new source.
-- **Stale provenance** (warning) — a page cites a source file that no
-  longer exists. Re-ingest or fix the citation.
+- **Stale provenance** (warning) — a page cites a registered source
+  whose file no longer exists. Re-ingest or fix the citation.
+- **Unregistered provenance** (warning) — a page cites something the
+  registry never held at all. Register the source (`outmem ingest`) or
+  remove the citation. New writes are refused outright rather than
+  reported here, so this only appears on pages written before 0.18.
 
 ```bash
 outmem lint
