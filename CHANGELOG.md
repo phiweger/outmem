@@ -77,7 +77,11 @@ history (`git log --grep '^release:'`).
   row — a write `git status` never showed. Every mutating entry point now
   refuses at the door, before anything touches disk or the registry; the
   commit-time guard stays as the backstop. Dry runs of the repairs still work,
-  since a dry run is a read.
+  since a dry run is a read — and now genuinely are one: auditing the registry
+  opened it with `load`, which creates `.sources.db` as a side effect, so a dry
+  run of `sources gc` on a read-only store or a curator-shipped clone left a
+  fresh tracked file behind. A tree with no registry is audited as having no
+  rows, and nothing is created.
 - **Concurrent openers of a fresh registry failed with `duplicate column name`.**
   `_migrate` decided what to `ALTER` by reading the schema, then acted inside a
   deferred transaction — so sixteen ingest workers starting together all read

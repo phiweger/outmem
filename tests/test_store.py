@@ -844,10 +844,17 @@ class TestReadOnly:
         # showed up in `git status` at all.
         from subprocess import run
 
+        # A registered source, so the registry exists and the byte-for-
+        # byte comparison below is a real one: without the guard,
+        # `record_ingestion` on it would *succeed* and write a row.
+        writer = WikiStore.open(seeded)
+        doc = tmp_path / "doc.md"
+        doc.write_text("# Doc\n\nbody\n", encoding="utf-8")
+        entry = writer.add_source(doc)
+        writer.close()
+
         store = WikiStore.open(seeded, read_only=True)
-        registry_before = (store.sources_path / ".sources.db").read_bytes() if (
-            store.sources_path / ".sources.db"
-        ).exists() else None
+        registry_before = (store.sources_path / ".sources.db").read_bytes()
         status_before = run(
             ["git", "status", "--porcelain"], cwd=seeded, capture_output=True, text=True
         ).stdout
@@ -858,16 +865,13 @@ class TestReadOnly:
             lambda: store.assign_document_keys([("a", "b")]),
             lambda: store.rekey_document("a", "b", dry_run=False),
             lambda: store.sources_gc(dry_run=False),
-            lambda: store.record_ingestion("nope.md", prompt=None, pages_touched=[]),
+            lambda: store.record_ingestion(entry.rel_path, prompt=None, pages_touched=[]),
             lambda: store.semantic_reindex_path("wiki/pages/pricing.md"),
             lambda: store.semantic_reindex_all(),
         ):
             with pytest.raises(OutmemError, match="read-only"):
                 fn()
-        after = (store.sources_path / ".sources.db").read_bytes() if (
-            store.sources_path / ".sources.db"
-        ).exists() else None
-        assert after == registry_before
+        assert (store.sources_path / ".sources.db").read_bytes() == registry_before
         status_after = run(
             ["git", "status", "--porcelain"], cwd=seeded, capture_output=True, text=True
         ).stdout
@@ -881,6 +885,11 @@ class TestReadOnly:
         assert store.repair_pages(dry_run=True) == []
         audit = store.sources_gc(dry_run=True)
         assert audit.missing_files == []
+        # And a dry run creates nothing. Auditing the registry used to
+        # open it with `load`, which creates `.sources.db` as a side
+        # effect — so "look before touching anything" wrote a tracked
+        # file into a read-only tree.
+        assert not (store.sources_path / ".sources.db").exists()
 
     def test_pull_refused(self, seeded: Path) -> None:
         """``git pull --rebase`` would mutate the working tree, so the

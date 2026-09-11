@@ -1183,11 +1183,11 @@ class WikiStore:
         by ``outmem stale`` would keep citing the superseded version and
         keep being reported, forever. Omit it and provenance is untouched.
         """
+        self._refuse_if_read_only("extend a page")
         # Resolve BEFORE anything else: read() would follow the alias but
         # _page_relpath(slug) would not, so the commit would stage a path
         # that doesn't exist — after the page and index.md were already
         # rewritten on disk.
-        self._refuse_if_read_only("extend a page")
         with self._write_lock:
             slug = self.resolve_slug(slug)
             if slug == INDEX_SLUG:
@@ -2414,8 +2414,8 @@ def _reject_incomplete_body(
             "If the ellipsis belongs to a quotation and the text is already "
             "complete, rephrase so the marker does not end its line — "
             "sending this body again unchanged will be refused again. Only "
-            "an operator can pass it as written (`--allow-elision` (CLI) / "
-            "`allow_elision=True` (API)). "
+            "an operator can pass it as written, with `--allow-elision` "
+            "(CLI) or `allow_elision=True` (API). "
         )
     raise IncompleteBodyError(
         f"{tool}: the body stops at an elision marker "

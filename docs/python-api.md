@@ -251,7 +251,12 @@ All three write paths refuse a body that ends at an elision marker
 (`IncompleteBodyError`) — a page that stops early is indistinguishable
 from a finished one to every other check, so the refusal is the only
 place it can be caught cheaply. Pass `allow_elision=True` to override;
-the agent-facing tools deliberately do not expose it. See
+the agent-facing tools deliberately do not expose it. A model that re-sends
+the identical body through those tools is let through by default — the
+check is a heuristic that can be wrong about a quoted ellipsis — and
+`completeness.elision_yield: false` in `config.yaml`, or
+`store.elision_yield = False` after opening, withdraws that for a store
+served to a model whose retry budget is not outmem's. See
 [growing-the-wiki.md](growing-the-wiki.md#2b-completeness--pages-that-stop-early).
 
 All three also refuse a `provenance:` entry naming a source the registry
@@ -604,7 +609,8 @@ What "read-only" guarantees:
   `record_ingestion`, `rebuild_index`, `import_vault`, the registry
   repairs, the semantic reindex) raises `OutmemError` **before anything
   touches disk or the registry** — a refused call leaves no page file, no
-  regenerated `index.md`, no row behind, and `git status` stays clean.
+  regenerated `index.md`, no row behind, and `git status` is exactly what
+  it was.
   `WikiStore._commit_paths` refuses as well, as the backstop: even if the
   model somehow obtained a write tool and reached the commit funnel some
   other way, it would still refuse.
