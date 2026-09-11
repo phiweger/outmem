@@ -1136,10 +1136,6 @@ def _migrate(con: sqlite3.Connection) -> None:
     and inventing one by parsing ``rel_path`` would merge documents that
     only share a filename (see ``outmem sources backfill``).
     """
-    version = con.execute("PRAGMA user_version").fetchone()[0]
-    existing = {row[1] for row in con.execute("PRAGMA table_info(sources)")}
-    wanted = ("document_key", "superseded_by", "origin_path", "refs_scanned_at")
-    missing = [c for c in wanted if c not in existing]
     # v3 added source_refs, created unconditionally above by CREATE TABLE
     # IF NOT EXISTS — so the migration only has to move user_version.
     # The version is the fast path; the columns are the actual
@@ -1147,16 +1143,42 @@ def _migrate(con: sqlite3.Connection) -> None:
     # earlier build of this change — when the identity column was still
     # called `logical_key` — repairs itself on open instead of failing
     # every read with "no such column".
-    if version >= SCHEMA_VERSION and not missing:
+    #
+    # This first look is unlocked, and that is safe only because it can
+    # go stale in one direction: columns are added, never removed, so
+    # "nothing to do" stays true once it is true.
+    if _schema_current(con):
         return
     with con:
-        for column in missing:
-            con.execute(f"ALTER TABLE sources ADD COLUMN {column} TEXT")
+        # The decision has to be made *under* the write lock. Sixteen
+        # processes opening a fresh registry together all read "column
+        # missing" from the unlocked check above, and every one of them
+        # then issues the ALTER — the second fails with "duplicate
+        # column". BEGIN IMMEDIATE takes the lock now rather than at the
+        # first write (busy_timeout makes the others wait instead of
+        # erroring), and reading the schema again inside it sees what the
+        # first opener did.
+        con.execute("BEGIN IMMEDIATE")
+        existing = {row[1] for row in con.execute("PRAGMA table_info(sources)")}
+        for column in _V2_COLUMNS:
+            if column not in existing:
+                con.execute(f"ALTER TABLE sources ADD COLUMN {column} TEXT")
         con.execute(
             "CREATE INDEX IF NOT EXISTS sources_document_key "
             "ON sources(document_key)"
         )
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+_V2_COLUMNS = ("document_key", "superseded_by", "origin_path", "refs_scanned_at")
+
+
+def _schema_current(con: sqlite3.Connection) -> bool:
+    """Whether ``sources`` is stamped :data:`SCHEMA_VERSION` *and* carries
+    every v2 column — both, for the `logical_key` repair described above."""
+    version = con.execute("PRAGMA user_version").fetchone()[0]
+    existing = {row[1] for row in con.execute("PRAGMA table_info(sources)")}
+    return version >= SCHEMA_VERSION and all(c in existing for c in _V2_COLUMNS)
 
 
 _ENTRY_COLUMNS = (

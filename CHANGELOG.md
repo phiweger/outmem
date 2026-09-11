@@ -54,6 +54,16 @@ history (`git log --grep '^release:'`).
 
 ### Fixed
 
+- **Concurrent openers of a fresh registry failed with `duplicate column name`.**
+  `_migrate` decided what to `ALTER` by reading the schema, then acted inside a
+  deferred transaction — so sixteen ingest workers starting together all read
+  "column missing", and every one after the first failed on its own open for
+  something another process had done. Reproduced at 16 openers: one round in
+  two lost at least one. The decision is now made under the write lock
+  (`BEGIN IMMEDIATE`, with the existing `busy_timeout` making the others wait
+  rather than error), and the schema is read again inside it. Zero failures
+  in thirty rounds afterwards; the reproduction ships as a test, alongside a
+  deterministic interleaving that holds the lock across an opener's arrival.
 - **A page built on content outmem had withheld could be written by insisting.**
   The completeness guard refuses two things under one exception: a body that
   ends at an elision marker, and a body carrying an `⟪ outmem: … ⟫` marker,
