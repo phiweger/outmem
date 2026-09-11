@@ -143,6 +143,8 @@ There is no `authority` field. Any human or the agent may edit any wiki page. Th
 
 The `provenance` field is a list of pointers into the source trees (`sources/…` or `sources-local/…`). The agent populates it during compaction and propagates any deeper provenance — Drive paths, page ranges, content hashes — that the producing pipeline embedded in the source file's own frontmatter. The agent does not generate or interpret upstream provenance; it just preserves it.
 
+> **Amended in 0.18.** A pointer must name a source the registry holds, and the write path refuses one that does not (`UnregisteredProvenanceError`) rather than committing it for `outmem lint` to report later. The field is still a plain list and the agent still propagates upstream metadata verbatim; what changed is where a pointer to nothing is caught. A registry *row* is the criterion, not a file on disk — citing a superseded version is legal, and is the mechanism §7's supersession reporting depends on.
+
 Wikilinks use `[[slug]]` syntax — including namespaced slugs
 (`[[abx:penicillin]]`) — resolved natively by Obsidian and rendered to
 `/wiki/<slug-as-path>` in the dashboard's read view (the `:` separators

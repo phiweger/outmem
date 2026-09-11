@@ -934,13 +934,6 @@ class WikiStore:
                     f"silently retarget every [[{slug}]] link. Remove the alias from "
                     f"{owner!r} first, or choose another slug."
                 )
-            # Before anything touches disk, so a refused write leaves no
-            # half-applied state — no page file, no regenerated index, no
-            # commit.
-            if not allow_unregistered_provenance:
-                _reject_unregistered_provenance(
-                    self, list(provenance or []), tool="write_page"
-                )
             now = utc_now()
             frontmatter = WikiFrontmatter(
                 title=title,
@@ -954,6 +947,15 @@ class WikiStore:
             if not allow_elision:
                 _reject_incomplete_body(
                     body, tool="write_page", allowed=self._elision_allowed
+                )
+            # Both guards run before anything touches disk, so a refused
+            # write leaves no half-applied state — no page file, no
+            # regenerated index, no commit. Same order as `extend_page`
+            # and `append_page`, so a call with both problems hears about
+            # them in the same sequence whichever method it entered.
+            if not allow_unregistered_provenance:
+                _reject_unregistered_provenance(
+                    self, list(provenance or []), tool="write_page"
                 )
             page_text = serialize_wiki_page(frontmatter, body)
             page_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2246,6 +2248,19 @@ def _reject_unregistered_provenance(
         if (ref := provenance_ref(entry)) is not None
         and store.get_source(ref) is None
     ]
+    if not missing:
+        return
+    # A miss can mean the *snapshot* is stale rather than the source
+    # absent: the registry is cached for the store's lifetime, so a row
+    # another process registered after this store opened is invisible
+    # here — and the deployment this guard was written for is outmem's
+    # write path behind a long-lived server with ingestion happening
+    # elsewhere. Re-read once and ask again. The refusal path is rare by
+    # construction, so this costs nothing in the common case, and it is
+    # the difference between refusing a good citation and telling its
+    # author to register a source that is already registered.
+    _sources.refresh_registry_cache(store)
+    missing = [ref for ref in missing if store.get_source(ref) is None]
     if not missing:
         return
     listed = ", ".join(repr(r) for r in missing)

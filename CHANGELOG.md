@@ -54,6 +54,23 @@ history (`git log --grep '^release:'`).
 
 ### Fixed
 
+- **A source registered by another process was refused as unregistered.** The
+  registry is cached in memory for a store's lifetime — right for reads, but it
+  meant a long-lived store's snapshot predated any row registered elsewhere, so
+  the new check refused a perfectly good citation and handed back advice ("cite
+  one `list_sources` shows") that its own `list_sources` could not satisfy,
+  being stale too. That is the deployment the guard was written for: outmem's
+  write path behind a server, with ingestion happening in another process. The
+  registries are now re-read once before a refusal, so the refusal path pays for
+  itself and the common path does not. A genuinely absent source is still
+  refused.
+- **A citation the filesystem cannot represent raised `OSError`.** `Path.is_file`
+  propagates ENAMETOOLONG, so a ref of several hundred junk characters — the
+  shape a model invents when it guesses a path — escaped every handler that
+  expects an `OutmemError`, killing an agent's turn instead of retrying it.
+  Source resolution now treats a path the OS refuses as "does not resolve",
+  which also fixes the read path (`get_source`, `read_source`) where the same
+  resolver was reachable with any string a model passed.
 - **`outmem lint` reported a perfectly good citation as dangling** when the page
   spelled it `wiki/sources/<sha>/file.md` — one of the three forms
   `split_tree_prefix` accepts, and the one `grep_wiki` prints, so an agent that
