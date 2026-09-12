@@ -453,20 +453,56 @@ class SourceRegistry:
     Construct via :meth:`load`, or :meth:`empty` for the deliberate
     no-database case. Mutations through :meth:`register` /
     :meth:`record_ingestion` commit immediately and keep
-    :attr:`entries` (the in-memory snapshot) in lockstep.
+    :attr:`entries` (the in-memory snapshot) in lockstep; a commit by
+    any *other* connection is picked up on the next read of
+    :attr:`entries` — see the property.
     """
 
     sources_dir: Path
-    entries: dict[str, SourceEntry] = field(default_factory=dict)
+    _entries: dict[str, SourceEntry] = field(default_factory=dict, repr=False)
     _con: sqlite3.Connection | None = field(default=None, repr=False)
+    # `PRAGMA data_version` as of the last snapshot; None until one is
+    # taken.
+    _data_version: int | None = field(default=None, repr=False)
 
     @classmethod
     def load(cls, sources_dir: Path) -> SourceRegistry:
         """Open / create the registry DB and return an in-memory snapshot."""
         sources_dir.mkdir(parents=True, exist_ok=True)
         con = _open_registry(sources_dir / REGISTRY_FILENAME)
-        entries = _read_all_entries(con)
-        return cls(sources_dir=sources_dir, entries=entries, _con=con)
+        registry = cls(sources_dir=sources_dir, _con=con)
+        registry._refresh()
+        return registry
+
+    @property
+    def entries(self) -> dict[str, SourceEntry]:
+        """The rows, re-read whenever another connection has committed.
+
+        A store caches its registry for its lifetime, which is right for
+        reads — but it meant a long-lived store answered ``list_sources``
+        from the snapshot taken at open, and a server had to close and
+        reopen its read stores after every registration to avoid serving
+        a stale listing. SQLite's ``PRAGMA data_version`` changes exactly
+        when a *different* connection has committed to the database, so
+        one integer read per access — no mtime heuristics, no
+        filesystem stat — says whether the snapshot is still the truth.
+        This connection's own commits leave it unchanged, and those keep
+        the snapshot in lockstep themselves.
+        """
+        self._refresh()
+        return self._entries
+
+    def _refresh(self) -> None:
+        con = self._con
+        if con is None:
+            return  # the no-database stand-in: nothing to be out of date with
+        version = con.execute("PRAGMA data_version").fetchone()[0]
+        if version != self._data_version:
+            # Record the version *before* reading the rows. A commit that
+            # lands between the two is then caught by the next access
+            # instead of being masked behind a version we never saw.
+            self._data_version = version
+            self._entries = _read_all_entries(con)
 
     @classmethod
     def empty(cls, sources_dir: Path) -> SourceRegistry:

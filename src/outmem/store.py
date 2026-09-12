@@ -1780,7 +1780,6 @@ class WikiStore:
 
         audit = gc_registry(self.sources_path, dry_run=dry_run)
         if not dry_run and (audit.missing_files or audit.orphan_ingestions):
-            self._source_registry = None  # drop the cached handle
             self._commit_paths(
                 [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
                 subject=f"sources: gc — dropped {len(audit.missing_files)} stale row(s)",
@@ -1790,8 +1789,6 @@ class WikiStore:
             return audit
 
         local_audit = gc_registry(self.sources_local_path, dry_run=dry_run)
-        if not dry_run and (local_audit.missing_files or local_audit.orphan_ingestions):
-            self._source_registry_local = None
         # Merge so a caller sees one report. Local paths are tree-qualified
         # so the two trees stay distinguishable in the output.
         return RegistryAudit(
@@ -2354,19 +2351,6 @@ def _reject_unregistered_provenance(
         if (ref := provenance_ref(entry)) is not None
         and store.get_source(ref) is None
     ]
-    if not missing:
-        return
-    # A miss can mean the *snapshot* is stale rather than the source
-    # absent: the registry is cached for the store's lifetime, so a row
-    # another process registered after this store opened is invisible
-    # here — and the deployment this guard was written for is outmem's
-    # write path behind a long-lived server with ingestion happening
-    # elsewhere. Re-read once and ask again. The refusal path is rare by
-    # construction, so this costs nothing in the common case, and it is
-    # the difference between refusing a good citation and telling its
-    # author to register a source that is already registered.
-    _sources.refresh_registry_cache(store)
-    missing = [ref for ref in missing if store.get_source(ref) is None]
     if not missing:
         return
     listed = ", ".join(repr(r) for r in missing)

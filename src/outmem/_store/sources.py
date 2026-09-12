@@ -128,33 +128,34 @@ def get_registry(store: WikiStore, tree: SourceTree | None = None) -> SourceRegi
     promised would not be touched.
     """
     if tree is None or tree.tracked:
-        if store._source_registry is None:
-            store._source_registry = _load_registry(store, store.sources_path)
+        store._source_registry = _current_registry(
+            store, store._source_registry, store.sources_path
+        )
         return store._source_registry
-    if store._source_registry_local is None:
-        store._source_registry_local = _load_registry(store, tree.path)
+    store._source_registry_local = _current_registry(
+        store, store._source_registry_local, tree.path
+    )
     return store._source_registry_local
 
 
-def refresh_registry_cache(store: WikiStore) -> None:
-    """Drop the cached snapshots so the next lookup re-reads the databases.
+def _current_registry(
+    store: WikiStore, cached: SourceRegistry | None, path: Path
+) -> SourceRegistry:
+    """The cached handle, opened on first use — and re-opened once for the
+    one case the handle cannot notice on its own.
 
-    :func:`get_registry` caches an in-memory snapshot for the store's
-    lifetime. That is right for reads — a long-lived store would
-    otherwise pay a SQLite open per lookup — but it means a row some
-    *other* process registered after this store opened is invisible here.
-    A caller about to **refuse** a write over a missing row asks again
-    through this first, so a good citation is not rejected with advice to
-    register what is already registered.
-
-    The handles are dropped, not closed: another thread may be writing
-    through one, and closing it underneath would turn a stale read into a
-    hard failure, while a merely-unreferenced connection keeps working
-    until it is collected. :meth:`WikiStore.sources_gc` drops the tracked
-    handle the same way.
+    A loaded registry keeps itself current (``SourceRegistry.entries``
+    re-reads when another connection has committed). The no-database
+    stand-in a read-only store gets when ``.sources.db`` does not exist
+    has no connection to ask, so if another process creates the registry
+    afterwards it would answer "nothing registered" for the store's whole
+    lifetime. One ``stat`` per lookup, only in that case, upgrades it.
     """
-    store._source_registry = None
-    store._source_registry_local = None
+    if cached is None:
+        return _load_registry(store, path)
+    if cached._con is None and (path / REGISTRY_FILENAME).is_file():
+        return _load_registry(store, path)
+    return cached
 
 
 def _load_registry(store: WikiStore, path: Path) -> SourceRegistry:
