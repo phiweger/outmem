@@ -86,68 +86,68 @@ def import_vault(
     Raises :class:`OutmemError` if ``source`` isn't a directory or if
     the target wiki already has pages and ``force`` is False.
     """
-    store._refuse_if_read_only("import a vault")
-    if not source.is_dir():
-        raise OutmemError(f"import source is not a directory: {source}")
+    with store._mutation("import a vault"):
+        if not source.is_dir():
+            raise OutmemError(f"import source is not a directory: {source}")
 
-    existing = editorial_pages(store.pages_path)
-    if existing and not force:
-        raise OutmemError(
-            f"target wiki already has {len(existing)} page(s); "
-            "pass force=True to overwrite."
+        existing = editorial_pages(store.pages_path)
+        if existing and not force:
+            raise OutmemError(
+                f"target wiki already has {len(existing)} page(s); "
+                "pass force=True to overwrite."
+            )
+
+        candidates = _collect_candidates(source)
+        if not candidates:
+            raise OutmemError(f"no *.md files found under {source}")
+
+        _resolve_slugs(candidates)
+        slug_by_basename = _build_link_index(candidates)
+
+        collisions: list[tuple[str, str]] = []
+        rewrites_total = 0
+        unresolved_total = 0
+        written: list[str] = []
+
+        for c in candidates:
+            # Defence in depth: every produced slug must pass the canonical
+            # check, else outmem itself refuses to read the page back.
+            validate_slug(c.slug)
+            rewritten_body, rewrites, unresolved = _rewrite_wikilinks(
+                c.body, slug_by_basename
+            )
+            rewrites_total += rewrites
+            unresolved_total += unresolved
+
+            frontmatter = WikiFrontmatter(
+                title=c.title,
+                slug=c.slug,
+                created=c.mtime,
+                updated=c.mtime,
+                provenance=[{"path": str(c.rel_source), "source": "obsidian-import"}],
+            )
+            rendered = serialize_wiki_page(frontmatter, rewritten_body)
+            dest = store.pages_path / slug_to_relpath(c.slug)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(rendered, encoding="utf-8")
+            written.append(
+                f"{store.config.wiki_dir}/{PAGES_DIR}/{slug_to_relpath(c.slug).as_posix()}"
+            )
+
+            if c.slug != _slugify(c.rel_source.stem):
+                collisions.append((str(c.rel_source), c.slug))
+
+        # Regenerate the index + commit everything in one go.
+        store.rebuild_index(commit=False)
+        written.append(f"{store.config.wiki_dir}/index.md")
+        store._commit_paths(written, subject=f"import: {source.name}")
+
+        return ImportSummary(
+            pages_imported=len(candidates),
+            slug_collisions=tuple(collisions),
+            wikilinks_rewritten=rewrites_total,
+            wikilinks_unresolved=unresolved_total,
         )
-
-    candidates = _collect_candidates(source)
-    if not candidates:
-        raise OutmemError(f"no *.md files found under {source}")
-
-    _resolve_slugs(candidates)
-    slug_by_basename = _build_link_index(candidates)
-
-    collisions: list[tuple[str, str]] = []
-    rewrites_total = 0
-    unresolved_total = 0
-    written: list[str] = []
-
-    for c in candidates:
-        # Defence in depth: every produced slug must pass the canonical
-        # check, else outmem itself refuses to read the page back.
-        validate_slug(c.slug)
-        rewritten_body, rewrites, unresolved = _rewrite_wikilinks(
-            c.body, slug_by_basename
-        )
-        rewrites_total += rewrites
-        unresolved_total += unresolved
-
-        frontmatter = WikiFrontmatter(
-            title=c.title,
-            slug=c.slug,
-            created=c.mtime,
-            updated=c.mtime,
-            provenance=[{"path": str(c.rel_source), "source": "obsidian-import"}],
-        )
-        rendered = serialize_wiki_page(frontmatter, rewritten_body)
-        dest = store.pages_path / slug_to_relpath(c.slug)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(rendered, encoding="utf-8")
-        written.append(
-            f"{store.config.wiki_dir}/{PAGES_DIR}/{slug_to_relpath(c.slug).as_posix()}"
-        )
-
-        if c.slug != _slugify(c.rel_source.stem):
-            collisions.append((str(c.rel_source), c.slug))
-
-    # Regenerate the index + commit everything in one go.
-    store.rebuild_index(commit=False)
-    written.append(f"{store.config.wiki_dir}/index.md")
-    store._commit_paths(written, subject=f"import: {source.name}")
-
-    return ImportSummary(
-        pages_imported=len(candidates),
-        slug_collisions=tuple(collisions),
-        wikilinks_rewritten=rewrites_total,
-        wikilinks_unresolved=unresolved_total,
-    )
 
 
 # ---------------------------------------------------------------------------

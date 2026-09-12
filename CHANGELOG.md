@@ -43,6 +43,21 @@ history (`git log --grep '^release:'`).
   root `.gitignore` reaches every nested wiki, which is why it is git's answer
   and not a pattern match. A wiki that never ignored its index sees no change.
 
+- **Parallel writers of one wiki no longer fail each other at `git add`.**
+  The repository lock covered stage-and-commit only, but what a write
+  rewrites *before* committing — `wiki/index.md`, `.sources.db`,
+  `.vectors.db` — is shared with every other writer of the same wiki, and
+  git refuses to stage a file that changes under its hash (`fatal: confused
+  by unstable object source data`). Eight processes registering sources into
+  one wiki lost at least one registration three rounds out of three, so the
+  README's "parallel ingest is safe" was not true. The lock is now re-entrant
+  within a thread and every mutating method holds it — together with the
+  store's own write lock — for its whole body, the cross-process twin of what
+  `_write_lock` already did within one process. Zero failures afterwards, for
+  registrations and for page writes; both ship as tests. The cost is that a
+  repository's writers are serialised across the reindex too, which within
+  one process they always were.
+
 - **The registry snapshot keeps itself current.** A store caches its registry
   for its lifetime, which meant a read-only store answered `list_sources` from
   the snapshot taken at open, and a server closed and reopened its read stores

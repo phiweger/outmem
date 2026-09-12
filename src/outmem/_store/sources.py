@@ -205,77 +205,77 @@ def add_source(
     local: bool = False,
     commit: bool = True,
 ) -> SourceEntry:
-    store._refuse_if_read_only("register a source")
-    source_path = Path(source).expanduser()
-    if local:
-        # Creates the directory AND its .gitignore entry, in that order.
-        store.ensure_sources_local()
-    tree = local_tree(store) if local else tracked_tree(store)
-    registry = get_registry(store, tree)
-    # Plan before copying: a refused ingest must not leave an
-    # unregistered orphan under the tree that lint then flags and gc
-    # refuses to delete.
-    placement = plan_source_copy(
-        source_path, tree.path, into_subdir=into_subdir, rename=rename
-    )
-    rel_path, sha = placement.rel_path, placement.sha256
-    # Absolute: a relative origin is meaningless once recorded, and a
-    # relative/absolute mix makes `distinguishing_segment` diverge at the
-    # root and propose a name that distinguishes nothing.
-    origin = str(source_path.resolve())
+    with store._mutation("register a source"):
+        source_path = Path(source).expanduser()
+        if local:
+            # Creates the directory AND its .gitignore entry, in that order.
+            store.ensure_sources_local()
+        tree = local_tree(store) if local else tracked_tree(store)
+        registry = get_registry(store, tree)
+        # Plan before copying: a refused ingest must not leave an
+        # unregistered orphan under the tree that lint then flags and gc
+        # refuses to delete.
+        placement = plan_source_copy(
+            source_path, tree.path, into_subdir=into_subdir, rename=rename
+        )
+        rel_path, sha = placement.rel_path, placement.sha256
+        # Absolute: a relative origin is meaningless once recorded, and a
+        # relative/absolute mix makes `distinguishing_segment` diverge at the
+        # root and propose a name that distinguishes nothing.
+        origin = str(source_path.resolve())
 
-    existing = registry.entries.get(rel_path)
-    if existing and existing.sha256 == sha:
-        # Identical content is the same row, not a new version — but an
-        # explicit `--as` still has to land, because "re-ingest with
-        # `--as <name>`" is exactly what `sources backfill` tells the
-        # operator to do about an ambiguous group.
-        if as_key is None:
-            return replace(existing, local=not tree.tracked)
-        return replace(
-            _adopt_or_refuse(registry, existing, normalize_document_key(as_key), origin),
-            local=not tree.tracked,
-        )
+        existing = registry.entries.get(rel_path)
+        if existing and existing.sha256 == sha:
+            # Identical content is the same row, not a new version — but an
+            # explicit `--as` still has to land, because "re-ingest with
+            # `--as <name>`" is exactly what `sources backfill` tells the
+            # operator to do about an ambiguous group.
+            if as_key is None:
+                return replace(existing, local=not tree.tracked)
+            return replace(
+                _adopt_or_refuse(registry, existing, normalize_document_key(as_key), origin),
+                local=not tree.tracked,
+            )
 
-    document_key = (
-        normalize_document_key(as_key)
-        if as_key is not None
-        else candidate_document_key(rel_path, sha)
-    )
-    dest, rel_path = copy_source(
-        source_path, tree.path, into_subdir=into_subdir, rename=rename
-    )
-    try:
-        entry = registry.register(
-            rel_path,
-            sha256=sha,
-            size_bytes=dest.stat().st_size,
-            document_key=document_key,
-            origin_path=origin,
-            # A *derived* key that is already taken is unresolvable; a
-            # declared one means "supersede that".
-            derived_key=as_key is None,
+        document_key = (
+            normalize_document_key(as_key)
+            if as_key is not None
+            else candidate_document_key(rel_path, sha)
         )
-    except DocumentKeyConflict as conflict:
-        _unlink_orphan(dest, tree.path)
-        raise _ambiguous_identity_error(
-            conflict.document_key, conflict.claimant, origin
-        ) from None
-    # The row itself carries no tree column (see SourceEntry.local); tag
-    # the returned copy so the caller's `citation_path` is right without
-    # a second lookup.
-    entry = replace(entry, local=not tree.tracked)
-    record_source_refs(store, rel_path, tree)
-    # A local ingest has nothing to commit: both the file and its
-    # registry live inside the gitignored tree. Committing here would be
-    # a no-op at best and, if the ignore rule were ever missing, exactly
-    # the leak the split exists to prevent.
-    if commit and tree.tracked:
-        store._commit_paths(
-            [tree.repo_relpath(rel_path), tree.repo_registry_relpath],
-            subject=f"source: {rel_path}",
+        dest, rel_path = copy_source(
+            source_path, tree.path, into_subdir=into_subdir, rename=rename
         )
-    return entry
+        try:
+            entry = registry.register(
+                rel_path,
+                sha256=sha,
+                size_bytes=dest.stat().st_size,
+                document_key=document_key,
+                origin_path=origin,
+                # A *derived* key that is already taken is unresolvable; a
+                # declared one means "supersede that".
+                derived_key=as_key is None,
+            )
+        except DocumentKeyConflict as conflict:
+            _unlink_orphan(dest, tree.path)
+            raise _ambiguous_identity_error(
+                conflict.document_key, conflict.claimant, origin
+            ) from None
+        # The row itself carries no tree column (see SourceEntry.local); tag
+        # the returned copy so the caller's `citation_path` is right without
+        # a second lookup.
+        entry = replace(entry, local=not tree.tracked)
+        record_source_refs(store, rel_path, tree)
+        # A local ingest has nothing to commit: both the file and its
+        # registry live inside the gitignored tree. Committing here would be
+        # a no-op at best and, if the ignore rule were ever missing, exactly
+        # the leak the split exists to prevent.
+        if commit and tree.tracked:
+            store._commit_paths(
+                [tree.repo_relpath(rel_path), tree.repo_registry_relpath],
+                subject=f"source: {rel_path}",
+            )
+        return entry
 
 
 def record_source_refs(
@@ -512,20 +512,20 @@ def record_ingestion(
     commit: bool = True,
     when: datetime | None = None,
 ) -> IngestionRecord:
-    store._refuse_if_read_only("record an ingestion")
-    found = resolve_source(store, rel_path)
-    tree, key = found if found is not None else (tracked_tree(store), rel_path)
-    record = get_registry(store, tree).record_ingestion(
-        key,
-        prompt=prompt,
-        pages_touched=pages_touched,
-        when=when,
-    )
-    # The local registry lives inside the gitignored tree; there is
-    # nothing for git to record.
-    if commit and tree.tracked:
-        store._commit_paths(
-            [tree.repo_registry_relpath],
-            subject=f"ingest: {key}",
+    with store._mutation("record an ingestion"):
+        found = resolve_source(store, rel_path)
+        tree, key = found if found is not None else (tracked_tree(store), rel_path)
+        record = get_registry(store, tree).record_ingestion(
+            key,
+            prompt=prompt,
+            pages_touched=pages_touched,
+            when=when,
         )
-    return record
+        # The local registry lives inside the gitignored tree; there is
+        # nothing for git to record.
+        if commit and tree.tracked:
+            store._commit_paths(
+                [tree.repo_registry_relpath],
+                subject=f"ingest: {key}",
+            )
+        return record
