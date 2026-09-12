@@ -18,7 +18,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -226,6 +226,71 @@ def tracked_paths_under(repo_path: Path, rel_dir: str) -> list[str]:
     return [line for line in raw.splitlines() if line.strip()]
 
 
+# Git's trailer token grammar: ``git interpret-trailers`` reads a
+# ``Key: value`` line back only if the key looks like this.
+_TRAILER_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*\Z")
+
+
+def validate_trailers(trailers: Mapping[str, str]) -> None:
+    """Refuse a trailer git could not read back.
+
+    Raised at the call — when the mapping is set on a store, and again
+    in :func:`commit_as` — rather than discovered later as a commit whose
+    attribution silently failed to parse. Keys follow the trailer token
+    grammar (``[A-Za-z][A-Za-z0-9-]*``); values are one line.
+    """
+    for key, value in trailers.items():
+        if not isinstance(key, str) or not _TRAILER_KEY_RE.match(key):
+            raise GitOperationError(
+                f"commit trailer key {key!r} is not a trailer token "
+                "(letters, digits and hyphens, starting with a letter)."
+            )
+        if not isinstance(value, str) or "\n" in value or "\r" in value:
+            raise GitOperationError(
+                f"commit trailer {key!r} must have a single-line string value, "
+                f"got {value!r}."
+            )
+
+
+def format_message(subject_or_message: str, trailers: Mapping[str, str] | None) -> str:
+    """The commit message git will store: the message, then the trailer
+    block — a blank line and one ``Key: value`` per line, in mapping order.
+
+    An empty mapping leaves the message exactly as given, so a caller
+    that sets none gets the byte-identical commit it always got.
+    """
+    if not trailers:
+        return subject_or_message
+    validate_trailers(trailers)
+    block = "".join(f"{key}: {value}\n" for key, value in trailers.items())
+    return f"{subject_or_message.rstrip()}\n\n{block}"
+
+
+def is_ignored(repo_path: Path, rel_path: str) -> bool:
+    """Whether ``rel_path`` is untracked *and* matched by an ignore rule.
+
+    ``git check-ignore`` answers for the whole rule stack — a rule in a
+    repository's root ``.gitignore`` reaches a nested wiki's files, which
+    is why this asks git rather than reading the wiki's own file. A
+    tracked path is never ignored to git, whatever the rules say, so this
+    answers ``False`` for one: tracked beats ignored.
+    """
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "--", rel_path],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise GitOperationError(
+        f"git check-ignore failed (exit {result.returncode}): {result.stderr.strip()}"
+    )
+
+
 def commit_as(
     repo_path: Path,
     *,
@@ -233,12 +298,18 @@ def commit_as(
     author_name: str,
     author_email: str,
     allow_empty: bool = False,
+    trailers: Mapping[str, str] | None = None,
 ) -> str:
     """Create a commit under the supplied identity.
 
     Uses ``git -c user.name=… -c user.email=…`` so we never depend on or
     mutate the user's global git config (spec v0.5 §3). Returns the
     new HEAD SHA.
+
+    ``trailers`` are appended as a git trailer block — see
+    :func:`format_message`. The author line carries the person; the
+    trailers carry what it cannot: which credential acted, which batch
+    a commit belongs to, that a tool generated it.
     """
     if not author_name.strip():
         raise GitOperationError("commit_as: author_name must be non-empty.")
@@ -246,6 +317,7 @@ def commit_as(
         raise GitOperationError("commit_as: author_email must be non-empty.")
     if not message.strip():
         raise GitOperationError("commit_as: message must be non-empty.")
+    message = format_message(message, trailers)
 
     # spec v0.5 §12 explicitly defers GPG-signed agent commits to v0.2;
     # turn signing off so v0.1 commits succeed regardless of the user's

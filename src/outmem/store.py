@@ -19,10 +19,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from outmem._store import import_vault as _import
@@ -81,8 +82,10 @@ from outmem.git_ops import (
     head_or_none,
     init_repo,
     is_git_repo,
+    is_ignored,
     log_since,
     path_is_dirty,
+    validate_trailers,
 )
 from outmem.git_ops import (
     pull_rebase as _git_pull_rebase,
@@ -421,6 +424,40 @@ class WikiStore:
         # plain attribute so a connector can withdraw the yield for the
         # store it serves regardless of how the wiki is configured.
         self.elision_yield: bool = config.outmem.completeness.elision_yield
+        # Seeded from `git.commit_trailers`; a server acting for a person
+        # sets them per store. Through the property so a bad key is refused
+        # here, at assignment, and never reaches a commit.
+        self._commit_trailers: Mapping[str, str] = MappingProxyType({})
+        self.commit_trailers = config.outmem.git.commit_trailers
+
+    @property
+    def commit_trailers(self) -> Mapping[str, str]:
+        """Trailers appended to every commit this store makes.
+
+        The author line carries the person; these carry what it cannot —
+        which credential acted, which batch a commit belongs to, that a
+        tool generated it — so a reviewer reading the series knows who
+        decided what, and a batch can be reverted as a unit by trailer.
+
+        Seeded from ``git.commit_trailers`` in ``config.yaml``; a server
+        that holds one store per principal assigns its own::
+
+            store.commit_trailers = {"Fleming-Actor": "kira"}
+
+        Assignment validates (trailer-token keys, one-line values) and
+        stores a read-only view, so the only way in is the checked one and
+        a malformed trailer is refused before any write, not discovered
+        as a commit git cannot read back. Applied by every commit path —
+        writes, log entries, source registrations, ingestion records,
+        renames, index rebuilds, vault imports — because the point is
+        that nothing the store commits escapes attribution.
+        """
+        return self._commit_trailers
+
+    @commit_trailers.setter
+    def commit_trailers(self, trailers: Mapping[str, str]) -> None:
+        validate_trailers(trailers)
+        self._commit_trailers = MappingProxyType(dict(trailers))
 
     # ------------------------------------------------------------------
     # Construction
@@ -2228,7 +2265,19 @@ class WikiStore:
         # a key that moved when a wiki was placed in a repo would orphan
         # every chunk already stored.
         db_rel = self._maybe_reindex_commit_paths(commit_paths)
-        if db_rel is not None and (self.root / db_rel).exists():
+        if (
+            db_rel is not None
+            and (self.root / db_rel).exists()
+            # A wiki that publishes its index separately ignores the
+            # file; `git add` would then refuse the whole batch — after
+            # the reindex ran and the page was staged, leaving the write
+            # half-applied for the next commit to sweep up. The index is
+            # still rebuilt; it just stays out of the commit. Git's
+            # answer, not a pattern match on the wiki's own .gitignore: a
+            # rule in a repository's root reaches a nested wiki, and a
+            # tracked index is never ignored whatever the rules say.
+            and not is_ignored(self.repo, self._repo_relpath(db_rel))
+        ):
             commit_paths.append(db_rel)
         # Translate to repo-relative here and nowhere else. Every caller
         # passes wiki-relative paths, so one wiki cannot name another's
@@ -2246,6 +2295,7 @@ class WikiStore:
                 message=qualify_subject(subject, self.wiki_name),
                 author_name=self.config.agent_identity.name,
                 author_email=self.config.agent_identity.email,
+                trailers=self._commit_trailers,
             )
         # Backlinks are HEAD-keyed; invalidate so the next reader rebuilds.
         self.backlinks_cache.invalidate()
