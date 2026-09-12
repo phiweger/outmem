@@ -3,6 +3,59 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.19.0
+
+### Added
+
+- **Commit trailers.** A commit made on behalf of a person, through a server,
+  has to say who acted, with which credential, and which batch it belongs to.
+  The author line carries the person; trailers carry what it cannot. No
+  argument on any write method reached the commit message, and `--no-verify`
+  kept a `commit-msg` hook from adding them, so a downstream server amended the
+  commit outmem had just made — an extra git process per write, a lock outmem
+  did not otherwise need, and a sha that changed after outmem returned it.
+
+  `WikiStore.commit_trailers` is a per-store mapping, seeded from
+  `git.commit_trailers` in `config.yaml` (default empty), applied to every
+  commit the store makes — writes, log entries, source registrations, ingestion
+  records, renames, index rebuilds, vault imports — because the point is that
+  nothing the store commits escapes attribution. `git interpret-trailers
+  --parse` reads them back; the multi-wiki prefix stays on the subject line.
+  Assignment validates against git's trailer-token grammar and stores a
+  read-only view, so a malformed trailer is refused before any write rather
+  than discovered as a commit git cannot read back. An empty mapping is
+  byte-identical to before. No per-call override: the store is the unit a
+  server holds per principal.
+
+### Changed
+
+- **A vector index the wiki's `.gitignore` excludes stays out of the commit.**
+  Every write's commit used to include `.vectors.db`, staged with `git add` and
+  no `-f`. A wiki that gitignores its index — the normal shape once the index
+  is published separately, since tens of megabytes of sqlite rewritten on every
+  push is history nobody wants for a file `outmem reindex` regenerates — failed
+  every write at `git add`, *after* the reindex had run and the page and
+  `index.md` were already staged: the page read and searched, `page_history`
+  said it did not exist, and the next commit swept the orphans in under its own
+  subject. `git check-ignore` now decides before staging. An untracked-and-
+  ignored index stays out (the reindex still runs); a tracked one is never
+  ignored to git and keeps being committed; a rule in a multi-wiki repository's
+  root `.gitignore` reaches every nested wiki, which is why it is git's answer
+  and not a pattern match. A wiki that never ignored its index sees no change.
+
+- **The registry snapshot keeps itself current.** A store caches its registry
+  for its lifetime, which meant a read-only store answered `list_sources` from
+  the snapshot taken at open, and a server closed and reopened its read stores
+  after every registration to avoid serving a stale listing. `SourceRegistry.
+  entries` now asks SQLite's `PRAGMA data_version` — which changes exactly when
+  another connection has committed, and never for this connection's own
+  commits — before answering: one integer per access, a re-read of the rows
+  only when something changed, no mtime heuristics. Another store in this
+  process or another process registering a source is visible on the next
+  read; a registry that did not exist at open is picked up once it does. The
+  0.18.0 write-path re-read and the by-hand handle drops after `sources gc`
+  were mechanism this makes unnecessary, and are gone.
+
 ## 0.18.0
 
 ### Added
