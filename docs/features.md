@@ -35,6 +35,15 @@ only what changed (skipped via a content hash when the body is
 unchanged), and stage the updated `.vectors.db` in the same commit as
 the page. No "rebooting" needed within a session.
 
+A wiki that publishes its index separately can gitignore `.vectors.db`
+instead — tens of megabytes of sqlite rewritten on every content push is
+history nobody wants for a file `outmem reindex` regenerates. The index
+is still rebuilt on every write; it just stays out of the commit. outmem
+asks `git check-ignore`, so a rule in a multi-wiki repository's root
+`.gitignore` (`wikis/*/.vectors.db`) reaches every nested wiki, and a
+tracked index keeps being committed whatever the rules say, because to
+git a tracked path is never ignored.
+
 For external edits (Obsidian, manual `git add`, etc.), the pre-commit
 hook keeps the index AND `wiki/index.md` in step with the human's commit.
 outmem auto-installs it on `init`/`open` (idempotent, never clobbers your

@@ -183,8 +183,8 @@ outmem ingest /path/to/some-paper.md \
 Copies the file under `wiki/sources/[<into>/]<sha256[:12]>/`,
 registers it in `wiki/sources/.sources.db`, then runs the agent to
 write/extend pages with `provenance:` pointing at the registered
-source. Parallel `outmem ingest` runs are safe (SQLite serialises
-writers). See [docs/cli.md](docs/cli.md#ingestion-requires-outmemagent)
+source. Parallel `outmem ingest` runs are safe (a repository-wide lock
+serialises every write, across processes). See [docs/cli.md](docs/cli.md#ingestion-requires-outmemagent)
 for `--register-only`, re-ingest semantics, and file-type rules.
 
 **Material you can read but not redistribute** — a licensed corpus, a

@@ -67,12 +67,14 @@ one it replaces.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
 import shutil
 import sqlite3
-from collections.abc import Iterable
+import threading
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from itertools import pairwise
@@ -446,6 +448,20 @@ class SourceRef:
     exact: bool  # written as [[token]] rather than guessed from prose
 
 
+def _under_lock[**P, R](method: Callable[P, R]) -> Callable[P, R]:
+    """Run a registry mutation under the registry's lock, so its lockstep
+    update of the snapshot cannot interleave with a refresh."""
+
+    @functools.wraps(method)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        registry = args[0]
+        assert isinstance(registry, SourceRegistry)
+        with registry._lock:
+            return method(*args, **kwargs)
+
+    return wrapper
+
+
 @dataclass
 class SourceRegistry:
     """SQLite-backed view of the ``wiki/sources/.sources.db`` registry.
@@ -453,20 +469,65 @@ class SourceRegistry:
     Construct via :meth:`load`, or :meth:`empty` for the deliberate
     no-database case. Mutations through :meth:`register` /
     :meth:`record_ingestion` commit immediately and keep
-    :attr:`entries` (the in-memory snapshot) in lockstep.
+    :attr:`entries` (the in-memory snapshot) in lockstep; a commit by
+    any *other* connection is picked up on the next read of
+    :attr:`entries` — see the property.
     """
 
     sources_dir: Path
-    entries: dict[str, SourceEntry] = field(default_factory=dict)
+    _entries: dict[str, SourceEntry] = field(default_factory=dict, repr=False)
     _con: sqlite3.Connection | None = field(default=None, repr=False)
+    # `PRAGMA data_version` as of the last snapshot; None until one is
+    # taken.
+    _data_version: int | None = field(default=None, repr=False)
+    # Serialises a refresh against a mutation's lockstep update of the
+    # snapshot. The connection is shared across threads (PydanticAI
+    # dispatches tool calls that way), and without this a refresh could
+    # swap the snapshot out from under a mutation that had just committed
+    # — its row then missing from the registry's own view until the next
+    # foreign commit. Re-entrant: a mutation reads `entries` on its way.
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     @classmethod
     def load(cls, sources_dir: Path) -> SourceRegistry:
         """Open / create the registry DB and return an in-memory snapshot."""
         sources_dir.mkdir(parents=True, exist_ok=True)
         con = _open_registry(sources_dir / REGISTRY_FILENAME)
-        entries = _read_all_entries(con)
-        return cls(sources_dir=sources_dir, entries=entries, _con=con)
+        registry = cls(sources_dir=sources_dir, _con=con)
+        registry._refresh()
+        return registry
+
+    @property
+    def entries(self) -> dict[str, SourceEntry]:
+        """The rows, re-read whenever another connection has committed.
+
+        A store caches its registry for its lifetime, which is right for
+        reads — but it meant a long-lived store answered ``list_sources``
+        from the snapshot taken at open, and a server had to close and
+        reopen its read stores after every registration to avoid serving
+        a stale listing. SQLite's ``PRAGMA data_version`` changes exactly
+        when a *different* connection has committed to the database, so
+        one integer read per access — no mtime heuristics, no
+        filesystem stat — says whether the snapshot is still the truth.
+        This connection's own commits leave it unchanged, and those keep
+        the snapshot in lockstep themselves.
+        """
+        self._refresh()
+        return self._entries
+
+    def _refresh(self) -> None:
+        con = self._con
+        if con is None:
+            return  # the no-database stand-in: nothing to be out of date with
+        with self._lock:
+            version = con.execute("PRAGMA data_version").fetchone()[0]
+            if version != self._data_version:
+                # Record the version *before* reading the rows. A commit
+                # that lands between the two is then caught by the next
+                # access instead of being masked behind a version we never
+                # saw.
+                self._data_version = version
+                self._entries = _read_all_entries(con)
 
     @classmethod
     def empty(cls, sources_dir: Path) -> SourceRegistry:
@@ -544,6 +605,7 @@ class SourceRegistry:
         ).fetchall()
         return [_entry_from_row(r) for r in rows]
 
+    @_under_lock
     def register(
         self,
         rel_path: str,
@@ -640,6 +702,7 @@ class SourceRegistry:
         self.entries[rel_path] = entry
         return entry
 
+    @_under_lock
     def adopt_document_key(self, rel_path: str, document_key: str) -> SourceEntry:
         """Declare the identity of a row that already exists.
 
@@ -698,6 +761,7 @@ class SourceRegistry:
         new_rows = [] if new_key == old_key else self._snapshot_rows_with_key(new_key)
         return _plan_rekey(old_rows, new_rows, new_key)
 
+    @_under_lock
     def rekey(self, old_key: str, new_key: str | None = None) -> RekeyResult:
         """Move a *document* to another identity, and rebuild its chain.
 
@@ -803,6 +867,7 @@ class SourceRegistry:
                 "out of band; resolve those rows first."
             )
 
+    @_under_lock
     def record_refs(self, rel_path: str, refs: Iterable[SourceRef]) -> list[SourceRef]:
         """Record which pages a frozen source names, resolved at ingest.
 
@@ -861,6 +926,7 @@ class SourceRegistry:
             for r in rows
         ]
 
+    @_under_lock
     def repoint_refs(self, old_slug: str, new_slug: str) -> int:
         """Follow a rename. Returns the number of references re-pointed.
 
@@ -877,6 +943,7 @@ class SourceRegistry:
             )
         return int(cur.rowcount or 0)
 
+    @_under_lock
     def record_ingestion(
         self,
         rel_path: str,

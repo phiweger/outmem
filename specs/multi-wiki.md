@@ -119,6 +119,16 @@ wiki's paths, and one or two pages that `write_page` had reported as written
 were absent from HEAD. The caller is told the write succeeded and the history
 is simply wrong.
 
+> **Amended in 0.19.** The lock still covered too little. It serialised the
+> stage-and-commit pair, but what a write rewrites *before* it commits —
+> `.sources.db`, `wiki/index.md`, `.vectors.db` — is shared with every other
+> writer of the same wiki, and git refuses to stage a file that changes under
+> its hash. Eight processes registering sources into one wiki lost a
+> registration every round to `unstable object source data`. The lock is now
+> re-entrant within a thread and held across each mutating method's whole
+> body — the cross-process twin of `_write_lock` — with the commit funnel
+> re-entering it. Found by a thread-contention test written for something else.
+
 **`catalogue_for` filters tags as well as wikis.** The plan named the wiki leak
 and missed the tag one. A tag name discloses as much as a wiki name — the
 existence of an `atlas-acquisition` tag is the secret, whatever the wiki behind

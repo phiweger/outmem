@@ -19,10 +19,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from outmem._store import import_vault as _import
@@ -81,8 +83,10 @@ from outmem.git_ops import (
     head_or_none,
     init_repo,
     is_git_repo,
+    is_ignored,
     log_since,
     path_is_dirty,
+    validate_trailers,
 )
 from outmem.git_ops import (
     pull_rebase as _git_pull_rebase,
@@ -421,6 +425,40 @@ class WikiStore:
         # plain attribute so a connector can withdraw the yield for the
         # store it serves regardless of how the wiki is configured.
         self.elision_yield: bool = config.outmem.completeness.elision_yield
+        # Seeded from `git.commit_trailers`; a server acting for a person
+        # sets them per store. Through the property so a bad key is refused
+        # here, at assignment, and never reaches a commit.
+        self._commit_trailers: Mapping[str, str] = MappingProxyType({})
+        self.commit_trailers = config.outmem.git.commit_trailers
+
+    @property
+    def commit_trailers(self) -> Mapping[str, str]:
+        """Trailers appended to every commit this store makes.
+
+        The author line carries the person; these carry what it cannot —
+        which credential acted, which batch a commit belongs to, that a
+        tool generated it — so a reviewer reading the series knows who
+        decided what, and a batch can be reverted as a unit by trailer.
+
+        Seeded from ``git.commit_trailers`` in ``config.yaml``; a server
+        that holds one store per principal assigns its own::
+
+            store.commit_trailers = {"Fleming-Actor": "kira"}
+
+        Assignment validates (trailer-token keys, one-line values) and
+        stores a read-only view, so the only way in is the checked one and
+        a malformed trailer is refused before any write, not discovered
+        as a commit git cannot read back. Applied by every commit path —
+        writes, log entries, source registrations, ingestion records,
+        renames, index rebuilds, vault imports — because the point is
+        that nothing the store commits escapes attribution.
+        """
+        return self._commit_trailers
+
+    @commit_trailers.setter
+    def commit_trailers(self, trailers: Mapping[str, str]) -> None:
+        validate_trailers(trailers)
+        self._commit_trailers = MappingProxyType(dict(trailers))
 
     # ------------------------------------------------------------------
     # Construction
@@ -774,30 +812,29 @@ class WikiStore:
         ``fix: repair frontmatter…`` commit (``commit_subject`` overrides
         the subject). Read-only stores refuse the write step.
         """
-        if not dry_run:
-            self._refuse_if_read_only("repair pages")
-        from outmem.slug import relpath_to_slug
+        with self._mutation("repair pages", enabled=not dry_run):
+            from outmem.slug import relpath_to_slug
 
-        repaired: list[tuple[str, str]] = []
-        if not self.pages_path.is_dir():
+            repaired: list[tuple[str, str]] = []
+            if not self.pages_path.is_dir():
+                return repaired
+            for path in editorial_pages(self.pages_path):
+                slug = relpath_to_slug(path.relative_to(self.pages_path))
+                text = path.read_text(encoding="utf-8")
+                fixed = repair_wiki_page(text)
+                if fixed is None:
+                    continue
+                summary = "quoted scalar values containing ': '"
+                if not dry_run:
+                    path.write_text(fixed, encoding="utf-8")
+                repaired.append((slug, summary))
+            if not dry_run and repaired:
+                rels = [str(self._page_path(s).relative_to(self.root)) for s, _ in repaired]
+                subject = commit_subject or (
+                    f"fix: repair frontmatter on {len(repaired)} page(s)"
+                )
+                self._commit_paths(rels, subject=subject)
             return repaired
-        for path in editorial_pages(self.pages_path):
-            slug = relpath_to_slug(path.relative_to(self.pages_path))
-            text = path.read_text(encoding="utf-8")
-            fixed = repair_wiki_page(text)
-            if fixed is None:
-                continue
-            summary = "quoted scalar values containing ': '"
-            if not dry_run:
-                path.write_text(fixed, encoding="utf-8")
-            repaired.append((slug, summary))
-        if not dry_run and repaired:
-            rels = [str(self._page_path(s).relative_to(self.root)) for s, _ in repaired]
-            subject = commit_subject or (
-                f"fix: repair frontmatter on {len(repaired)} page(s)"
-            )
-            self._commit_paths(rels, subject=subject)
-        return repaired
 
     def search(
         self,
@@ -924,8 +961,7 @@ class WikiStore:
         depends on the prefix grammar — see spec §9).
         ``wiki/index.md`` is regenerated and staged in the same commit.
         """
-        self._refuse_if_read_only("write a page")
-        with self._write_lock:
+        with self._mutation("write a page"):
             if slug == INDEX_SLUG:
                 raise OutmemError(
                     "Cannot write to the reserved 'index' slug — `wiki/index.md` "
@@ -1008,8 +1044,7 @@ class WikiStore:
 
         Returns the new HEAD SHA.
         """
-        self._refuse_if_read_only("rename a page")
-        with self._write_lock:
+        with self._mutation("rename a page"):
             old_slug = self.resolve_slug(old_slug)
             validate_slug(old_slug)
             validate_slug(new_slug)
@@ -1074,11 +1109,11 @@ class WikiStore:
 
     def commit_registry(self, subject: str) -> str | None:
         """Commit ``.sources.db`` alone, for registry-only mutations."""
-        self._refuse_if_read_only("commit the registry")
-        return self._commit_paths(
-            [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
-            subject=subject,
-        )
+        with self._mutation("commit the registry"):
+            return self._commit_paths(
+                [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
+                subject=subject,
+            )
 
     def record_source_refs(self, rel_path: str) -> list[SourceRef]:
         """Resolve and record the page slugs one source names.
@@ -1183,12 +1218,11 @@ class WikiStore:
         by ``outmem stale`` would keep citing the superseded version and
         keep being reported, forever. Omit it and provenance is untouched.
         """
-        self._refuse_if_read_only("extend a page")
-        # Resolve BEFORE anything else: read() would follow the alias but
-        # _page_relpath(slug) would not, so the commit would stage a path
-        # that doesn't exist — after the page and index.md were already
-        # rewritten on disk.
-        with self._write_lock:
+        with self._mutation("extend a page"):
+            # Resolve BEFORE anything else: read() would follow the alias but
+            # _page_relpath(slug) would not, so the commit would stage a path
+            # that doesn't exist — after the page and index.md were already
+            # rewritten on disk.
             slug = self.resolve_slug(slug)
             if slug == INDEX_SLUG:
                 raise OutmemError(
@@ -1277,8 +1311,7 @@ class WikiStore:
         :meth:`extend_page`, whose replace semantics exist so a
         re-compaction can drop a superseded source.
         """
-        self._refuse_if_read_only("append to a page")
-        with self._write_lock:
+        with self._mutation("append to a page"):
             slug = self.resolve_slug(slug)
             if slug == INDEX_SLUG:
                 raise OutmemError(
@@ -1341,14 +1374,14 @@ class WikiStore:
         hook, where we want the rebuilt index to land in the
         human's commit rather than a separate one).
         """
-        self._refuse_if_read_only("rebuild the index")
-        self._regenerate_index()
-        rel = f"{self.config.wiki_dir}/{INDEX_FILENAME}"
-        if not commit:
-            return None
-        if not path_is_dirty(self.repo, self._repo_relpath(rel)):
-            return None
-        return self._commit_paths([rel], subject="index: rebuild")
+        with self._mutation("rebuild the index"):
+            self._regenerate_index()
+            rel = f"{self.config.wiki_dir}/{INDEX_FILENAME}"
+            if not commit:
+                return None
+            if not path_is_dirty(self.repo, self._repo_relpath(rel)):
+                return None
+            return self._commit_paths([rel], subject="index: rebuild")
 
     def append_log(
         self,
@@ -1364,8 +1397,7 @@ class WikiStore:
         callers compose their own structure (timestamp, session ID, etc.).
         Commit message defaults to ``log: <topic>``.
         """
-        self._refuse_if_read_only("append to the log")
-        with self._write_lock:
+        with self._mutation("append to the log"):
             if not topic.strip():
                 raise OutmemError("append_log: topic must be non-empty.")
             ts = ensure_utc(when) if when else utc_now()
@@ -1624,26 +1656,26 @@ class WikiStore:
         command. Rows that fail that check are skipped, so the count
         returned is what was actually written.
         """
-        self._refuse_if_read_only("assign document keys")
-        from outmem.sources import DocumentKeyConflict
+        with self._mutation("assign document keys"):
+            from outmem.sources import DocumentKeyConflict
 
-        registry = _sources.get_registry(self)
-        written = 0
-        for rel_path, key in pairs:
-            entry = registry.entries.get(rel_path)
-            if entry is None or entry.document_key is not None:
-                continue
-            try:
-                registry.adopt_document_key(rel_path, key)
-            except DocumentKeyConflict:
-                continue
-            written += 1
-        if written:
-            self._commit_paths(
-                [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
-                subject=f"sources: assign {written} document identit(ies)",
-            )
-        return written
+            registry = _sources.get_registry(self)
+            written = 0
+            for rel_path, key in pairs:
+                entry = registry.entries.get(rel_path)
+                if entry is None or entry.document_key is not None:
+                    continue
+                try:
+                    registry.adopt_document_key(rel_path, key)
+                except DocumentKeyConflict:
+                    continue
+                written += 1
+            if written:
+                self._commit_paths(
+                    [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
+                    subject=f"sources: assign {written} document identit(ies)",
+                )
+            return written
 
     def rekey_document(
         self,
@@ -1670,23 +1702,22 @@ class WikiStore:
         Each tree has its own registry, so a key held in both names two
         unrelated documents and must be disambiguated.
         """
-        if not dry_run:
-            self._refuse_if_read_only("rekey a document")
-        tree = self._tree_for_document(old_key, local=local)
-        registry = _sources.get_registry(self, tree)
-        if dry_run:
-            return registry.plan_rekey(old_key, new_key)
-        written = registry.rekey(old_key, new_key)
-        if written.applied and tree.tracked:
-            # A local rekey has nothing to commit — that registry lives
-            # inside the gitignored tree, like the sources it indexes.
-            self.commit_registry(
-                f"sources: rekey {normalize_document_key(old_key)} "
-                f"-> {written.document_key}"
-                if new_key is not None
-                else f"sources: rechain {written.document_key}"
-            )
-        return written
+        with self._mutation("rekey a document", enabled=not dry_run):
+            tree = self._tree_for_document(old_key, local=local)
+            registry = _sources.get_registry(self, tree)
+            if dry_run:
+                return registry.plan_rekey(old_key, new_key)
+            written = registry.rekey(old_key, new_key)
+            if written.applied and tree.tracked:
+                # A local rekey has nothing to commit — that registry lives
+                # inside the gitignored tree, like the sources it indexes.
+                self.commit_registry(
+                    f"sources: rekey {normalize_document_key(old_key)} "
+                    f"-> {written.document_key}"
+                    if new_key is not None
+                    else f"sources: rechain {written.document_key}"
+                )
+            return written
 
     def _tree_for_document(
         self, document_key: str, *, local: bool | None = None
@@ -1737,37 +1768,33 @@ class WikiStore:
         also the one nothing cleans. Only the tracked registry produces
         a commit; the local one lives inside the gitignored tree.
         """
-        if not dry_run:
-            self._refuse_if_read_only("collect registry garbage")
-        from outmem.sources import RegistryAudit, gc_registry
+        with self._mutation("collect registry garbage", enabled=not dry_run):
+            from outmem.sources import RegistryAudit, gc_registry
 
-        audit = gc_registry(self.sources_path, dry_run=dry_run)
-        if not dry_run and (audit.missing_files or audit.orphan_ingestions):
-            self._source_registry = None  # drop the cached handle
-            self._commit_paths(
-                [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
-                subject=f"sources: gc — dropped {len(audit.missing_files)} stale row(s)",
+            audit = gc_registry(self.sources_path, dry_run=dry_run)
+            if not dry_run and (audit.missing_files or audit.orphan_ingestions):
+                self._commit_paths(
+                    [f"{self.config.wiki_dir}/{SOURCES_DIR}/{REGISTRY_FILENAME}"],
+                    subject=f"sources: gc — dropped {len(audit.missing_files)} stale row(s)",
+                )
+
+            if not self.sources_local_path.is_dir():
+                return audit
+
+            local_audit = gc_registry(self.sources_local_path, dry_run=dry_run)
+            # Merge so a caller sees one report. Local paths are tree-qualified
+            # so the two trees stay distinguishable in the output.
+            return RegistryAudit(
+                missing_files=[
+                    *audit.missing_files,
+                    *(f"{SOURCES_LOCAL_DIR}/{p}" for p in local_audit.missing_files),
+                ],
+                unregistered=[
+                    *audit.unregistered,
+                    *(f"{SOURCES_LOCAL_DIR}/{p}" for p in local_audit.unregistered),
+                ],
+                orphan_ingestions=audit.orphan_ingestions + local_audit.orphan_ingestions,
             )
-
-        if not self.sources_local_path.is_dir():
-            return audit
-
-        local_audit = gc_registry(self.sources_local_path, dry_run=dry_run)
-        if not dry_run and (local_audit.missing_files or local_audit.orphan_ingestions):
-            self._source_registry_local = None
-        # Merge so a caller sees one report. Local paths are tree-qualified
-        # so the two trees stay distinguishable in the output.
-        return RegistryAudit(
-            missing_files=[
-                *audit.missing_files,
-                *(f"{SOURCES_LOCAL_DIR}/{p}" for p in local_audit.missing_files),
-            ],
-            unregistered=[
-                *audit.unregistered,
-                *(f"{SOURCES_LOCAL_DIR}/{p}" for p in local_audit.unregistered),
-            ],
-            orphan_ingestions=audit.orphan_ingestions + local_audit.orphan_ingestions,
-        )
 
     def list_sources(self, *, include_missing: bool = False) -> list[SourceEntry]:
         """Every registered source, ordered by relative path."""
@@ -1865,8 +1892,8 @@ class WikiStore:
         check inside :meth:`VectorStore.reindex_file` short-circuits
         unchanged content.
         """
-        self._refuse_if_read_only("reindex the semantic index")
-        return _semantic.reindex_path(self, rel_path)
+        with self._mutation("reindex the semantic index"):
+            return _semantic.reindex_path(self, rel_path)
 
     def semantic_remove_path(self, rel_path: str) -> int:
         """Drop all chunks + vectors for ``rel_path``. Returns count removed."""
@@ -1888,13 +1915,13 @@ class WikiStore:
         The summary's ``dropped_paths`` lists wiki pages that exist on disk
         but did not make it into the index — check them, they are
         unreachable by search."""
-        self._refuse_if_read_only("reindex the semantic index")
-        return _semantic.reindex_all(
-            self,
-            force=force,
-            max_concurrency=max_concurrency,
-            on_progress=on_progress,
-        )
+        with self._mutation("reindex the semantic index"):
+            return _semantic.reindex_all(
+                self,
+                force=force,
+                max_concurrency=max_concurrency,
+                on_progress=on_progress,
+            )
 
     def _maybe_reindex_commit_paths(self, paths: Sequence[str]) -> str | None:
         """Reindex any indexable file in ``paths`` and return the DB rel-path.
@@ -2184,6 +2211,39 @@ class WikiStore:
         """
         add(self.repo, [self._repo_relpath(p) for p in paths])
 
+    @contextmanager
+    def _mutation(self, action: str, *, enabled: bool = True) -> Iterator[None]:
+        """Everything a mutating method needs around its whole body.
+
+        Refuses a read-only store before anything touches disk, then holds
+        both locks for the duration: ``_write_lock`` against the other
+        threads of this process, and the repository lock against every
+        other writer of the repository, thread or process. The second is
+        the one that used to cover only stage-and-commit. What a write
+        rewrites *before* it commits — ``wiki/index.md``, ``.sources.db``,
+        ``.vectors.db`` — is shared with every other writer of the wiki,
+        and git refuses to stage a file that changes under its hash, so
+        two processes registering sources into one wiki failed each other
+        at ``git add``. The lock now covers the rewrite too. Held across
+        the reindex as well, which is what ``_write_lock`` already did
+        within a process; a repository's writers were never parallel.
+
+        ``enabled=False`` is the dry run: a read, so no refusal and no
+        lock. The repository lock is taken only where there is a
+        repository, so a store on a bare directory still gets
+        :meth:`_commit_paths`'s pointed error and no stray state dir.
+        """
+        if not enabled:
+            yield
+            return
+        self._refuse_if_read_only(action)
+        if is_git_repo(self.repo):
+            with self._write_lock, repo_commit_lock(self.repo):
+                yield
+        else:
+            with self._write_lock:
+                yield
+
     def _refuse_if_read_only(self, action: str) -> None:
         """The read-only guard, at the *entry* of every mutating method.
 
@@ -2228,7 +2288,19 @@ class WikiStore:
         # a key that moved when a wiki was placed in a repo would orphan
         # every chunk already stored.
         db_rel = self._maybe_reindex_commit_paths(commit_paths)
-        if db_rel is not None and (self.root / db_rel).exists():
+        if (
+            db_rel is not None
+            and (self.root / db_rel).exists()
+            # A wiki that publishes its index separately ignores the
+            # file; `git add` would then refuse the whole batch — after
+            # the reindex ran and the page was staged, leaving the write
+            # half-applied for the next commit to sweep up. The index is
+            # still rebuilt; it just stays out of the commit. Git's
+            # answer, not a pattern match on the wiki's own .gitignore: a
+            # rule in a repository's root reaches a nested wiki, and a
+            # tracked index is never ignored whatever the rules say.
+            and not is_ignored(self.repo, self._repo_relpath(db_rel))
+        ):
             commit_paths.append(db_rel)
         # Translate to repo-relative here and nowhere else. Every caller
         # passes wiki-relative paths, so one wiki cannot name another's
@@ -2246,6 +2318,7 @@ class WikiStore:
                 message=qualify_subject(subject, self.wiki_name),
                 author_name=self.config.agent_identity.name,
                 author_email=self.config.agent_identity.email,
+                trailers=self._commit_trailers,
             )
         # Backlinks are HEAD-keyed; invalidate so the next reader rebuilds.
         self.backlinks_cache.invalidate()
@@ -2304,19 +2377,6 @@ def _reject_unregistered_provenance(
         if (ref := provenance_ref(entry)) is not None
         and store.get_source(ref) is None
     ]
-    if not missing:
-        return
-    # A miss can mean the *snapshot* is stale rather than the source
-    # absent: the registry is cached for the store's lifetime, so a row
-    # another process registered after this store opened is invisible
-    # here — and the deployment this guard was written for is outmem's
-    # write path behind a long-lived server with ingestion happening
-    # elsewhere. Re-read once and ask again. The refusal path is rare by
-    # construction, so this costs nothing in the common case, and it is
-    # the difference between refusing a good citation and telling its
-    # author to register a source that is already registered.
-    _sources.refresh_registry_cache(store)
-    missing = [ref for ref in missing if store.get_source(ref) is None]
     if not missing:
         return
     listed = ", ".join(repr(r) for r in missing)

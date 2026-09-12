@@ -82,6 +82,7 @@ git:
   stale_lock_seconds: 60         # lock counts as stale after this many seconds
   retry_on_lock: true            # retry git ops once on transient index.lock failures
   auto_install_hook: true        # ensure the pre-commit hook on open (see below)
+  commit_trailers: {}            # e.g. {Generated-By: outmem} — see python-api.md
 
 # Vector index (`pip install outmem[semantic]`). No on/off flag — it's
 # active once built (`outmem reindex`); a semantic/hyde/*+semantic

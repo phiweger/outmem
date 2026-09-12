@@ -354,6 +354,12 @@ class GitSettings:
     # clobbers a hook you wrote). Set false to manage the hook yourself;
     # note `outmem hook uninstall` alone won't stick while this is true.
     auto_install_hook: bool = DEFAULT_AUTO_INSTALL_HOOK
+    # Trailers appended to every commit the store makes — writes, log
+    # entries, source registrations, ingestion records, renames, index
+    # rebuilds, vault imports. `Generated-By: outmem` for a wiki that wants
+    # its agent commits marked; a server acting for a person sets them per
+    # store (`WikiStore.commit_trailers`) so each commit says who.
+    commit_trailers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -562,6 +568,11 @@ def _config_from_dict(data: dict[str, Any]) -> OutmemConfig:
             config.git.retry_on_lock = git_block["retry_on_lock"]
         if isinstance(git_block.get("auto_install_hook"), bool):
             config.git.auto_install_hook = git_block["auto_install_hook"]
+        trailers = git_block.get("commit_trailers")
+        if isinstance(trailers, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in trailers.items()
+        ):
+            config.git.commit_trailers = dict(trailers)
 
     sources_block = data.get("sources")
     if isinstance(sources_block, dict) and isinstance(sources_block.get("max_chars"), int):
@@ -752,6 +763,10 @@ def starter_yaml(
         f"  remove_stale_lock: {str(DEFAULT_REMOVE_STALE_LOCK).lower()}\n"
         f"  stale_lock_seconds: {DEFAULT_STALE_LOCK_SECONDS}\n"
         f"  retry_on_lock: {str(DEFAULT_RETRY_ON_LOCK).lower()}\n"
+        "  # Trailers appended to every commit outmem makes here, e.g.\n"
+        "  # `Generated-By: outmem`. A server acting for a person sets them\n"
+        "  # per store instead (`store.commit_trailers`), so each commit says who.\n"
+        "  commit_trailers: {}\n"
         "\n"
         "sources:\n"
         f"  max_chars: {DEFAULT_SOURCE_MAX_CHARS}    # cap on read_source returns\n"

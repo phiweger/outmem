@@ -339,17 +339,28 @@ first would let a wiki with nothing relevant crowd out one that had everything.
 
 Several wikis in one repository means concurrent writers are ordinary. A commit
 is two operations — `git add` writes the index, `git commit` reads it back —
-and between them the index is shared state.
+and between them the index is shared state. And the index is not the only
+shared state: what a write rewrites *before* committing — `wiki/index.md`,
+`.sources.db`, `.vectors.db` — is shared with every other writer of the same
+wiki, and git refuses to stage a file that changes under its hash (`fatal:
+confused by unstable object source data`).
 
-outmem serialises the pair with an `fcntl.flock` on `<repo>/.outmem-repo/`.
-Without it, measured on three processes writing into three wikis: two to four
-commits per run carried another wiki's paths, and one or two pages that
-`write_page` reported as written were absent from HEAD. The visible
-`index.lock: File exists` is the lesser half; the real damage is silent.
+outmem serialises the whole write — the rewrite, the stage and the commit —
+with an `fcntl.flock` on `<repo>/.outmem-repo/`, across processes and across
+threads, re-entrant within a thread. Without the lock on the commit pair,
+measured on three processes writing into three wikis: two to four commits per
+run carried another wiki's paths, and one or two pages that `write_page`
+reported as written were absent from HEAD. Without it on the rewrite, measured
+on eight processes registering sources into one wiki: at least one
+registration per round failed at `git add` for something another process had
+done. The visible errors are the lesser half; the real damage is silent.
 
 Nothing is needed to enable this. If the lock cannot be taken — a read-only
-mount, a permissions problem — the commit proceeds unserialised rather than
-failing.
+mount, a permissions problem — the write proceeds unserialised rather than
+failing. The cost is that a repository's writers are serialised across the
+reindex as well; within one process the store's own write lock always did
+that, so parallel writers to one repository were never parallel through the
+embedding step.
 
 ---
 

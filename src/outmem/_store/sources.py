@@ -128,33 +128,34 @@ def get_registry(store: WikiStore, tree: SourceTree | None = None) -> SourceRegi
     promised would not be touched.
     """
     if tree is None or tree.tracked:
-        if store._source_registry is None:
-            store._source_registry = _load_registry(store, store.sources_path)
+        store._source_registry = _current_registry(
+            store, store._source_registry, store.sources_path
+        )
         return store._source_registry
-    if store._source_registry_local is None:
-        store._source_registry_local = _load_registry(store, tree.path)
+    store._source_registry_local = _current_registry(
+        store, store._source_registry_local, tree.path
+    )
     return store._source_registry_local
 
 
-def refresh_registry_cache(store: WikiStore) -> None:
-    """Drop the cached snapshots so the next lookup re-reads the databases.
+def _current_registry(
+    store: WikiStore, cached: SourceRegistry | None, path: Path
+) -> SourceRegistry:
+    """The cached handle, opened on first use — and re-opened once for the
+    one case the handle cannot notice on its own.
 
-    :func:`get_registry` caches an in-memory snapshot for the store's
-    lifetime. That is right for reads — a long-lived store would
-    otherwise pay a SQLite open per lookup — but it means a row some
-    *other* process registered after this store opened is invisible here.
-    A caller about to **refuse** a write over a missing row asks again
-    through this first, so a good citation is not rejected with advice to
-    register what is already registered.
-
-    The handles are dropped, not closed: another thread may be writing
-    through one, and closing it underneath would turn a stale read into a
-    hard failure, while a merely-unreferenced connection keeps working
-    until it is collected. :meth:`WikiStore.sources_gc` drops the tracked
-    handle the same way.
+    A loaded registry keeps itself current (``SourceRegistry.entries``
+    re-reads when another connection has committed). The no-database
+    stand-in a read-only store gets when ``.sources.db`` does not exist
+    has no connection to ask, so if another process creates the registry
+    afterwards it would answer "nothing registered" for the store's whole
+    lifetime. One ``stat`` per lookup, only in that case, upgrades it.
     """
-    store._source_registry = None
-    store._source_registry_local = None
+    if cached is None:
+        return _load_registry(store, path)
+    if cached._con is None and (path / REGISTRY_FILENAME).is_file():
+        return _load_registry(store, path)
+    return cached
 
 
 def _load_registry(store: WikiStore, path: Path) -> SourceRegistry:
@@ -204,77 +205,77 @@ def add_source(
     local: bool = False,
     commit: bool = True,
 ) -> SourceEntry:
-    store._refuse_if_read_only("register a source")
-    source_path = Path(source).expanduser()
-    if local:
-        # Creates the directory AND its .gitignore entry, in that order.
-        store.ensure_sources_local()
-    tree = local_tree(store) if local else tracked_tree(store)
-    registry = get_registry(store, tree)
-    # Plan before copying: a refused ingest must not leave an
-    # unregistered orphan under the tree that lint then flags and gc
-    # refuses to delete.
-    placement = plan_source_copy(
-        source_path, tree.path, into_subdir=into_subdir, rename=rename
-    )
-    rel_path, sha = placement.rel_path, placement.sha256
-    # Absolute: a relative origin is meaningless once recorded, and a
-    # relative/absolute mix makes `distinguishing_segment` diverge at the
-    # root and propose a name that distinguishes nothing.
-    origin = str(source_path.resolve())
+    with store._mutation("register a source"):
+        source_path = Path(source).expanduser()
+        if local:
+            # Creates the directory AND its .gitignore entry, in that order.
+            store.ensure_sources_local()
+        tree = local_tree(store) if local else tracked_tree(store)
+        registry = get_registry(store, tree)
+        # Plan before copying: a refused ingest must not leave an
+        # unregistered orphan under the tree that lint then flags and gc
+        # refuses to delete.
+        placement = plan_source_copy(
+            source_path, tree.path, into_subdir=into_subdir, rename=rename
+        )
+        rel_path, sha = placement.rel_path, placement.sha256
+        # Absolute: a relative origin is meaningless once recorded, and a
+        # relative/absolute mix makes `distinguishing_segment` diverge at the
+        # root and propose a name that distinguishes nothing.
+        origin = str(source_path.resolve())
 
-    existing = registry.entries.get(rel_path)
-    if existing and existing.sha256 == sha:
-        # Identical content is the same row, not a new version — but an
-        # explicit `--as` still has to land, because "re-ingest with
-        # `--as <name>`" is exactly what `sources backfill` tells the
-        # operator to do about an ambiguous group.
-        if as_key is None:
-            return replace(existing, local=not tree.tracked)
-        return replace(
-            _adopt_or_refuse(registry, existing, normalize_document_key(as_key), origin),
-            local=not tree.tracked,
-        )
+        existing = registry.entries.get(rel_path)
+        if existing and existing.sha256 == sha:
+            # Identical content is the same row, not a new version — but an
+            # explicit `--as` still has to land, because "re-ingest with
+            # `--as <name>`" is exactly what `sources backfill` tells the
+            # operator to do about an ambiguous group.
+            if as_key is None:
+                return replace(existing, local=not tree.tracked)
+            return replace(
+                _adopt_or_refuse(registry, existing, normalize_document_key(as_key), origin),
+                local=not tree.tracked,
+            )
 
-    document_key = (
-        normalize_document_key(as_key)
-        if as_key is not None
-        else candidate_document_key(rel_path, sha)
-    )
-    dest, rel_path = copy_source(
-        source_path, tree.path, into_subdir=into_subdir, rename=rename
-    )
-    try:
-        entry = registry.register(
-            rel_path,
-            sha256=sha,
-            size_bytes=dest.stat().st_size,
-            document_key=document_key,
-            origin_path=origin,
-            # A *derived* key that is already taken is unresolvable; a
-            # declared one means "supersede that".
-            derived_key=as_key is None,
+        document_key = (
+            normalize_document_key(as_key)
+            if as_key is not None
+            else candidate_document_key(rel_path, sha)
         )
-    except DocumentKeyConflict as conflict:
-        _unlink_orphan(dest, tree.path)
-        raise _ambiguous_identity_error(
-            conflict.document_key, conflict.claimant, origin
-        ) from None
-    # The row itself carries no tree column (see SourceEntry.local); tag
-    # the returned copy so the caller's `citation_path` is right without
-    # a second lookup.
-    entry = replace(entry, local=not tree.tracked)
-    record_source_refs(store, rel_path, tree)
-    # A local ingest has nothing to commit: both the file and its
-    # registry live inside the gitignored tree. Committing here would be
-    # a no-op at best and, if the ignore rule were ever missing, exactly
-    # the leak the split exists to prevent.
-    if commit and tree.tracked:
-        store._commit_paths(
-            [tree.repo_relpath(rel_path), tree.repo_registry_relpath],
-            subject=f"source: {rel_path}",
+        dest, rel_path = copy_source(
+            source_path, tree.path, into_subdir=into_subdir, rename=rename
         )
-    return entry
+        try:
+            entry = registry.register(
+                rel_path,
+                sha256=sha,
+                size_bytes=dest.stat().st_size,
+                document_key=document_key,
+                origin_path=origin,
+                # A *derived* key that is already taken is unresolvable; a
+                # declared one means "supersede that".
+                derived_key=as_key is None,
+            )
+        except DocumentKeyConflict as conflict:
+            _unlink_orphan(dest, tree.path)
+            raise _ambiguous_identity_error(
+                conflict.document_key, conflict.claimant, origin
+            ) from None
+        # The row itself carries no tree column (see SourceEntry.local); tag
+        # the returned copy so the caller's `citation_path` is right without
+        # a second lookup.
+        entry = replace(entry, local=not tree.tracked)
+        record_source_refs(store, rel_path, tree)
+        # A local ingest has nothing to commit: both the file and its
+        # registry live inside the gitignored tree. Committing here would be
+        # a no-op at best and, if the ignore rule were ever missing, exactly
+        # the leak the split exists to prevent.
+        if commit and tree.tracked:
+            store._commit_paths(
+                [tree.repo_relpath(rel_path), tree.repo_registry_relpath],
+                subject=f"source: {rel_path}",
+            )
+        return entry
 
 
 def record_source_refs(
@@ -511,20 +512,20 @@ def record_ingestion(
     commit: bool = True,
     when: datetime | None = None,
 ) -> IngestionRecord:
-    store._refuse_if_read_only("record an ingestion")
-    found = resolve_source(store, rel_path)
-    tree, key = found if found is not None else (tracked_tree(store), rel_path)
-    record = get_registry(store, tree).record_ingestion(
-        key,
-        prompt=prompt,
-        pages_touched=pages_touched,
-        when=when,
-    )
-    # The local registry lives inside the gitignored tree; there is
-    # nothing for git to record.
-    if commit and tree.tracked:
-        store._commit_paths(
-            [tree.repo_registry_relpath],
-            subject=f"ingest: {key}",
+    with store._mutation("record an ingestion"):
+        found = resolve_source(store, rel_path)
+        tree, key = found if found is not None else (tracked_tree(store), rel_path)
+        record = get_registry(store, tree).record_ingestion(
+            key,
+            prompt=prompt,
+            pages_touched=pages_touched,
+            when=when,
         )
-    return record
+        # The local registry lives inside the gitignored tree; there is
+        # nothing for git to record.
+        if commit and tree.tracked:
+            store._commit_paths(
+                [tree.repo_registry_relpath],
+                subject=f"ingest: {key}",
+            )
+        return record

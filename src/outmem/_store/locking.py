@@ -12,8 +12,13 @@ Worse is the quiet one: process A stages its page, process B stages its
 own and commits, and A's paths ride along in B's commit under B's
 subject and author. Nothing errors, and the history is wrong.
 
-So the sequence is serialised across the whole repository with an
-`fcntl.flock` on a lockfile beside it. A flock is held by the file
+And the sequence is not the only shared state. What a write rewrites
+*before* committing — `wiki/index.md`, `.sources.db`, `.vectors.db` — is
+shared with every other writer of the same wiki, and git refuses to stage
+a file that changes under its hash ("unstable object source data"), so
+two processes registering sources into one wiki failed each other at
+`git add`. So the whole write is serialised across the repository with
+an `fcntl.flock` on a lockfile beside it, re-entrant within a thread. A flock is held by the file
 description and released when it closes — including when the process
 dies — so a crash cannot leave the repository wedged, which is the
 property a lockfile-as-mutex does not have.
@@ -25,6 +30,7 @@ there, as it does in :mod:`outmem.state`. Outmem targets Linux servers.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -55,17 +61,30 @@ COMMIT_LOCK_FILENAME = "commit.lock"
 _GITIGNORE_BODY = "*\n"
 
 
+# Per-thread acquisition depth, keyed by lock path. A flock belongs to a
+# file description, so a second `open` + `flock` in the same thread would
+# block on itself; the outermost acquisition in a thread holds the
+# description and nested ones just count. Other threads open their own
+# description and wait, exactly as other processes do.
+_held = threading.local()
+
+
 @contextmanager
 def repo_commit_lock(repo: Path) -> Iterator[None]:
-    """Hold the repository's commit lock for the duration of the block.
+    """Hold the repository's write lock for the duration of the block.
 
-    Blocking and re-entrant across processes only in the sense flock is:
-    a second acquisition *within one process* on a new file description
-    would deadlock, so callers must not nest this. `_commit_paths` is the
-    single caller for exactly that reason.
+    Serialises across processes (flock) and across threads (each thread
+    takes its own file description), and is re-entrant within a thread,
+    so a mutating method can hold it for its *whole* body and the
+    stage-and-commit funnel inside can take it again. That scope is the
+    point: what a write rewrites before it commits — ``wiki/index.md``,
+    ``.sources.db``, ``.vectors.db`` — is shared with every other writer
+    of the same wiki, and a writer that hashes one of those files while
+    another is rewriting it fails with git's "unstable object source
+    data". The lock covers the rewrite, not just the commit.
 
     Never fatal on its own. If the lock directory cannot be created — a
-    read-only mount, a permissions problem — the commit proceeds
+    read-only mount, a permissions problem — the write proceeds
     unserialised rather than failing, on the principle that a wiki with
     one writer must keep working where a lock cannot be taken.
     """
@@ -73,16 +92,29 @@ def repo_commit_lock(repo: Path) -> Iterator[None]:
     if lock_path is None:
         yield
         return
+    depth: dict[Path, int] = getattr(_held, "depth", None) or {}
+    _held.depth = depth
+    if lock_path in depth:
+        depth[lock_path] += 1
+        try:
+            yield
+        finally:
+            depth[lock_path] -= 1
+        return
     with open(lock_path, "a") as fd:
         if _HAS_FLOCK:
             _fcntl.flock(fd.fileno(), _fcntl.LOCK_EX)
         else:  # pragma: no cover — non-POSIX
             _log.warning(
-                "fcntl unavailable; commits in %s are not serialised across "
-                "processes. Concurrent writers may race on the git index.",
+                "fcntl unavailable; writes in %s are not serialised across "
+                "processes. Concurrent writers may race on shared files.",
                 repo,
             )
-        yield
+        depth[lock_path] = 1
+        try:
+            yield
+        finally:
+            del depth[lock_path]
         # Released when `fd` closes, including if the block raised.
 
 

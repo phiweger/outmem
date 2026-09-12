@@ -124,6 +124,33 @@ sha = store.append_log(
 # Commits "log: pricing-inconsistency". Appends to log/<today>.md.
 ```
 
+### Commit trailers — saying who acted
+
+The author line carries the person; it cannot carry which credential acted,
+which batch a commit belongs to, or that a tool generated it. A server that
+holds one store per principal sets those as git trailers, and every commit the
+store makes — writes, log entries, source registrations, ingestion records,
+renames, index rebuilds, vault imports — carries them:
+
+```python
+store.commit_trailers = {"Fleming-Actor": "kira", "Fleming-Token": "kira-desktop"}
+store.write_page(...)
+# compact: abx:x
+#
+# Fleming-Actor: kira
+# Fleming-Token: kira-desktop
+```
+
+`git interpret-trailers --parse` reads them back, `git log --format=%s` still
+shows the bare subject, and a batch can be reverted as a unit by trailer rather
+than by hunting shas. Seed wiki-wide ones from `git.commit_trailers` in
+`config.yaml` (`{Generated-By: outmem}` marks every agent commit); a value set
+on the store wins. Assignment validates against git's trailer grammar
+(`[A-Za-z][A-Za-z0-9-]*` keys, one-line values) and stores a read-only view, so
+a malformed trailer is refused before any write rather than discovered as a
+commit git cannot read back. The default is no trailers and a byte-identical
+message.
+
 ## Sources
 
 ```python
@@ -150,6 +177,10 @@ store.add_source("/path/to/licensed-handbook.md", local=True)
 
 store.list_sources()                  # both trees; rows whose file is gone excluded
 store.get_source(entry.rel_path)      # SourceEntry | None
+# Both answer from a snapshot that re-reads itself whenever another
+# connection — another store, another process — has committed to the
+# registry, so a store held open for a session never serves a stale
+# listing. One integer PRAGMA per call, no reopen needed.
 store.read_source(entry.rel_path)     # text, capped at config.sources.max_chars
 
 # After the agent extracts pages from a source, record the link:
@@ -617,6 +648,12 @@ What "read-only" guarantees:
 - `pull()` is also refused — `git pull --rebase` would mutate the
   working tree. `push()` stays unguarded, since with `_commit_paths`
   refused there's nothing local to push.
+- What it reads stays current. `list_sources()` and `get_source()` answer
+  from a registry snapshot that re-reads itself when another connection
+  has committed — so a server can keep its read stores open across
+  registrations made elsewhere, in this process or another, without
+  reopening them. A registry that did not exist at open is picked up
+  once it does.
 - `WikiStore.open(read_only=True)` skips `_ensure_layout`,
   `_maybe_clear_stale_lock`, and runs `BacklinkCache` memo-only — the
   wiki's filesystem state (including `.outmem/`) is left exactly as
