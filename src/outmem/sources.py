@@ -67,12 +67,14 @@ one it replaces.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
 import shutil
 import sqlite3
-from collections.abc import Iterable
+import threading
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from itertools import pairwise
@@ -446,6 +448,20 @@ class SourceRef:
     exact: bool  # written as [[token]] rather than guessed from prose
 
 
+def _under_lock[**P, R](method: Callable[P, R]) -> Callable[P, R]:
+    """Run a registry mutation under the registry's lock, so its lockstep
+    update of the snapshot cannot interleave with a refresh."""
+
+    @functools.wraps(method)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        registry = args[0]
+        assert isinstance(registry, SourceRegistry)
+        with registry._lock:
+            return method(*args, **kwargs)
+
+    return wrapper
+
+
 @dataclass
 class SourceRegistry:
     """SQLite-backed view of the ``wiki/sources/.sources.db`` registry.
@@ -464,6 +480,13 @@ class SourceRegistry:
     # `PRAGMA data_version` as of the last snapshot; None until one is
     # taken.
     _data_version: int | None = field(default=None, repr=False)
+    # Serialises a refresh against a mutation's lockstep update of the
+    # snapshot. The connection is shared across threads (PydanticAI
+    # dispatches tool calls that way), and without this a refresh could
+    # swap the snapshot out from under a mutation that had just committed
+    # — its row then missing from the registry's own view until the next
+    # foreign commit. Re-entrant: a mutation reads `entries` on its way.
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     @classmethod
     def load(cls, sources_dir: Path) -> SourceRegistry:
@@ -496,13 +519,15 @@ class SourceRegistry:
         con = self._con
         if con is None:
             return  # the no-database stand-in: nothing to be out of date with
-        version = con.execute("PRAGMA data_version").fetchone()[0]
-        if version != self._data_version:
-            # Record the version *before* reading the rows. A commit that
-            # lands between the two is then caught by the next access
-            # instead of being masked behind a version we never saw.
-            self._data_version = version
-            self._entries = _read_all_entries(con)
+        with self._lock:
+            version = con.execute("PRAGMA data_version").fetchone()[0]
+            if version != self._data_version:
+                # Record the version *before* reading the rows. A commit
+                # that lands between the two is then caught by the next
+                # access instead of being masked behind a version we never
+                # saw.
+                self._data_version = version
+                self._entries = _read_all_entries(con)
 
     @classmethod
     def empty(cls, sources_dir: Path) -> SourceRegistry:
@@ -580,6 +605,7 @@ class SourceRegistry:
         ).fetchall()
         return [_entry_from_row(r) for r in rows]
 
+    @_under_lock
     def register(
         self,
         rel_path: str,
@@ -676,6 +702,7 @@ class SourceRegistry:
         self.entries[rel_path] = entry
         return entry
 
+    @_under_lock
     def adopt_document_key(self, rel_path: str, document_key: str) -> SourceEntry:
         """Declare the identity of a row that already exists.
 
@@ -734,6 +761,7 @@ class SourceRegistry:
         new_rows = [] if new_key == old_key else self._snapshot_rows_with_key(new_key)
         return _plan_rekey(old_rows, new_rows, new_key)
 
+    @_under_lock
     def rekey(self, old_key: str, new_key: str | None = None) -> RekeyResult:
         """Move a *document* to another identity, and rebuild its chain.
 
@@ -839,6 +867,7 @@ class SourceRegistry:
                 "out of band; resolve those rows first."
             )
 
+    @_under_lock
     def record_refs(self, rel_path: str, refs: Iterable[SourceRef]) -> list[SourceRef]:
         """Record which pages a frozen source names, resolved at ingest.
 
@@ -897,6 +926,7 @@ class SourceRegistry:
             for r in rows
         ]
 
+    @_under_lock
     def repoint_refs(self, old_slug: str, new_slug: str) -> int:
         """Follow a rename. Returns the number of references re-pointed.
 
@@ -913,6 +943,7 @@ class SourceRegistry:
             )
         return int(cur.rowcount or 0)
 
+    @_under_lock
     def record_ingestion(
         self,
         rel_path: str,

@@ -275,13 +275,16 @@ def is_ignored(repo_path: Path, rel_path: str) -> bool:
     tracked path is never ignored to git, whatever the rules say, so this
     answers ``False`` for one: tracked beats ignored.
     """
-    result = subprocess.run(
-        ["git", "check-ignore", "-q", "--", rel_path],
-        cwd=str(repo_path),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", "--", rel_path],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:  # same shape as _run_git
+        raise GitOperationError(f"git invocation failed: {exc}") from exc
     if result.returncode == 0:
         return True
     if result.returncode == 1:

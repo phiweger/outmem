@@ -126,3 +126,49 @@ class TestOwnWritesStayInLockstep:
         store.sources_gc(dry_run=False)
 
         assert store.list_sources(include_missing=True) == []
+
+
+class TestUnderThreads:
+    def test_concurrent_registrations_and_reads_on_one_store(self, tmp_path: Path) -> None:
+        # The registry's connection is shared across threads (PydanticAI
+        # dispatches tool calls that way). A refresh must not swap the
+        # snapshot out from under a mutation's lockstep update — which is
+        # what the registry lock is for — and nothing may raise. The
+        # narrow interleaving itself is not something a test can force;
+        # this pins that the mechanism holds up under real contention.
+        import threading
+
+        root = tmp_path / "w"
+        store = WikiStore.init(root)
+        reader = WikiStore.open(root, read_only=True)
+        errors: list[BaseException] = []
+        stop = threading.Event()
+
+        def register(worker: int) -> None:
+            try:
+                for i in range(5):
+                    store.add_source(_doc(tmp_path, f"w{worker}-{i}.md"))
+            except BaseException as exc:
+                errors.append(exc)
+
+        def read() -> None:
+            try:
+                while not stop.is_set():
+                    reader.list_sources()
+                    store.list_sources()
+            except BaseException as exc:
+                errors.append(exc)
+
+        readers = [threading.Thread(target=read) for _ in range(2)]
+        writers = [threading.Thread(target=register, args=(w,)) for w in range(8)]
+        for th in readers + writers:
+            th.start()
+        for th in writers:
+            th.join(timeout=120)
+        stop.set()
+        for th in readers:
+            th.join(timeout=30)
+
+        assert errors == []
+        assert len(store.list_sources()) == 40
+        assert len(reader.list_sources()) == 40
