@@ -69,7 +69,7 @@ src/outmem/
 │   ├── sources.py              #   add_source, list_sources, record_ingestion, ...
 │   ├── semantic.py             #   reindex, find_similar, the indexer ...
 │   ├── import_vault.py         #   `outmem import` of an existing markdown vault
-│   └── locking.py              #   repo-wide flock around stage-and-commit
+│   └── locking.py              #   repo-wide, re-entrant flock around every write
 ├── repo.py                     # wikis.yaml registry, Repo, audience tags, discovery
 ├── wikiset.py                  # WikiSet — several wikis read as one, names `wiki/slug`
 ├── _sqlite.py / _time.py       # shared helpers used by both DBs and timestamp call sites
