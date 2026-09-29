@@ -3,6 +3,68 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.19.1
+
+### Fixed
+
+- **No tool's example call ever reached a model under PydanticAI.** PydanticAI
+  does not send a tool's docstring: it parses it with griffe and sends the
+  first plain-text section as the description, the `Args:` entries as
+  per-argument schema, and the first `Returns:` entry. Everything else is
+  dropped without a warning — and griffe reads `Example:` over an indented
+  block as an admonition. So every example call outmem's tools carried was
+  parsed out before the model saw it: all 22 tools, across `wiki_tools` (16,
+  counting the index-only `find_similar`), `consult_wiki`, and the federated
+  palette (5). The examples exist so a model does not drop a required argument,
+  fail validation and burn a retry; the four write tools, which take several,
+  needed them most. Each example now sits in the description itself,
+  introduced by a line ending in a colon, a blank line, then the call.
+
+- **Instructions after an example were dropped with it.** Anything following a
+  dropped block lands in a second text section, which is dropped too.
+  `extend_page` lost the paragraph telling the model to pass `provenance` only
+  when re-compacting against a different source version — the one argument
+  whose misuse silently repoints a page's citations.
+
+- **The federated palette's note on page names never arrived — on any of its
+  five tools.** `wikiset_read_tools` appended "Page names are qualified
+  `wiki/slug` … a bare slug resolves in the order above" after `Args:`, where
+  it became a second text section. That note exists so a model does not pass a
+  bare slug into a set where two wikis hold that name and never understand why
+  it got the other one. It now goes in before the arguments.
+
+### Changed
+
+- **The examples say what they mean, now that a model reads them.** The
+  `abx:amikacin:iv-dosing` example carried a penicillin body; `record_ingestion`
+  showed a `rel_path` no registry could hold; source paths used six-character
+  hashes where the registry writes twelve. Every provenance example now notes
+  that its path is one `list_sources` showed — 0.18.0 refuses a citation to an
+  unregistered source, and an example is exactly what a model copies a
+  plausible-looking path from.
+
+### Internal
+
+- `tests/test_tool_descriptions.py` checks the tool definitions PydanticAI
+  builds — for every palette, and for outmem's own agent with and without the
+  write-approval gate — never `__doc__`: the description is the docstring's
+  whole lead text, nothing follows the arguments, multi-argument tools say how
+  many in their first paragraph, and every description carries a complete
+  example call. It replaces a check that read `__doc__` — the method that let
+  all this go unnoticed. That check's own claim happened to hold, since the
+  `REQUIRES …` leads sit in the text that is sent; the new one derives the
+  multi-argument tools from their schema, and so also covers `append_page` and
+  `record_ingestion`, which the old list had missed. The adapter's module
+  docstring states the rules in place of a
+  pointer to an `AGENTS.md` section that no longer exists, and
+  `docs/development.md` gains a "Writing a tool" section.
+
+### Downstream
+
+fleming's `tests/test_tool_descriptions.py` lists the read tools it registers as
+known exceptions (`_UPSTREAM_OUTMEM`). That test fails against this release by
+design; the entries come out with the pin bump.
+
 ## 0.19.0
 
 ### Added

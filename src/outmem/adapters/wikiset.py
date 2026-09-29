@@ -18,6 +18,8 @@ ordinary palette in :mod:`outmem.adapters.pydantic_ai`.
 
 from __future__ import annotations
 
+import inspect
+import re
 from typing import TYPE_CHECKING, Any
 
 from outmem.exceptions import FrontmatterError, OutmemError, SlugError
@@ -66,7 +68,8 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         territory before a broad search, or to confirm a name exists
         before reading it.
 
-        Example:
+        For example, a complete call:
+
             list_pages()
         """
         slugs = wikis.list_slugs()
@@ -80,7 +83,8 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         one wiki holds it, the others are named at the end so you can ask
         for a specific one.
 
-        Example:
+        For example, complete calls:
+
             read_page(name="legal/nda")
             read_page(name="pricing-formula")
 
@@ -116,7 +120,8 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         strings, names, section headings, anything you can spell. For
         "what do we know about X", use `search_wiki`.
 
-        Example:
+        For example, complete calls:
+
             grep_wiki(pattern="cost times")
             grep_wiki(pattern="NDA", case_insensitive=True)
 
@@ -159,7 +164,8 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         Use this for question-shaped queries. For the exact line a literal
         string appears on, use `grep_wiki`.
 
-        Example:
+        For example, a complete call:
+
             search_wiki(question="how is the list price calculated?")
 
         Args:
@@ -205,7 +211,8 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         Links never cross a wiki boundary, so every referrer is in the
         same wiki as the page itself.
 
-        Example:
+        For example, a complete call:
+
             find_backlinks(name="legal/nda")
 
         Args:
@@ -218,5 +225,27 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         return "\n".join(refs) if refs else f"(nothing links to {name})"
 
     for tool in (list_pages, read_page, grep_wiki, search_wiki, find_backlinks):
-        tool.__doc__ = f"{tool.__doc__}\n\n        {note}"
+        tool.__doc__ = _with_note(tool.__doc__, note)
     return [list_pages, read_page, grep_wiki, search_wiki, find_backlinks]
+
+
+_ARGS_HEADER = re.compile(r"^Args:\s*$", re.MULTILINE)
+
+
+def _with_note(doc: str | None, note: str) -> str:
+    """``doc`` with ``note`` as the last paragraph before ``Args:``.
+
+    Not appended after it. pydantic-ai sends a tool's *first* text section
+    as its description and drops every other; a paragraph after ``Args:``
+    is a second one. Appending is how this note used to be attached, and
+    no model ever received it — on any of the five tools.
+
+    Works on the normalised docstring (:func:`inspect.cleandoc`, which is
+    what griffe parses anyway), so the insertion point does not depend on
+    how deeply the closure happens to be indented.
+    """
+    text = inspect.cleandoc(doc or "")
+    match = _ARGS_HEADER.search(text)
+    if match is None:
+        return f"{text}\n\n{note}"
+    return f"{text[: match.start()].rstrip()}\n\n{note}\n\n{text[match.start() :]}"

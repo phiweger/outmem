@@ -105,3 +105,43 @@ examples/starter-wiki/          # pre-populated example to try the library again
 specs/                          # conceptual rationale, v0.1 spec, planning prompt, design records
 tests/                          # pytest suite, ruff + mypy strict clean
 ```
+
+## Writing a tool
+
+A tool's docstring is what the model reads — but PydanticAI sends only
+part of it. It parses the docstring with griffe and keeps three things:
+the **first plain-text section** (the tool description), the **`Args:`
+entries** (per-argument schema), and the **first `Returns:` entry**.
+Every other section is dropped without a warning:
+
+- `Example:` over an indented block is read as an admonition and dropped —
+  and so is every paragraph after it, which lands in a second text section.
+- Any paragraph after `Args:` is a second text section too.
+
+So everything the model should see goes in one run of prose before
+`Args:`, and an example call is introduced by a line ending in a colon,
+then a blank line, then the indented call:
+
+```python
+def extend_page(slug: str, body: str) -> str:
+    """Replace the body of an existing wiki page.
+
+    REQUIRES BOTH slug and body in a single call. ...
+
+    For example, a complete call:
+
+        extend_page(slug="pricing-formula", body="Cost-plus 40%.\n")
+
+    Args:
+        slug: Existing page slug.
+        body: The complete replacement body.
+    """
+```
+
+`tests/test_tool_descriptions.py` checks the definitions PydanticAI
+actually builds for every palette — never `__doc__` — and fails if a
+description is not the docstring's whole lead text, if anything follows
+the arguments, if a multi-argument tool does not say how many in its
+first paragraph, or if a tool's description lacks a complete example
+call. The rules are stated in full in `outmem/adapters/pydantic_ai.py`'s
+module docstring.

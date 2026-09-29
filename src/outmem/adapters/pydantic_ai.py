@@ -15,10 +15,28 @@ No hard dependency on ``pydantic_ai`` — the functions are vanilla
 Python and PydanticAI introspects them at attach time. Install
 ``outmem[pydantic-ai]`` to pull the framework into the same environment.
 
-Tool docstrings follow AGENTS.md §"Tool docstrings — the JSON schema
-the model can't escape": multi-arg tools lead with ``REQUIRES ALL
-ARGUMENTS``, every tool shows one concrete example call, and ``Args:``
-sections give concrete valid values.
+Tool docstrings are what the model reads — but only part of each one
+arrives. PydanticAI parses a docstring with griffe and sends three
+things: the first plain-text section as the tool description, the
+``Args:`` entries as per-argument schema, and the first ``Returns:``
+entry. Every other section is dropped without a warning. An ``Example:``
+heading over an indented block is read as an admonition and dropped, and
+so is every paragraph after it, and any paragraph after ``Args:`` — each
+is a second text section. So:
+
+- Everything the model should read sits in one run of prose before
+  ``Args:``, and nothing follows the arguments.
+- Multi-argument tools say how many in their first paragraph
+  (``REQUIRES BOTH``, ``REQUIRES ALL THREE``), so a model does not drop
+  one, fail validation and burn a retry.
+- Every tool shows a complete example call inside that prose: a line
+  ending in a colon, a blank line, then the indented call. Never under an
+  ``Example:`` heading.
+- ``Args:`` entries give concrete valid values.
+
+``tests/test_tool_descriptions.py`` checks the definitions PydanticAI
+builds, never ``__doc__``. The same rules, with this pitfall, are in the
+``agent-docs`` skill (``phiweger/skills``).
 """
 
 from __future__ import annotations
@@ -311,7 +329,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         neighbourhoods are split by a blank line. The leading slug is the
         same on both, so you can still feed it to ``read_page``.
 
-        Example:
+        For example, complete calls:
+
             grep_wiki(pattern="cost-plus 35%", scope="wiki")
             grep_wiki(pattern="§ 7 Abs. 1", context=2)      # quote-ready
             grep_wiki(pattern="penicillin", scope="sources")
@@ -378,7 +397,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         ``abx:side-effects:misc``) — the namespace becomes a directory
         on disk under ``wiki/pages/``.
 
-        Example:
+        For example, complete calls:
+
             read_page(slug="pricing-formula")
             read_page(slug="meldewesen:ifsg", peek=True)             # what's in it?
             read_page(slug="meldewesen:ifsg", section="§7 Abs. 1")   # just that part
@@ -429,7 +449,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         ``search_index``. Use either to map the territory before a broad
         search, or to confirm a slug exists before reading it.
 
-        Example:
+        For example, a complete call:
+
             list_pages()
         """
         _log_call("list_pages")
@@ -448,7 +469,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         unfamiliar wiki, then ``read_page`` (optionally ``peek=True``)
         the leaves that look relevant.
 
-        Example:
+        For example, complete calls:
+
             search_index()                  # top-level namespaces + pages
             search_index(prefix="abx")      # what's under abx:
 
@@ -479,7 +501,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         Useful when answering "what depends on X" — backlinks surface
         the reverse direction of the wikilink graph.
 
-        Example:
+        For example, a complete call:
+
             find_backlinks(slug="pricing-formula")
 
         Args:
@@ -500,7 +523,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         newest first. Use to answer "when did X change and who changed it".
         For the actual diff content use ``topic_evolution``.
 
-        Example:
+        For example, a complete call:
+
             page_history(slug="pricing-formula")
 
         Args:
@@ -527,7 +551,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         rather than just retrieving the current state. Pass multiple
         related slugs to interleave their evolution chronologically.
 
-        Example:
+        For example, a complete call:
+
             topic_evolution(slugs=["pricing-formula", "discounts"], include_log=True)
 
         Args:
@@ -562,7 +587,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         matters when deciding whether long verbatim quotation is
         appropriate in a page.
 
-        Example:
+        For example, a complete call:
+
             list_sources()
         """
         _log_call("list_sources")
@@ -598,9 +624,10 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         summarising them in your own words over reproducing long
         verbatim passages into a page.
 
-        Example:
-            read_source(rel_path="sources/a1b2c3/drugs.md")
-            read_source(rel_path="sources-local/d4e5f6/handbook.md")
+        For example, complete calls:
+
+            read_source(rel_path="sources/a1b2c3d4e5f6/drugs.md")
+            read_source(rel_path="sources-local/d4e5f6a1b2c3/handbook.md")
 
         Args:
             rel_path: A path from ``list_sources`` (either the
@@ -630,7 +657,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         is identical, ``0.0`` is orthogonal); the per-call threshold comes
         from config.
 
-        Example:
+        For example, complete calls:
+
             find_similar(text="cost-plus pricing formula", top_k=5)
             find_similar(text="...new page body...", exclude_slug="my-new-page")
 
@@ -700,7 +728,8 @@ def _read_tools(store: WikiStore) -> list[WikiTool]:
         string appears on, or to search the raw source documents / the gap
         log, use ``grep_wiki`` instead.
 
-        Example:
+        For example, a complete call:
+
             search_wiki(question="What's the dose of penicillin for endocarditis?")
 
         Args:
@@ -832,16 +861,18 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         conventions (see ``AGENTS.md``), nest under it from the first
         page you write on that topic.
 
-        Example with plain-string provenance:
+        For example, a complete call, citing a source by its path:
+
             write_page(
                 slug="pricing-formula",
                 title="Pricing formula",
                 body="The pricing formula is cost-plus 35%.\\n",
-                provenance=["sources/a1b2c3/pricing-deck.md"],
+                provenance=["sources/a1b2c3d4e5f6/pricing-deck.md"],  # as list_sources shows it
                 tags=["pricing", "contracts"],
             )
 
-        Example with a namespaced slug:
+        A namespaced slug, and no provenance (a hub page cites nothing):
+
             write_page(
                 slug="abx:penicillin",
                 title="Penicillin",
@@ -849,13 +880,15 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 tags=["antibiotics"],
             )
 
-        Example with structured provenance (for ingested sources):
+        Structured provenance, carrying what the source's own frontmatter
+        recorded:
+
             write_page(
                 slug="abx:amikacin:iv-dosing",
                 title="Amikacin IV — Dosing",
-                body="IV penicillin G 18-24 MU/day.",
+                body="Amikacin IV: 15 mg/kg once daily.\\n",
                 provenance=[{
-                    "path": "sources/9b3d0d4e1a35/document.md",
+                    "path": "sources/9b3d0d4e1a35/document.md",  # as list_sources shows it
                     "sha256": "9b3d0d4e1a35...",
                     "label": "Fachinformation Amikacin Eberth 250 mg/ml",
                 }],
@@ -945,7 +978,8 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         Fails if the page does not exist — use ``write_page`` for new
         pages.
 
-        Example:
+        For example, a complete call:
+
             extend_page(
                 slug="pricing-formula",
                 body="The pricing formula is now cost-plus 40%, revised Q2.\\n",
@@ -959,7 +993,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
             extend_page(
                 slug="abx:amikacin",
                 body="15 mg/kg once daily, per the 2026 edition.\\n",
-                provenance=["sources/fachinfo/e77a10b4c503/document.md"],
+                provenance=["sources/fachinfo/e77a10b4c503/document.md"],  # from list_sources
             )
 
         Args:
@@ -1033,14 +1067,15 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         section drawn from a new source can cite it without restating
         the page's existing citations.
 
-        Example:
+        For example, complete calls:
+
             write_page(slug="clinical:sepsis", title="Sepsis",
                        body="## Erreger\\n\\nGramnegative Erreger dominieren.")
             append_page(slug="clinical:sepsis",
                         body="## Diagnostik\\n\\nBlutkulturen vor Therapie.")
             append_page(slug="clinical:sepsis",
                         body="## Therapie\\n\\nTherapie binnen 1h.",
-                        provenance=["sources/leitlinie/a1b2c3/document.md"])
+                        provenance=["sources/leitlinie/a1b2c3d4e5f6/document.md"])
 
         Args:
             slug: Existing page slug.
@@ -1101,7 +1136,8 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         an ``append_log`` is the canonical "I did the work and here is
         the trail" outcome.
 
-        Example:
+        For example, a complete call:
+
             append_log(
                 topic="pricing-inconsistency",
                 content="- noticed acme-msa cites cost-plus 30%, pricing-formula says 35%.\\n",
@@ -1135,9 +1171,10 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
         calling this explicitly is the safer path during agent-driven
         ingestion.
 
-        Example:
+        For example, a complete call:
+
             record_ingestion(
-                rel_path="veterinary/drugs.md",
+                rel_path="sources/veterinary/a1b2c3d4e5f6/drugs.md",  # from list_sources
                 prompt="extract drug dosages for cats",
                 pages_touched=["cat-drug-dosages"],
             )
@@ -1347,7 +1384,8 @@ def build_consult_wiki(
         with ``[[slug]]`` citations, or a clear "no record" if the
         wiki has nothing on the topic.
 
-        Example:
+        For example, a complete call:
+
             consult_wiki(question="What's our standard pricing formula?")
 
         Args:
