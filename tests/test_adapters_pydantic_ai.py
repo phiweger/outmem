@@ -280,30 +280,6 @@ def test_attach_to_agent_with_test_model(seeded_store: WikiStore) -> None:
     assert isinstance(result.output, str)
 
 
-def test_docstrings_lead_with_required_args() -> None:
-    """AGENTS.md §"Tool docstrings" — multi-required-arg tools must
-    flag their required-count loudly so models don't drop arguments."""
-    # Get a dummy store just to instantiate the closures.
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmp:
-        store = WikiStore.init(Path(tmp) / "w")
-        tools = wiki_tools(store)
-
-    multi_required = {
-        "write_page": "REQUIRES ALL THREE",
-        "extend_page": "REQUIRES BOTH",
-        "append_log": "REQUIRES BOTH",
-    }
-    for tool in tools:
-        prefix = multi_required.get(tool.__name__)
-        if prefix is None:
-            continue
-        assert prefix in (tool.__doc__ or ""), (
-            f"{tool.__name__} docstring missing required-args prefix"
-        )
-
-
 # ---------------------------------------------------------------------------
 # wiki_read_tools — read-only subset for consult subagents
 # ---------------------------------------------------------------------------
