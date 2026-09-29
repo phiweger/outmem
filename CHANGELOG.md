@@ -16,9 +16,16 @@ history (`git log --grep '^release:'`).
   parsed out before the model saw it: all 22 tools, across `wiki_tools` (16,
   counting the index-only `find_similar`), `consult_wiki`, and the federated
   palette (5). The examples exist so a model does not drop a required argument,
-  fail validation and burn a retry; the four write tools, which take several,
-  needed them most. Each example now sits in the description itself,
+  fail validation and burn a retry; the five write tools, which each take two or
+  three, needed them most. Each example now sits in the description itself,
   introduced by a line ending in a colon, a blank line, then the call.
+
+  Who was affected: anyone attaching `wiki_tools` or `wikiset_read_tools` to
+  their own agent, and `consult_wiki`'s inner agent, whose prompt tells it the
+  tool descriptions are how to use the tools. outmem's own `outmem ask` agent
+  had a partial backstop — the `search`, `write` and `evolution` skills it
+  injects into its system prompt show calls for 13 of its 16 tools, though not
+  `list_sources`, `read_source` or the three-argument `record_ingestion`.
 
 - **Instructions after an example were dropped with it.** Anything following a
   dropped block lands in a second text section, which is dropped too.
@@ -43,6 +50,13 @@ history (`git log --grep '^release:'`).
   unregistered source, and an example is exactly what a model copies a
   plausible-looking path from.
 
+- **outmem now ships a `py.typed` marker.** The package is `mypy --strict`
+  clean, but without the PEP 561 marker every type checker downstream treated
+  `outmem` as untyped and every call into it as `Any`, so none of that typing
+  reached a consumer. A downstream project that type-checks its calls into
+  outmem will now actually have them checked, and may see errors that were
+  always there.
+
 ### Internal
 
 - `tests/test_tool_descriptions.py` checks the tool definitions PydanticAI
@@ -50,8 +64,8 @@ history (`git log --grep '^release:'`).
   write-approval gate — never `__doc__`: the description is the docstring's
   whole lead text, nothing follows the arguments, multi-argument tools say how
   many in their first paragraph, and every description carries a complete
-  example call. It replaces a check that read `__doc__` — the method that let
-  all this go unnoticed. That check's own claim happened to hold, since the
+  example call. It replaces a check that read `__doc__`, which cannot see what
+  PydanticAI drops. That check's own claim happened to hold, since the
   `REQUIRES …` leads sit in the text that is sent; the new one derives the
   multi-argument tools from their schema, and so also covers `append_page` and
   `record_ingestion`, which the old list had missed. The adapter's module

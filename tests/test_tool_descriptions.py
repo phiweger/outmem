@@ -22,9 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
-pytest.importorskip("pydantic_ai")
-
 from pydantic_ai import Agent, FunctionToolset
 from pydantic_ai.models.test import TestModel
 
@@ -73,9 +70,16 @@ def _indexed(root: Path, *, gated: bool = False) -> WikiStore:
     return store
 
 
-@pytest.fixture
-def palettes(tmp_path: Path) -> dict[str, dict[str, tuple[Callable[..., Any], Any]]]:
-    """Every tool outmem hands a model, grouped by how it gets there."""
+@pytest.fixture(scope="module")
+def palettes(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> dict[str, dict[str, tuple[Callable[..., Any], Any]]]:
+    """Every tool outmem hands a model, grouped by how it gets there.
+
+    Module-scoped: building two indexed wikis is the slow part, and every
+    test here only reads the tool definitions.
+    """
+    tmp_path = tmp_path_factory.mktemp("palettes")
     store = _indexed(tmp_path / "open")
     other = WikiStore.init(tmp_path / "legal")
     gated = _indexed(tmp_path / "gated", gated=True)
@@ -93,9 +97,11 @@ def palettes(tmp_path: Path) -> dict[str, dict[str, tuple[Callable[..., Any], An
         ),
     }
     # Coverage that could otherwise vanish silently: the index-only tool,
-    # and the gated path actually routing through its own toolset.
-    for label in ("wiki_tools", "runtime", "runtime-approval"):
-        assert "find_similar" in found[label], label
+    # and each runtime path — the gated one routes through a toolset of
+    # its own — offering the whole palette rather than some of it.
+    assert "find_similar" in found["wiki_tools"]
+    for label in ("runtime", "runtime-approval"):
+        assert set(found[label]) == set(found["wiki_tools"]), label
     return found
 
 
@@ -115,11 +121,15 @@ class TestNothingIsDropped:
         # block — or a `Note:`, or any `Title:` line with a blank line
         # above and an indented block directly below — becomes a section
         # pydantic-ai discards, and takes every later paragraph with it.
+        #
+        # Compared with whitespace normalised: the test is for a drop, and
+        # CI runs the newest pydantic-ai (`>=0.1.0`), whose formatting of
+        # the text it does send is not ours to pin.
         problems: dict[str, str] = {}
         for label, defs in palettes.items():
             for name, (fn, tool_def) in defs.items():
-                lead, _rest = _lead_and_rest(fn)
-                sent = tool_def.description or ""
+                lead = " ".join(_lead_and_rest(fn)[0].split())
+                sent = " ".join((tool_def.description or "").split())
                 if sent != lead:
                     cut = next(
                         (i for i, (a, b) in enumerate(zip(sent, lead, strict=False)) if a != b),
@@ -135,6 +145,9 @@ class TestNothingIsDropped:
         # A paragraph after `Args:` is a second text section, and only the
         # first is sent. The federated palette used to append its note on
         # qualified page names there — on every tool, never delivered.
+        # A `Returns:` section would be sent, but only by wrapping the
+        # description in XML; the tools say what they return in prose, so
+        # this flags one too.
         problems: dict[str, str] = {}
         for label, defs in palettes.items():
             for name, (fn, _tool_def) in defs.items():
@@ -200,9 +213,12 @@ class TestTheFederatedNote:
         # "The model has to know the qualifier exists, or it will pass a
         # bare slug into a set where two wikis hold that name and never
         # understand why it got the other one."
+        # The exact sentence: "open" and "legal" on their own also occur in
+        # the tools' examples and in the note's own `open/some-page`, so a
+        # substring check for the names proves little.
         defs = palettes["wikiset_read_tools"]
         assert defs
         for name, (_fn, tool_def) in defs.items():
             desc = tool_def.description or ""
+            assert "This session reads 2 wiki(s): open, legal." in desc, name
             assert "Page names are qualified" in desc, name
-            assert "open" in desc and "legal" in desc, name

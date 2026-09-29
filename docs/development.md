@@ -103,7 +103,7 @@ docs/                           # cli, python-api, features, configuration, mult
 evals/                          # cases + harness + fixtures (eval suite, opt-in)
 examples/starter-wiki/          # pre-populated example to try the library against
 specs/                          # conceptual rationale, v0.1 spec, planning prompt, design records
-tests/                          # pytest suite, ruff + mypy strict clean
+tests/                          # pytest suite, ruff clean (mypy --strict covers src/outmem)
 ```
 
 ## Writing a tool
@@ -130,7 +130,7 @@ def extend_page(slug: str, body: str) -> str:
 
     For example, a complete call:
 
-        extend_page(slug="pricing-formula", body="Cost-plus 40%.\n")
+        extend_page(slug="pricing-formula", body="Cost-plus 40%.")
 
     Args:
         slug: Existing page slug.
