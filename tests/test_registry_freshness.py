@@ -128,6 +128,31 @@ class TestOwnWritesStayInLockstep:
         assert store.list_sources(include_missing=True) == []
 
 
+class TestTheSnapshotIsNeverChangedUnderAReader:
+    def test_iterating_while_a_source_is_registered(self, tmp_path: Path) -> None:
+        # The deterministic form of the race the contention test below can
+        # only catch by luck (it did, once, under full-suite load): the
+        # snapshot used to be one dict that `register` inserted into in
+        # place, so a reader iterating it — `list_sources`, lint — while
+        # another thread registered raised "dictionary changed size during
+        # iteration". A registration now publishes a new dict instead, and
+        # the one a reader holds never changes under it. Same thread, same
+        # interleaving, every run.
+        store = WikiStore.init(tmp_path / "w")
+        store.add_source(_doc(tmp_path, "first.md"))
+        store.add_source(_doc(tmp_path, "second.md"))
+        from outmem._store.sources import get_registry
+
+        entries = get_registry(store).entries
+        walk = iter(entries.values())
+        next(walk)
+
+        store.add_source(_doc(tmp_path, "third.md"))
+
+        assert len(list(walk)) == 1  # the rest of the snapshot it started on
+        assert len(get_registry(store).entries) == 3  # the next read sees the new one
+
+
 class TestUnderThreads:
     def test_concurrent_registrations_and_reads_on_one_store(self, tmp_path: Path) -> None:
         # The registry's connection is shared across threads (PydanticAI

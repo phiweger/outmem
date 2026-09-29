@@ -511,6 +511,15 @@ class SourceRegistry:
         filesystem stat — says whether the snapshot is still the truth.
         This connection's own commits leave it unchanged, and those keep
         the snapshot in lockstep themselves.
+
+        **The dict returned is never changed in place — treat it as
+        read-only.** A refresh or a registration publishes a new one, so a
+        reader iterating it (``list_sources``, lint) never races a writer
+        in another thread. Inserting in place used to raise "dictionary
+        changed size during iteration" in exactly that case. The entries
+        inside are shared between snapshots and their fields may still be
+        updated, which can change what a reader sees but not the shape of
+        what it is iterating.
         """
         self._refresh()
         return self._entries
@@ -699,7 +708,9 @@ class SourceRegistry:
         )
         if predecessor is not None and predecessor.rel_path in self.entries:
             self.entries[predecessor.rel_path].superseded_by = rel_path
-        self.entries[rel_path] = entry
+        # Published, not inserted: a reader in another thread may be
+        # iterating the current dict (see the `entries` property).
+        self._entries = {**self._entries, rel_path: entry}
         return entry
 
     @_under_lock
@@ -1371,6 +1382,19 @@ def gc_registry(sources_dir: Path, *, dry_run: bool = True) -> RegistryAudit:
     if dry_run or (not audit.missing_files and not audit.orphan_ingestions):
         return audit
     registry = SourceRegistry.load(sources_dir)
+    try:
+        _drop_rows(registry, audit)
+    finally:
+        # A registry opened here is this function's alone; nothing reads
+        # its snapshot afterwards, and a store's own cached registry sees
+        # this commit through `PRAGMA data_version`.
+        registry.close()
+    return audit
+
+
+def _drop_rows(registry: SourceRegistry, audit: RegistryAudit) -> None:
+    """Delete ``audit.missing_files`` and orphaned ingestions, splicing each
+    deleted row out of its version chain first."""
     con = registry._connection()
     with con:
         for rel_path in audit.missing_files:
@@ -1389,13 +1413,6 @@ def gc_registry(sources_dir: Path, *, dry_run: bool = True) -> RegistryAudit:
         con.execute(
             "DELETE FROM ingestions WHERE rel_path NOT IN (SELECT rel_path FROM sources)"
         )
-    for rel_path in audit.missing_files:
-        successor = registry.entries[rel_path].superseded_by
-        for entry in registry.entries.values():
-            if entry.superseded_by == rel_path:
-                entry.superseded_by = successor
-        registry.entries.pop(rel_path, None)
-    return audit
 
 
 @dataclass(frozen=True)

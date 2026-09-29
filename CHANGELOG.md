@@ -40,6 +40,20 @@ history (`git log --grep '^release:'`).
   bare slug into a set where two wikis hold that name and never understand why
   it got the other one. It now goes in before the arguments.
 
+- **Listing sources could crash while another thread registered one.** The
+  0.19.0 registry snapshot refreshed itself under a lock but handed back the
+  live dict, and `register` inserted into that same dict in place — so a
+  reader iterating it (`list_sources`, lint) in one thread while another
+  registered a source raised `RuntimeError: dictionary changed size during
+  iteration`. A registration now publishes a new dict instead of changing the
+  current one, so what a reader is iterating never changes under it; reads stay
+  O(1) and only the rare registration pays for a copy. Found by 0.19.0's own
+  contention test, which caught it once under full-suite load and not in twenty
+  runs on its own; it ships now with a deterministic reproduction that failed
+  every run before the fix. `sources_gc` also no longer leaves a database
+  connection open behind it, and drops a loop that updated the snapshot of a
+  registry nothing read again.
+
 ### Changed
 
 - **The examples say what they mean, now that a model reads them.** The
