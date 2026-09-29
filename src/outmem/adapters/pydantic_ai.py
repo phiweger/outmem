@@ -25,7 +25,9 @@ so is every paragraph after it, and any paragraph after ``Args:`` — each
 is a second text section. So:
 
 - Everything the model should read sits in one run of prose before
-  ``Args:``, and nothing follows the arguments.
+  ``Args:``, and nothing follows the arguments — not even ``Returns:``,
+  which PydanticAI would send but only by wrapping the description in
+  XML. Say what a tool returns in the prose.
 - Multi-argument tools say how many in their first paragraph
   (``REQUIRES BOTH``, ``REQUIRES ALL THREE``), so a model does not drop
   one, fail validation and burn a retry.
@@ -871,7 +873,7 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
                 tags=["pricing", "contracts"],
             )
 
-        A namespaced slug, and no provenance (a hub page cites nothing):
+        A namespaced slug (provenance is optional):
 
             write_page(
                 slug="abx:penicillin",
@@ -1069,13 +1071,20 @@ def _write_tools(store: WikiStore) -> list[WikiTool]:
 
         For example, complete calls:
 
-            write_page(slug="clinical:sepsis", title="Sepsis",
-                       body="## Erreger\\n\\nGramnegative Erreger dominieren.")
-            append_page(slug="clinical:sepsis",
-                        body="## Diagnostik\\n\\nBlutkulturen vor Therapie.")
-            append_page(slug="clinical:sepsis",
-                        body="## Therapie\\n\\nTherapie binnen 1h.",
-                        provenance=["sources/leitlinie/a1b2c3d4e5f6/document.md"])
+            write_page(
+                slug="clinical:sepsis",
+                title="Sepsis",
+                body="## Erreger\\n\\nGramnegative Erreger dominieren.",
+            )
+            append_page(
+                slug="clinical:sepsis",
+                body="## Diagnostik\\n\\nBlutkulturen vor Therapie.",
+            )
+            append_page(
+                slug="clinical:sepsis",
+                body="## Therapie\\n\\nTherapie binnen 1h.",
+                provenance=["sources/leitlinie/a1b2c3d4e5f6/document.md"],  # from list_sources
+            )
 
         Args:
             slug: Existing page slug.
