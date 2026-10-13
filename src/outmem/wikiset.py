@@ -227,17 +227,20 @@ class WikiSet:
             for slug in store.list_slugs()
         ]
 
-    def backlinks(self, name: str) -> tuple[str, ...]:
+    def backlinks(self, name: str, *, head: str | None = None) -> tuple[str, ...]:
         """Inbound links, qualified — and wiki-local by construction.
 
         Wikilinks do not cross a wiki boundary, so a page's referrers all
         live in its own wiki. Qualifying them anyway keeps every name the
-        caller sees in one namespace.
+        caller sees in one namespace. ``head`` keys the graph where the copy
+        has no history (:meth:`WikiStore.backlinks`); one key serves the set,
+        since the wikis of one repository change together.
         """
         found = self.resolve(name)
         store = self._stores[found.wiki]
         return tuple(
-            f"{found.wiki}{QUALIFIER}{ref}" for ref in store.backlinks(found.slug)
+            f"{found.wiki}{QUALIFIER}{ref}"
+            for ref in store.backlinks(found.slug, head=head)
         )
 
     # -- retrieval -----------------------------------------------------

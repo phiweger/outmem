@@ -871,11 +871,21 @@ class WikiStore:
             max_hits=max_hits,
         )
 
-    def backlinks(self, slug: str) -> tuple[str, ...]:
-        """Slugs of pages that link to ``slug`` at the current HEAD."""
+    def backlinks(self, slug: str, *, head: str | None = None) -> tuple[str, ...]:
+        """Slugs of pages that link to ``slug``.
+
+        The graph is cached per key, and the key is the repository's HEAD
+        unless the caller passes ``head``. That is for a copy with no history:
+        a deployment that ships the pages with ``.git`` stripped has no HEAD,
+        and without a key the graph was empty, so every page read as linked
+        from nowhere. Any string that changes when the pages change will do,
+        such as the commit the copy was cut from or a hash of its content; a
+        key that does not change when they do serves a stale graph.
+        """
         slug = self.resolve_slug(slug)
         validate_slug(slug)
-        return self.backlinks_cache.referrers(slug, head_or_none(self.repo))
+        key = head if head is not None else head_or_none(self.repo)
+        return self.backlinks_cache.referrers(slug, key)
 
     def history(self, slug: str) -> list[CommitInfo]:
         """Per-page commit history (newest first), tracking renames."""

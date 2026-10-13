@@ -3,6 +3,18 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## Unreleased
+
+### Added
+
+- **Backlinks on a copy with no history.** `WikiStore.backlinks(slug, head=…)`
+  and `WikiSet.backlinks(name, head=…)` take the key the graph is cached under
+  from the caller. A deployment that ships the pages with `.git` stripped has
+  no HEAD, and the graph came back empty, so every page read as linked from
+  nowhere (fleming's poke rework, C.4). Any string that changes when the pages
+  do serves: the commit the copy was cut from, or a hash of its content. With
+  no key the behaviour is as before.
+
 ## 0.19.1
 
 ### Fixed

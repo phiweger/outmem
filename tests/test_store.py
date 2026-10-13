@@ -943,6 +943,30 @@ class TestReadOnly:
         assert not (seed.root / ".outmem" / "backlinks.json").exists()
         assert not (seed.root / ".outmem").exists()
 
+    def test_backlinks_of_a_copy_with_no_history_take_the_callers_key(
+        self, tmp_path: Path
+    ) -> None:
+        """A deployment ships the pages with ``.git`` stripped, so there is no
+        HEAD to key the graph on and it came back empty: every page read as
+        linked from nowhere. A key the caller holds (the commit the copy was
+        cut from, a content hash) builds it; a new key rebuilds it."""
+        import shutil
+
+        seed = WikiStore.init(tmp_path / "w")
+        seed.write_page("a", title="A", body="[[b]]\n")
+        seed.write_page("b", title="B", body="just b.\n")
+        seed.close()
+        shutil.rmtree(seed.root / ".git")
+        shutil.rmtree(seed.root / ".outmem", ignore_errors=True)
+
+        store = WikiStore.open(seed.root, read_only=True)
+        assert store.backlinks("b") == (), "no HEAD and no key: nothing to key the graph on"
+        assert store.backlinks("b", head="deploy-1") == ("a",)
+        (seed.root / "wiki" / "pages" / "c.md").write_text(
+            "---\ntitle: C\n---\n[[b]]\n", encoding="utf-8")
+        assert store.backlinks("b", head="deploy-1") == ("a",), "the same key, the same graph"
+        assert set(store.backlinks("b", head="deploy-2")) == {"a", "c"}
+
     def test_backlinks_writes_persist_when_writable(self, tmp_path: Path) -> None:
         """Sanity-check the inverse: a writable store DOES persist the
         backlinks cache. Pins the behaviour we're conditionally
