@@ -37,6 +37,15 @@ history (`git log --grep '^release:'`).
   `mapping values are not allowed here (page line 4, column 8: 'note: a: b')`
   under either parser.
 
+### Downstream
+
+fleming loads the whole of phiweger/wiki in `unreadable()` at boot and again
+for the alias map on the first slug that misses, each pass about 12 s on a
+4-core Xeon and 30 s on its production host, which is most of its cold start
+(phiweger/fleming#639). Its lock installs PyYAML 6.0.3 from binary wheels, which
+carry libyaml, so the pin bump is the whole change; nothing there matches on the
+wording of a parse error.
+
 ## 0.19.1
 
 ### Fixed
