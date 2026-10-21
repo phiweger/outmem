@@ -51,6 +51,60 @@ _FRONTMATTER_RE = re.compile(
 ProvenanceEntry = str | dict[str, Any]
 
 
+def _fastest_safe_loader() -> Any:
+    """libyaml's safe loader when PyYAML was built with it, else PyYAML's own.
+
+    ``CSafeLoader`` swaps only the scanner and parser for libyaml's C
+    ones; its constructor and resolver are ``SafeLoader``'s, so a page
+    resolves to the same values either way. The pure-Python parser is
+    the whole cost of loading a corpus: 11.7 s against 0.9 s for the
+    1,667 pages of four real wikis. The manylinux wheels ship libyaml,
+    so it is usually installed and was going unused; a PyYAML built
+    without it has no ``CSafeLoader`` at all, hence the fallback.
+    """
+    return getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+# Every parse in this module goes through `_LOADER`, never
+# `yaml.safe_load` or a bare `yaml.compose` (whose default is the
+# pure-Python full `Loader`): one stray call puts the slow parser back on
+# every page load and no result would show it.
+_LOADER = _fastest_safe_loader()
+
+
+def _safe_load(raw_yaml: str) -> Any:
+    """``yaml.safe_load`` with the fastest available parser."""
+    return yaml.load(raw_yaml, Loader=_LOADER)
+
+
+def _describe_parse_error(exc: Exception, raw_yaml: str) -> str:
+    """What the parser rejected and where, worded the same by either parser.
+
+    PyYAML's own parser quotes the offending line under its message;
+    libyaml's gives only a line and column. Both count from the top of
+    the frontmatter block, one short of the page's own numbering, where
+    the opening ``---`` is line 1. So the message is rebuilt from the
+    error's parts, each position as a page line with that line's text.
+    An error with no position (the constructor's ``ValueError`` for
+    ``2026-02-30``) keeps its own words.
+    """
+    if not isinstance(exc, yaml.MarkedYAMLError):
+        return str(exc)
+    lines = raw_yaml.splitlines()
+    parts: list[str] = []
+    for what, mark in ((exc.context, exc.context_mark), (exc.problem, exc.problem_mark)):
+        if not what:
+            continue
+        if mark is None:
+            parts.append(what)
+            continue
+        where = f"page line {mark.line + 2}, column {mark.column + 1}"
+        if mark.line < len(lines):
+            where += f": {lines[mark.line]!r}"
+        parts.append(f"{what} ({where})")
+    return "; ".join(parts) or str(exc)
+
+
 @dataclass
 class WikiFrontmatter:
     """Structured representation of a wiki page's YAML frontmatter.
@@ -106,7 +160,7 @@ def parse_wiki_page(
     body = match.group(2)
 
     try:
-        data = yaml.safe_load(raw_yaml)
+        data = _safe_load(raw_yaml)
     except Exception as exc:
         # Deliberately broader than yaml.YAMLError: PyYAML's implicit
         # timestamp resolver matches `2026-02-30`, then calls
@@ -114,7 +168,9 @@ def parse_wiki_page(
         # that escape kills a whole `outmem reindex` (and blocks writeback,
         # which must never fail on a bad page). Every parse failure this
         # function can produce is a FrontmatterError.
-        raise FrontmatterError(f"Frontmatter YAML failed to parse: {exc}") from exc
+        raise FrontmatterError(
+            f"Frontmatter YAML failed to parse: {_describe_parse_error(exc, raw_yaml)}"
+        ) from exc
 
     if not isinstance(data, dict):
         raise FrontmatterError(f"Frontmatter must be a YAML mapping, got {type(data).__name__}.")
@@ -160,7 +216,7 @@ def repair_wiki_page(content: str) -> str | None:
     # every caller of the repair path (read_page, the TOC, the backlink
     # graph, the indexer).
     try:
-        yaml.safe_load(raw_yaml)
+        _safe_load(raw_yaml)
         return None
     except Exception:
         pass
@@ -185,7 +241,7 @@ def repair_wiki_page(content: str) -> str | None:
 
     repaired_yaml = "\n".join(lines)
     try:
-        yaml.safe_load(repaired_yaml)
+        _safe_load(repaired_yaml)
     except Exception:
         # Broad on purpose: only accept a repair that genuinely loads. A
         # narrow `except yaml.YAMLError` would let a page whose repaired
@@ -249,7 +305,7 @@ def _raw_sequence_text(raw_yaml: str, key: str) -> list[str] | None:
     scalars (then the caller falls back to validating the parsed values).
     """
     try:
-        node = yaml.compose(raw_yaml)
+        node = yaml.compose(raw_yaml, Loader=_LOADER)
     except Exception:
         return None
     if not isinstance(node, yaml.MappingNode):

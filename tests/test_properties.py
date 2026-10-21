@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
@@ -156,6 +157,7 @@ class TestDocumentKeyNormalisation:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("each_yaml_parser")
 class TestFrontmatterRoundTrip:
     @given(
         title=_texts,

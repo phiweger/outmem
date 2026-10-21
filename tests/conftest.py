@@ -3,9 +3,37 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
+
+needs_libyaml = pytest.mark.skipif(
+    not hasattr(yaml, "CSafeLoader"), reason="PyYAML is built without libyaml"
+)
+
+
+@pytest.fixture(
+    scope="class",
+    params=["python", pytest.param("libyaml", marks=needs_libyaml)],
+)
+def each_yaml_parser(request: pytest.FixtureRequest) -> Iterator[Any]:
+    """Run the requesting tests once under each parser frontmatter can pick.
+
+    ``outmem.frontmatter`` parses with libyaml when PyYAML has it and
+    with PyYAML's own parser when it doesn't, so a page must mean the
+    same thing under both, and the suite must cover both whichever one
+    this machine has. Class-scoped so Hypothesis tests can take it: a
+    function-scoped fixture fails its health check.
+    """
+    from outmem import frontmatter
+
+    loader = yaml.SafeLoader if request.param == "python" else yaml.CSafeLoader
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(frontmatter, "_LOADER", loader)
+        yield loader
 
 
 @pytest.fixture(autouse=True)

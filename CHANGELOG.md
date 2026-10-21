@@ -3,6 +3,40 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.19.2
+
+### Performance
+
+- **Loading a wiki's pages is about twelve times faster wherever PyYAML has
+  libyaml.** Every page load parsed its frontmatter with PyYAML's pure-Python
+  parser, although the manylinux wheels ship libyaml's C parser, so it was
+  usually installed and going unused. Over the 1,667 pages of four real wikis
+  one full load took 11.7 s and now takes 0.9 s, every page's slug,
+  frontmatter and body unchanged. That pass runs whenever something needs the
+  whole corpus (`WikiStore.unreadable()`, the alias map on the first slug that
+  misses, the index, lint), and a consumer that ran two of them at boot spent
+  most of its cold start there. Only the scanner and parser change: the step
+  that turns a page into values is PyYAML's in both cases, and a PyYAML built
+  without libyaml keeps the pure-Python parser.
+
+### Changed
+
+- **A tab inside a frontmatter value no longer stops a page from loading.**
+  PyYAML's own scanner refuses a tab anywhere in an unquoted value
+  (`title: Foo<TAB>Bar`, a trailing tab, `tags: [a,<TAB>b]`); libyaml reads it
+  as YAML allows, so such a page stops being reported as one that does not
+  parse wherever libyaml is present. The same holds for a Unicode line
+  separator (U+2028, NEL) inside the block. One case goes the other way: a
+  byte-order mark at the start of a line inside the frontmatter, which PyYAML
+  read as part of the key after it, is now a parse error. None of the 1,667
+  pages above contains any of these.
+- **A parse error gives the page's own line number and quotes the line.**
+  libyaml's messages carry a line and column without the line's text, and both
+  parsers counted lines from inside the frontmatter block, one short of the
+  page's numbering. The reason `outmem lint` and `unreadable()` give now reads
+  `mapping values are not allowed here (page line 4, column 8: 'note: a: b')`
+  under either parser.
+
 ## 0.19.1
 
 ### Fixed
