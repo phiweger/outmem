@@ -425,8 +425,10 @@ whose frontmatter won't parse, and — the silent one — a page whose declared
 names, only one of which resolves.
 
 A clean wiki returns `[]`, which is the assertion to put in a consumer's own
-test suite. It is one directory walk, not an O(n) `read()` sweep, and it does
-not require running the whole linter.
+test suite. It does not require running the whole linter, but it does read and
+parse every page, the same pass that builds the index: under a second for 1,700
+pages where PyYAML has libyaml (the manylinux wheels do), about twelve times
+that where it doesn't. Run it once at startup, not per request.
 
 **The path addresses a page; `slug:` is a declaration checked against it.**
 A missing `slug:` is derived from the path rather than being fatal, and a

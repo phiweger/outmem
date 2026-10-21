@@ -706,9 +706,12 @@ class WikiStore:
         """Every page under ``wiki/pages/`` that isn't cleanly addressable.
 
         Returns ``(slug, reason)`` — the load-time audit a consumer needs
-        to know its wiki is sound, without attempting :meth:`read` on
-        every slug (O(n) file reads to learn something one walk can tell
-        you). Covers three defects:
+        to know its wiki is sound, in one call rather than a :meth:`read`
+        per slug. It is still a pass over the whole corpus: the last two
+        defects can only be seen by reading and parsing every page, which
+        costs what building the index does (see
+        :func:`outmem.index.load_editorial_pages`), so run it once at
+        startup rather than per request. Covers three defects:
 
         - a filename whose derived slug fails the slug grammar, so it is
           omitted from :meth:`list_slugs` and unopenable by that name

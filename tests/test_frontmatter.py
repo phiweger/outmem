@@ -14,6 +14,11 @@ from outmem.frontmatter import (
     touch_updated,
 )
 
+# Every test here runs under PyYAML's own parser and under libyaml's:
+# frontmatter picks whichever this PyYAML has, and a page must mean the
+# same thing under both.
+pytestmark = pytest.mark.usefixtures("each_yaml_parser")
+
 
 def test_leading_indentation_survives_the_frontmatter_split() -> None:
     """A body opening with an indented code block must keep its indent.
@@ -108,6 +113,28 @@ def test_malformed_yaml_raises() -> None:
     text = "---\ntitle: [unterminated\n---\n\nbody\n"
     with pytest.raises(FrontmatterError, match="failed to parse"):
         parse_wiki_page(text)
+
+
+def test_a_syntax_error_names_the_page_line_and_quotes_it() -> None:
+    """libyaml's message gives a line and column but not the line's text,
+    and both parsers count from inside the frontmatter block, one short of
+    the page's own numbering. Whoever opens the page to fix it needs the
+    line it is really on, under either parser."""
+    text = "---\ntitle: X\nslug: x\nnote: a: b\n---\n\nbody\n"
+    with pytest.raises(FrontmatterError) as caught:
+        parse_wiki_page(text)
+    assert "page line 4, column 8: 'note: a: b'" in str(caught.value)
+
+
+def test_a_syntax_error_keeps_where_the_broken_construct_began() -> None:
+    """An unclosed `[` is reported where the parser gave up, at the end of
+    the block (and the two parsers disagree on exactly where that is); the
+    line that opened it is the one to fix."""
+    text = "---\ntitle: [unterminated\n---\n\nbody\n"
+    with pytest.raises(FrontmatterError) as caught:
+        parse_wiki_page(text)
+    opened = "while parsing a flow sequence (page line 2, column 8: 'title: [unterminated')"
+    assert opened in str(caught.value)
 
 
 def test_provenance_must_be_list() -> None:
