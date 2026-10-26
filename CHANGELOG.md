@@ -3,7 +3,10 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
-## 0.19.2
+## 0.19.3
+
+0.19.2 was tagged but never reached PyPI: its release build failed on a
+test (see Internal). 0.19.3 is the same change with that test fixed.
 
 ### Performance
 
@@ -43,9 +46,9 @@ history (`git log --grep '^release:'`).
   counted every `.db` file open in the process, which includes stores that
   earlier tests never closed. The cycle collector reclaims those whenever it
   next runs, and when that landed inside the test the count fell from 8 to 7,
-  failing the first 0.19.2 release build on Python 3.12. This release's extra
-  tests had moved the collector's schedule; nothing in outmem changed. A
-  `close()` that releases nothing still fails both tests.
+  failing the 0.19.2 release build on Python 3.12. This release's extra tests
+  had moved the collector's schedule; nothing in outmem changed. A `close()`
+  that releases nothing still fails both tests.
 
 ### Downstream
 
