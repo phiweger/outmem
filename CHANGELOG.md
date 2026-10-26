@@ -37,6 +37,16 @@ history (`git log --grep '^release:'`).
   `mapping values are not allowed here (page line 4, column 8: 'note: a: b')`
   under either parser.
 
+### Internal
+
+- **`test_wikiset`'s handle checks count only their own repository.** They
+  counted every `.db` file open in the process, which includes stores that
+  earlier tests never closed. The cycle collector reclaims those whenever it
+  next runs, and when that landed inside the test the count fell from 8 to 7,
+  failing the first 0.19.2 release build on Python 3.12. This release's extra
+  tests had moved the collector's schedule; nothing in outmem changed. A
+  `close()` that releases nothing still fails both tests.
+
 ### Downstream
 
 fleming loads the whole of phiweger/wiki in `unreadable()` at boot and again
