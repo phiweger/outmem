@@ -301,19 +301,28 @@ class TestToolPalette:
 class TestLifecycle:
     """A set owns its stores, so it has to be able to release them."""
 
-    def _open_db_fds(self) -> int:
+    def _open_db_fds(self, under: Path) -> int:
+        """Database files this process holds open inside ``under``.
+
+        Counted for the test's own repository, never the whole process:
+        earlier tests leave stores they did not close, the cycle collector
+        reclaims those whenever it next runs, and a process-wide count
+        then drops in the middle of a test that had nothing to do with
+        them (0.19.2's release build failed on ``7 == 8`` that way).
+        """
         import os
 
         fds = Path("/proc/self/fd")
         if not fds.is_dir():  # pragma: no cover — non-Linux
             pytest.skip("needs /proc")
+        root = under.resolve()
         n = 0
         for fd in fds.iterdir():
             try:
                 target = os.readlink(fd)
             except OSError:
                 continue
-            if target.endswith(".db"):
+            if target.endswith(".db") and Path(target).is_relative_to(root):
                 n += 1
         return n
 
@@ -322,22 +331,22 @@ class TestLifecycle:
         # lazily and holds them. Closing is what releases them at a time
         # the caller chooses.
         r = Repo.open(repo)
-        before = self._open_db_fds()
+        before = self._open_db_fds(repo)
         for _ in range(3):
             wikis = r.wikiset(audience={"everyone", "hr", "legal"})
             for _name, store in wikis:
                 store.list_sources()
             wikis.close()
-        assert self._open_db_fds() == before
+        assert self._open_db_fds(repo) == before
 
     def test_it_works_as_a_context_manager(self, repo: Path) -> None:
         r = Repo.open(repo)
-        before = self._open_db_fds()
+        before = self._open_db_fds(repo)
         with r.wikiset(audience={"everyone"}) as wikis:
             for _name, store in wikis:
                 store.list_sources()
             assert wikis.list_slugs()
-        assert self._open_db_fds() == before
+        assert self._open_db_fds(repo) == before
 
     def test_dropping_a_set_does_not_release_promptly(self, repo: Path) -> None:
         # The other half of the claim, stated accurately: this is not an
@@ -350,16 +359,16 @@ class TestLifecycle:
 
         r = Repo.open(repo)
         gc.collect()
-        before = self._open_db_fds()
+        before = self._open_db_fds(repo)
         for _ in range(6):
             wikis = r.wikiset(audience={"everyone", "hr", "legal"})
             for _name, store in wikis:
                 store.list_sources()
             del wikis, store, _name
-        held = self._open_db_fds()
+        held = self._open_db_fds(repo)
         assert held > before
         gc.collect()
-        assert self._open_db_fds() == before
+        assert self._open_db_fds(repo) == before
 
 
 class TestTruncationIsVisible:
