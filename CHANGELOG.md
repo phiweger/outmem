@@ -3,6 +3,46 @@
 Notable changes per release. Versions before 0.10.0 are in the git
 history (`git log --grep '^release:'`).
 
+## 0.20.0
+
+### Added
+
+- **A federated page search can be narrowed to some wikis of the set.**
+  `WikiSet.search_pages(question, k=5, wikis=("lra",))` runs the named wikis'
+  pipelines alone; `wikis=None`, the default, searches every one as before. A
+  host that knows which wiki a question belongs to pays for that wiki's
+  pipeline, a rerank gate call included, and no other wiki's pages compete in
+  the fusion. The named wikis are searched in the set's order whatever order
+  they are passed in, so the same names always fuse the same way, and a bare
+  string names one wiki. A name the set does not hold, a wiki of the
+  repository the audience does not reach among them, raises `OutmemError`
+  listing what the set holds; an empty selection raises too. Nothing is
+  searched on a refused scope, so "no pages matched" is never said about a
+  wiki nobody searched.
+
+  The set's own tool, `search_wiki` from `outmem.adapters.wikiset`, takes a
+  `wiki` argument that passes through to it.
+
+### Changed
+
+- **Every wiki's best page survives the fused ranking's cut.** Each wiki's
+  first page fuses to the same score, the highest any page can reach, so the
+  fused list opens with one top page per wiki, in registry order, and the cut
+  at `k` then dropped whole wikis by their position in the registry: with six
+  wikis and `k=5`, the sixth wiki's best page never appeared, whatever it
+  held. `search_pages` now returns `max(k, wikis that ranked something)`
+  pages. Up to `k` wikis the result is `k` pages long, unchanged; a caller
+  that sized a display to exactly `k` rows on a set of more than `k` wikis
+  receives more.
+
+### Downstream
+
+fleming reads up to four wikis per reader and gives its librarian a roster of
+the reader's wikis with their namespaces (phiweger/fleming, docs/ADR.md,
+2026-11-24). Its `search_wiki` scopes to one wiki on 0.19.3 by building a set
+of that wiki's store alone; on 0.20.0 it passes `wikis=` instead, which reuses
+the set's cached retriever rather than building a second one per wiki.
+
 ## 0.19.3
 
 0.19.2 was tagged but never reached PyPI: its release build failed on a

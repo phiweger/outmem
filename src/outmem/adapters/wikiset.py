@@ -151,7 +151,7 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
             )
         return "\n".join(lines)
 
-    def search_wiki(question: str, k: int = 5) -> str:
+    def search_wiki(question: str, k: int = 5, wiki: str = "") -> str:
         """Find the pages most likely to answer a question, across every wiki.
 
         The primary search tool: ask a natural-language question, get back
@@ -159,21 +159,27 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         came from. Every wiki runs the pipeline *it* configures
         (`retrieval.strategy`), and the rankings are fused, so a
         compartment holding the answer outranks the open core rather than
-        queueing behind it. Call `read_page` on the interesting ones.
+        queueing behind it; every wiki's best page is returned even when
+        that is more than `k`. Call `read_page` on the interesting ones.
+
+        Name a `wiki` when the question belongs to one: only that wiki is
+        searched, and nothing from the others competes with its pages.
 
         Use this for question-shaped queries. For the exact line a literal
         string appears on, use `grep_wiki`.
 
-        For example, a complete call:
+        For example, complete calls:
 
             search_wiki(question="how is the list price calculated?")
+            search_wiki(question="who signs off an NDA?", wiki="legal")
 
         Args:
             question: A natural-language question.
             k: How many pages to return.
+            wiki: One wiki of this session to search alone, or empty for all.
         """
         try:
-            found = wikis.search_pages(question, k=k)
+            found = wikis.search_pages(question, k=k, wikis=(wiki,) if wiki else None)
         except OutmemError as exc:
             return f"(search_wiki failed: {exc})"
         if not found.pages:
@@ -189,9 +195,9 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
             )
         lines: list[str] = []
         for qualified in found.pages:
-            wiki, slug = split_qualified(qualified)
+            owner, slug = split_qualified(qualified)
             try:
-                store = wikis.store(wiki) if wiki else None
+                store = wikis.store(owner) if owner else None
                 body = (
                     store.read(slug).body.replace("\n", " ").strip() if store else ""
                 )
