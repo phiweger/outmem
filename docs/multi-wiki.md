@@ -278,7 +278,12 @@ and the per-wiki rankings are fused by Reciprocal Rank Fusion — the same metho
 return order, not comparable scores: one wiki's third-best is not commensurable
 with another's. A wiki whose strategy needs a semantic index it hasn't built
 falls back to bm25 for that query and says so, and a wiki that fails outright
-is reported without blanking the rest.
+is reported without blanking the rest. Every wiki's best page is kept: each
+wiki's first page fuses to the same score, so the result is at most `max(k,
+wikis that ranked something)` pages long, and no wiki loses its best page to its position
+in the registry. `search_pages(..., wikis=("legal",))`, and the tool's `wiki`
+argument, search the named wikis of the set alone; a name the set does not hold
+is an error that lists the set.
 
 `search_wiki` returns qualified page citations (`[[legal/nda]]`), not raw
 chunks — the same contract as the single-wiki tool. When nothing matches, the

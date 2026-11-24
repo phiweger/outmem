@@ -286,8 +286,19 @@ class WikiSet:
                 clipped.append(name)
         return FederatedSearch(hits=tuple(hits), truncated=tuple(clipped))
 
-    def search_pages(self, question: str, *, k: int = 5) -> FederatedPages:
+    def search_pages(
+        self, question: str, *, k: int = 5, wikis: Sequence[str] | None = None
+    ) -> FederatedPages:
         """Rank pages across the set using each wiki's *configured* pipeline.
+
+        ``wikis`` narrows the search to those wikis of the set, by name;
+        ``None`` searches every one. A caller that knows which wiki a
+        question belongs to pays for that wiki's pipeline alone, and no
+        other wiki's ranking competes with it in the fusion below. The
+        wikis are searched in the set's order whatever order they are
+        named in, so the same names always fuse the same way. A name the
+        set does not hold is an error that lists the set, never a silent
+        search of nothing.
 
         Every wiki runs the strategy its own ``retrieval.strategy`` names
         — rerank, hybrid, bm25, whatever — rather than a raw vector
@@ -304,13 +315,22 @@ class WikiSet:
         than concatenation because the retrievers return *order* and no
         comparable score: one wiki's third-best is not commensurable with
         another's, and RRF is the house answer to exactly that.
+
+        EVERY WIKI'S BEST PAGE SURVIVES THE CUT. Each wiki's first page
+        fuses to the same score, the highest any page can reach, so the
+        fused ranking opens with one top page per wiki, in the set's
+        order. Cut at ``k`` with more wikis ranking than ``k``, that
+        dropped whole wikis by their position in the registry, whatever
+        their pages held. The result is therefore at most ``max(k, wikis
+        that ranked something)`` pages long; with no more wikis ranking than
+        ``k`` it is at most ``k``, as before.
         """
         from outmem.optimize.blocks import _reciprocal_rank_fusion
 
         ranked: list[tuple[str, ...]] = []
         notes: list[str] = []
         searched: list[str] = []
-        for name, store in self._stores.items():
+        for name, store in self._chosen(wikis):
             searched.append(name)
             try:
                 result = self._retriever_for(store).retrieve(question, k=k)
@@ -326,14 +346,42 @@ class WikiSet:
         # fusion *within* its hybrid strategy — a different fusion, over its
         # own legs. Reading it here picked whichever wiki came last, which
         # is a silent arbitrary choice when they disagree.
+        keep = max(k, sum(1 for slugs in ranked if slugs))
         fused = (
-            _reciprocal_rank_fusion(ranked, DEFAULT_OPTIMIZE_RRF_K)[:k]
+            _reciprocal_rank_fusion(ranked, DEFAULT_OPTIMIZE_RRF_K)[:keep]
             if ranked
             else ()
         )
         return FederatedPages(
             pages=fused, notes=tuple(notes), searched=tuple(searched)
         )
+
+    def _chosen(
+        self, names: Sequence[str] | None
+    ) -> list[tuple[str, WikiStore]]:
+        """The ``(name, store)`` pairs a search covers, in the set's order:
+        every wiki for ``None``, else the ones ``names`` names.
+
+        Raises :class:`OutmemError` for an empty selection or a name the set
+        does not hold, naming the set: a search narrowed to nothing would
+        report "no pages matched" about a wiki nobody searched.
+        """
+        if names is None:
+            return list(self._stores.items())
+        if isinstance(names, str):
+            # A bare string is a sequence of letters; searching wikis "o",
+            # "p", "e", "n" is never what a caller meant.
+            names = (names,)
+        wanted = set(names)
+        if not wanted:
+            raise OutmemError("search narrowed to no wiki; pass None to search them all.")
+        unknown = sorted(wanted - set(self._stores))
+        if unknown:
+            raise OutmemError(
+                f"no such wiki in this set: {', '.join(map(repr, unknown))} "
+                f"(it holds: {', '.join(self._stores)})"
+            )
+        return [(n, s) for n, s in self._stores.items() if n in wanted]
 
     def _retriever_for(self, store: WikiStore) -> Retriever:
         """Build-or-reuse this wiki's retriever, keyed by store and strategy.

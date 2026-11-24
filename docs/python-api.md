@@ -712,7 +712,10 @@ with repo.wikiset(audience={"legal", "everyone"}, read_only=True) as wikis:
     wikis.read("legal/nda")                  # qualified: that wiki only
     wikis.read("pricing")                    # bare: first wiki holding it
     wikis.resolve("shared").shadowed         # ("legal/shared",) — what a bare name hid
-    wikis.search_pages("…", k=5)             # each wiki's configured pipeline, RRF-fused
+    wikis.search_pages("…", k=5)             # each wiki's configured pipeline, RRF-fused;
+                                             # every wiki's best page kept: at most
+                                             # max(k, wikis that ranked something) long
+    wikis.search_pages("…", wikis=("legal",))   # that wiki's pipeline alone
     wikis.search("NDA").hits                 # every hit carries .wiki
     wikis.search("NDA").truncated            # which wikis clipped at the output cap
     wikis.semantic_find_similar("…", top_k=5)   # merged, then cut — not cut per wiki

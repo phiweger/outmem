@@ -573,6 +573,120 @@ class TestConfiguredPipelineIsFederated:
         wikis.close()
 
 
+class _Ranked:
+    """A retriever that answers from a fixed list: what the fusion is handed,
+    without the pipeline that would produce it."""
+
+    name = "fixed"
+
+    def __init__(self, slugs: tuple[str, ...]) -> None:
+        self.slugs = slugs
+
+    def retrieve(self, question: str, *, k: int) -> object:
+        from outmem.optimize.blocks import RetrievalResult
+
+        return RetrievalResult(self.slugs[:k])
+
+
+class TestScopedSearchAndTheCut:
+    """`search_pages(wikis=...)` searches the named wikis alone, and the
+    fused ranking keeps every wiki's best page.
+
+    The cut used to be `k` whatever the set held. Every wiki's first page
+    fuses to the same score, so with more wikis ranking than `k` the last
+    wikis in the registry lost their best page to their position.
+    """
+
+    def _fixed(
+        self, monkeypatch: pytest.MonkeyPatch, per_wiki: dict[str, tuple[str, ...]]
+    ) -> list[str]:
+        asked: list[str] = []
+
+        def fixed(self: WikiSet, store: WikiStore) -> object:
+            asked.append(store.wiki_name or "")
+            return _Ranked(per_wiki.get(store.wiki_name or "", ()))
+
+        monkeypatch.setattr(WikiSet, "_retriever_for", fixed)
+        return asked
+
+    def test_a_scoped_search_runs_only_the_named_wiki(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        asked = self._fixed(monkeypatch, {"open": ("a", "b"), "hr": ("c",), "legal": ("d",)})
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "hr", "legal"})
+        found = wikis.search_pages("q", k=5, wikis=("hr",))
+        assert found.pages == ("hr/c",)
+        assert found.searched == ("hr",) and asked == ["hr"]
+        wikis.close()
+
+    def test_named_wikis_are_searched_in_the_sets_order(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        asked = self._fixed(monkeypatch, {"open": ("a",), "legal": ("d",)})
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "hr", "legal"})
+        found = wikis.search_pages("q", k=5, wikis=("legal", "open"))
+        assert found.searched == ("open", "legal") and asked == ["open", "legal"]
+        assert found.pages == ("open/a", "legal/d")
+        wikis.close()
+
+    def test_a_bare_string_names_one_wiki(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fixed(monkeypatch, {"legal": ("d",)})
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "legal"})
+        assert wikis.search_pages("q", wikis="legal").searched == ("legal",)  # type: ignore[arg-type]
+        wikis.close()
+
+    @pytest.mark.parametrize("names", [("nowhere",), ("open", "hr"), ()])
+    def test_a_name_the_set_lacks_or_no_name_is_an_error(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch, names: tuple[str, ...]
+    ) -> None:
+        # `hr` exists in the repository but is not in this audience's set: a
+        # scope never reaches past what the set was given.
+        asked = self._fixed(monkeypatch, {"open": ("a",)})
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "legal"})
+        with pytest.raises(OutmemError) as err:
+            wikis.search_pages("q", wikis=names)
+        assert asked == [], "nothing is searched on a refused scope"
+        if names:
+            assert "it holds: open, legal" in str(err.value)
+        wikis.close()
+
+    def test_every_wikis_best_page_survives_the_cut(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fixed(monkeypatch, {"open": ("a1", "a2"), "hr": ("b1", "b2"), "legal": ("c1",)})
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "hr", "legal"})
+        found = wikis.search_pages("q", k=2)
+        # Three wikis ranked, so three pages: each one's first, in set order.
+        assert found.pages == ("open/a1", "hr/b1", "legal/c1")
+        # Unchanged, and so not a check of the new cut: with no more wikis
+        # ranking than k, the result is at most k pages, here all five.
+        assert len(wikis.search_pages("q", k=5).pages) == 5
+        wikis.close()
+
+    def test_a_wiki_that_ranked_nothing_does_not_widen_the_cut(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fixed(monkeypatch, {"open": ("a1", "a2", "a3"), "hr": (), "legal": ()})
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "hr", "legal"})
+        assert wikis.search_pages("q", k=2).pages == ("open/a1", "open/a2")
+        wikis.close()
+
+    def test_the_tool_scopes_to_the_wiki_it_is_given(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from outmem.adapters.wikiset import wikiset_read_tools
+
+        self._fixed(monkeypatch, {"open": ("pricing",), "legal": ("nda",)})
+        wikis = Repo.open(repo).wikiset(audience={"everyone", "legal"})
+        search = {t.__name__: t for t in wikiset_read_tools(wikis)}["search_wiki"]
+        out = search("who signs off an NDA?", wiki="legal")
+        assert "legal/nda" in out and "open/pricing" not in out
+        assert "search_wiki failed" in search("q", wiki="nowhere")
+        wikis.close()
+
+
 class TestEmptyResultIsDistinguishable:
     """"Nothing found" and "retrieval broke" must not read the same.
 
@@ -605,7 +719,7 @@ class TestEmptyResultIsDistinguishable:
         monkeypatch.setattr(
             WikiSet,
             "search_pages",
-            lambda self, q, *, k=5: FederatedPages(
+            lambda self, q, *, k=5, wikis=None: FederatedPages(
                 pages=(), notes=("open: embedder unreachable",), searched=("open",)
             ),
         )
