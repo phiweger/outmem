@@ -660,7 +660,8 @@ class TestScopedSearchAndTheCut:
         found = wikis.search_pages("q", k=2)
         # Three wikis ranked, so three pages: each one's first, in set order.
         assert found.pages == ("open/a1", "hr/b1", "legal/c1")
-        # Up to k wikis the length is k, as it always was.
+        # Unchanged, and so not a check of the new cut: with no more wikis
+        # ranking than k, the result is at most k pages, here all five.
         assert len(wikis.search_pages("q", k=5).pages) == 5
         wikis.close()
 

@@ -30,18 +30,19 @@ history (`git log --grep '^release:'`).
   fused list opens with one top page per wiki, in registry order, and the cut
   at `k` then dropped whole wikis by their position in the registry: with six
   wikis and `k=5`, the sixth wiki's best page never appeared, whatever it
-  held. `search_pages` now returns `max(k, wikis that ranked something)`
-  pages. Up to `k` wikis the result is `k` pages long, unchanged; a caller
-  that sized a display to exactly `k` rows on a set of more than `k` wikis
-  receives more.
+  held. `search_pages` now returns at most `max(k, wikis that ranked
+  something)` pages. With no more wikis ranking than `k` it returns at most
+  `k`, unchanged; a caller that sized a display to `k` rows on a set of more
+  than `k` wikis can receive more.
 
 ### Downstream
 
 fleming reads up to four wikis per reader and gives its librarian a roster of
 the reader's wikis with their namespaces (phiweger/fleming, docs/ADR.md,
 2026-11-24). Its `search_wiki` scopes to one wiki on 0.19.3 by building a set
-of that wiki's store alone; on 0.20.0 it passes `wikis=` instead, which reuses
-the set's cached retriever rather than building a second one per wiki.
+of that wiki's store alone; moving to 0.20.0 it is to pass `wikis=` instead,
+which reuses the set's cached retriever rather than building a second one per
+wiki (phiweger/fleming#806).
 
 ## 0.19.3
 

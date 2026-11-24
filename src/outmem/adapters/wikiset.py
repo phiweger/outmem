@@ -152,7 +152,7 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
         return "\n".join(lines)
 
     def search_wiki(question: str, k: int = 5, wiki: str = "") -> str:
-        """Find the pages most likely to answer a question, across every wiki.
+        """Find the pages most likely to answer a question, across the wikis or in one.
 
         The primary search tool: ask a natural-language question, get back
         the most relevant whole pages, each qualified with the wiki it
@@ -175,7 +175,8 @@ def wikiset_read_tools(wikis: WikiSet) -> list[Callable[..., Any]]:
 
         Args:
             question: A natural-language question.
-            k: How many pages to return.
+            k: How many pages to return; more when more wikis than `k` each
+                rank a page, since every wiki's best page is kept.
             wiki: One wiki of this session to search alone, or empty for all.
         """
         try:

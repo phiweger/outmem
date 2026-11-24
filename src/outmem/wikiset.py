@@ -321,9 +321,9 @@ class WikiSet:
         fused ranking opens with one top page per wiki, in the set's
         order. Cut at ``k`` with more wikis ranking than ``k``, that
         dropped whole wikis by their position in the registry, whatever
-        their pages held. The result is therefore ``max(k, wikis that
-        ranked something)`` pages long; up to ``k`` wikis it is ``k``, as
-        before.
+        their pages held. The result is therefore at most ``max(k, wikis
+        that ranked something)`` pages long; with no more wikis ranking than
+        ``k`` it is at most ``k``, as before.
         """
         from outmem.optimize.blocks import _reciprocal_rank_fusion
 
